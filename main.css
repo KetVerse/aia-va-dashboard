@@ -1,0 +1,193 @@
+/* ── Global ─────────────────────────────────────────────────────────────── */
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f0f4f8;
+    color: #1a1a2e;
+    margin: 0;
+    padding: 0;
+}
+
+/* ── Page Header ────────────────────────────────────────────────────────── */
+.page-header h1 {
+    font-size: 24px;
+    font-weight: 700;
+    color: #1a3a6b;
+    margin: 16px 0 12px 0;
+    padding-bottom: 10px;
+    border-bottom: 3px solid #1a7fc4;
+}
+
+/* ── Filter Bar — FORCE HORIZONTAL ─────────────────────────────────────── */
+.filter-bar {
+    background: white;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 16px !important;
+}
+
+.filter-bar > * {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+}
+
+.filter-item {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+}
+
+/* ── KPI Cards ──────────────────────────────────────────────────────────── */
+.kpi-card {
+    border-radius: 10px;
+    padding: 12px 10px 10px 10px;
+    text-align: center;
+    min-height: 76px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    margin: 3px 3px 10px 3px;
+}
+
+.kpi-card > p,
+.kpi-card > div > p {
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.6px !important;
+    opacity: 0.88 !important;
+    margin: 0 0 4px 0 !important;
+    color: white !important;
+    line-height: 1.3 !important;
+}
+
+.kpi-value {
+    font-size: 26px !important;
+    font-weight: 700 !important;
+    color: white !important;
+    display: block !important;
+    margin-top: 2px !important;
+    line-height: 1.1 !important;
+}
+
+.kpi-blue   { background: #1a7fc4; }
+.kpi-green  { background: #16a34a; }
+.kpi-red    { background: #dc2626; }
+.kpi-orange { background: #ea580c; }
+.kpi-grey   { background: #475569; }
+
+/* ── Chart Cards ────────────────────────────────────────────────────────── */
+.chart-card {
+    background: white;
+    border-radius: 10px;
+    padding: 16px 18px 18px 18px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+
+.chart-card > p strong,
+.chart-card > div > p strong {
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    color: #1a3a6b !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    display: block !important;
+    padding-bottom: 10px !important;
+    margin-bottom: 10px !important;
+    border-bottom: 2px solid #e2e8f0 !important;
+}
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+.data-table {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.data-table table,
+table.taipy-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    font-size: 13px !important;
+}
+
+.data-table thead tr th,
+table.taipy-table thead tr th,
+.taipy-table th {
+    background: #1a3a6b !important;
+    color: white !important;
+    font-weight: 600 !important;
+    font-size: 11px !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.4px !important;
+    padding: 9px 12px !important;
+    text-align: left !important;
+    white-space: nowrap !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    display: table-cell !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 5 !important;
+}
+
+.data-table td,
+.taipy-table td {
+    padding: 7px 12px !important;
+    border-bottom: 1px solid #f1f5f9 !important;
+    color: #334155 !important;
+    white-space: nowrap !important;
+    font-size: 13px !important;
+}
+
+tr.total-row td,
+.data-table tr.total-row td {
+    background: #dde8f4 !important;
+    font-weight: 700 !important;
+    color: #1a3a6b !important;
+    border-top: 2px solid #b0c8e8 !important;
+}
+
+.data-table tbody tr:hover td {
+    background: #eff6ff !important;
+}
+
+/* ── Navbar ─────────────────────────────────────────────────────────────── */
+.taipy-navbar {
+    background: #1a3a6b !important;
+    padding: 0 24px !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 100 !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
+}
+
+.taipy-navbar a {
+    color: rgba(255,255,255,0.75) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    padding: 14px 18px !important;
+    text-decoration: none !important;
+    display: inline-block !important;
+}
+
+.taipy-navbar a:hover,
+.taipy-navbar a.active {
+    color: white !important;
+    border-bottom: 3px solid #38bdf8 !important;
+}
+
+/* Fix Taipy grid layout — prevent wrapping */
+.taipy-layout {
+    display: grid !important;
+    grid-auto-flow: row !important;
+    align-items: start !important;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .kpi-value { font-size: 20px !important; }
+    .filter-bar { flex-wrap: wrap !important; }
+}

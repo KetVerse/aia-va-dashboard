@@ -1,0 +1,7 @@
+taipy>=4.1.0
+psycopg2-binary>=2.9.0
+pandas>=2.2.0,<3.0.0
+plotly>=5.18.0
+python-dotenv>=1.0.0
+python-dateutil>=2.8.0
+numpy>=1.26.0
