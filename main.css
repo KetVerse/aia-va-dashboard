@@ -7,6 +7,55 @@ body {
     padding: 0;
 }
 
+/* ── Navbar ─────────────────────────────────────────────────────────────── */
+.main-nav,
+.taipy-navbar {
+    background: #1a3a6b !important;
+    padding: 0 24px !important;
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 100 !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
+    display: flex !important;
+    align-items: center !important;
+    min-height: 50px !important;
+}
+
+/* every nav item white by default … */
+.main-nav a, .taipy-navbar a,
+.main-nav a *, .taipy-navbar a *,
+.main-nav .MuiTab-root, .main-nav .MuiButtonBase-root,
+.main-nav .MuiTab-root *, .main-nav button, .main-nav button * {
+    color: #ffffff !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    text-decoration: none !important;
+    letter-spacing: 0.3px !important;
+}
+
+.main-nav a, .taipy-navbar a {
+    padding: 8px 16px !important;
+    margin: 6px 4px !important;
+    border-radius: 6px !important;
+    display: inline-block !important;
+    transition: background 0.15s, color 0.15s !important;
+}
+
+.main-nav a:hover, .taipy-navbar a:hover {
+    background: rgba(255,255,255,0.12) !important;
+    color: #ffffff !important;
+}
+
+/* … active / selected item orange */
+.main-nav a.active, .taipy-navbar a.active,
+.main-nav a.active *, .taipy-navbar a.active *,
+.main-nav .Mui-selected, .main-nav .Mui-selected *,
+.main-nav a[aria-current], .main-nav a[aria-current] * {
+    color: #ea580c !important;
+    font-weight: 700 !important;
+    border-bottom: none !important;
+}
+
 /* ── Page Header ────────────────────────────────────────────────────────── */
 .page-header h1 {
     font-size: 24px;
@@ -17,27 +66,28 @@ body {
     border-bottom: 3px solid #1a7fc4;
 }
 
-/* ── Filter Bar — FORCE HORIZONTAL ─────────────────────────────────────── */
+/* ── Filter Bar — horizontal, one line ─────────────────────────────────── */
 .filter-bar {
     background: white;
     border-radius: 10px;
     padding: 14px 18px;
     margin-bottom: 16px;
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-    display: flex !important;
-    flex-direction: row !important;
-    flex-wrap: nowrap !important;
-    align-items: center !important;
-    gap: 16px !important;
 }
 
-.filter-bar > * {
-    flex: 1 1 0 !important;
-    min-width: 0 !important;
+.filter-bar .taipy-layout {
+    width: 100% !important;
+    align-items: end !important;
 }
 
-.filter-item {
-    flex: 1 1 0 !important;
+/* every control (date pickers, dropdowns) fills its grid cell */
+.filter-bar .taipy-layout > * > *,
+.filter-bar .MuiFormControl-root,
+.filter-bar .MuiTextField-root,
+.filter-bar .MuiAutocomplete-root,
+.filter-bar .taipy-date,
+.filter-bar .taipy-selector {
+    width: 100% !important;
     min-width: 0 !important;
 }
 
@@ -49,6 +99,11 @@ body {
     min-height: 76px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.12);
     margin: 3px 3px 10px 3px;
+}
+
+/* all KPI card text (label + value) is white, every page */
+.kpi-card, .kpi-card * {
+    color: #ffffff !important;
 }
 
 .kpi-card > p,
@@ -100,7 +155,7 @@ body {
     border-bottom: 2px solid #e2e8f0 !important;
 }
 
-/* ── Tables ─────────────────────────────────────────────────────────────── */
+/* ── Taipy native tables (Discard/Lost/Parked/etc) ──────────────────────── */
 .data-table {
     width: 100%;
     overflow-x: auto;
@@ -142,41 +197,72 @@ table.taipy-table thead tr th,
     font-size: 13px !important;
 }
 
-tr.total-row td,
-.data-table tr.total-row td {
-    background: #dde8f4 !important;
-    font-weight: 700 !important;
-    color: #1a3a6b !important;
-    border-top: 2px solid #b0c8e8 !important;
-}
-
 .data-table tbody tr:hover td {
     background: #eff6ff !important;
 }
 
-/* ── Navbar ─────────────────────────────────────────────────────────────── */
-.taipy-navbar {
-    background: #1a3a6b !important;
-    padding: 0 24px !important;
-    position: sticky !important;
-    top: 0 !important;
-    z-index: 100 !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
-}
-
-.taipy-navbar a {
-    color: rgba(255,255,255,0.75) !important;
-    font-size: 13px !important;
-    font-weight: 500 !important;
-    padding: 14px 18px !important;
-    text-decoration: none !important;
-    display: inline-block !important;
-}
-
-.taipy-navbar a:hover,
-.taipy-navbar a.active {
+/* Sort label stays white on dark header */
+.data-table .MuiTableSortLabel-root,
+.data-table .MuiTableSortLabel-root.MuiTableSortLabel-active,
+.data-table .MuiTableSortLabel-root:hover {
     color: white !important;
-    border-bottom: 3px solid #38bdf8 !important;
+}
+.data-table .MuiTableSortLabel-icon {
+    color: white !important;
+    opacity: 0.7 !important;
+}
+.data-table .MuiTableSortLabel-root.MuiTableSortLabel-active .MuiTableSortLabel-icon {
+    opacity: 1 !important;
+}
+
+/* ── Custom data-grid iframe ────────────────────────────────────────────── */
+.grid-frame {
+    display: block !important;
+    width: 100% !important;
+    border: none !important;
+    border-radius: 6px !important;
+    overflow: hidden !important;
+}
+
+/* Hidden per-session data holder read by the grid iframe */
+.gridholder {
+    display: none !important;
+}
+
+/* Hidden bridge input the pie iframe writes the clicked slice into */
+.piebridge {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+
+/* Active cross-filter indicator under the channel pie */
+.active-filter {
+    display: flex !important;
+    align-items: center !important;
+    gap: 12px !important;
+    margin-top: 8px !important;
+    padding: 8px 12px !important;
+    background: #eff6ff !important;
+    border: 1px solid #bfdbfe !important;
+    border-radius: 8px !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    color: #1a3a6b !important;
+}
+.active-filter .reset-btn button,
+.active-filter .reset-btn {
+    background: #1a7fc4 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 6px !important;
+    padding: 4px 12px !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    cursor: pointer !important;
 }
 
 /* Fix Taipy grid layout — prevent wrapping */

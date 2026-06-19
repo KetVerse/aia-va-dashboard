@@ -3,6 +3,12 @@ AIA + VA Operations Dashboard — 5 Pages
 Run: python main.py
 """
 import os
+import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 import pandas as pd
 import numpy as np
 from datetime import date
@@ -10,9 +16,298 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 import psycopg2
 import plotly.graph_objects as go
-from taipy.gui import Gui
+from flask import Flask
+from taipy.gui import Gui, navigate
+
+from grid_server import grid_bp, grid_payload_b64, pie_payload_b64
 
 load_dotenv()
+
+# Flask app hosting the custom sortable data grids (served into iframes).
+flask_app = Flask(__name__)
+flask_app.register_blueprint(grid_bp)
+
+_PIE_COLORS = ["#1a7fc4", "#16a34a", "#ea580c", "#8b5cf6", "#dc2626",
+               "#0891b2", "#ca8a04", "#475569", "#db2777", "#65a30d"]
+
+def _make_pie(df, label_col, value_col, height=340):
+    """Pie with labels+percent pulled OUTSIDE the slices, bold and high-contrast,
+    with leader lines. Clicking a legend entry isolates that slice (native Plotly)."""
+    if df is None or len(df) == 0 or value_col not in df.columns:
+        return go.Figure()
+    labels = df[label_col].astype(str).tolist()
+    values = df[value_col].tolist()
+    fig = go.Figure(go.Pie(
+        labels=labels, values=values, sort=False, direction="clockwise",
+        hole=0.45,
+        textposition="outside",
+        textinfo="label+value+percent",
+        texttemplate="<b>%{label}</b><br>%{value:,} (%{percent})",
+        textfont={"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"},
+        outsidetextfont={"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"},
+        marker={"colors": _PIE_COLORS, "line": {"color": "white", "width": 2}},
+        pull=[0.02] * len(labels),
+        hovertemplate="<b>%{label}</b><br>%{value:,} • %{percent}<extra></extra>",
+        automargin=True,
+    ))
+    fig.update_layout(
+        margin={"l": 30, "r": 30, "t": 20, "b": 20}, height=height,
+        paper_bgcolor="rgba(0,0,0,0)", showlegend=True,
+        legend={"orientation": "h", "y": -0.08, "x": 0.5, "xanchor": "center",
+                "font": {"size": 11, "family": "Inter,sans-serif"}},
+        font={"family": "Inter,sans-serif", "size": 12},
+    )
+    return fig
+
+def _make_funnel(stages, values, labels):
+    """Horizontal funnel: stage names on the LEFT, value labels INSIDE when they
+    fit and OUTSIDE (to the right) for bars too small to hold them."""
+    maxv = max(values) if values and max(values) else 1
+    tpos = ["outside" if (v / maxv) < 0.22 else "inside" for v in values]
+    fig = go.Figure(go.Funnel(
+        y=stages, x=values,
+        text=labels, textinfo="text", textposition=tpos,
+        insidetextfont={"size": 16, "color": "white", "family": "Inter,sans-serif"},
+        outsidetextfont={"size": 16, "color": "#1a3a6b", "family": "Inter,sans-serif"},
+        marker={"color": ["#90CAF9", "#42A5F5", "#1E88E5", "#1976D2", "#1565C0"]},
+        connector={"line": {"color": "#cbd5e1", "width": 1}},
+    ))
+    fig.update_layout(**aia_funnel_layout)
+    return fig
+
+
+def _make_trend(labels, dc, qual):
+    """Line + column combo (Power BI style): DC as blue bars, Qualified as a
+    dark-blue line with markers; value labels in soft rounded boxes; bold dates."""
+    xb = [f"<b>{l}</b>" for l in labels]   # slightly bold date ticks
+    bar_c, line_c = "#1a7fc4", "#1f4e79"
+    fig = go.Figure()
+    fig.add_bar(x=xb, y=dc, name="DC", marker_color=bar_c, marker_line_width=0,
+                text=[str(d) if d else "" for d in dc], textposition="outside",
+                textfont={"size": 10, "color": "#1a3a6b", "family": "Inter,sans-serif"},
+                cliponaxis=False)
+    fig.add_scatter(x=xb, y=qual, name="Qualified", mode="lines+markers",
+                    line={"color": line_c, "width": 3, "shape": "spline"},
+                    marker={"size": 7, "color": line_c})
+
+    # soft rounded label boxes for the LINE points only
+    anns = []
+    for x, q in zip(xb, qual):
+        if q:
+            anns.append(dict(x=x, y=q, text=f"<b>{q}</b>", showarrow=False, yshift=13,
+                             bgcolor="#e6edf6", bordercolor="#9fb6d4", borderpad=3,
+                             font=dict(size=10, color=line_c, family="Inter,sans-serif")))
+    fig.update_layout(
+        barmode="group", height=360, annotations=anns,
+        margin={"l": 40, "r": 20, "t": 30, "b": 90},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter,sans-serif", "size": 12},
+        legend={"orientation": "h", "y": -0.34, "x": 0},
+        xaxis={"title": "", "tickangle": -45,
+               "tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#1a3a6b"}},
+        yaxis={"title": "", "showgrid": True, "gridcolor": "#eef2f7"},
+    )
+    return fig
+
+
+def _usage_28(email):
+    """Usage in the last 28 days for a customer's account. Returns
+    (active_days_count, streak) where streak is a 28-char string of '1'/'0'
+    with index 0 = today, index 27 = today-27d (any upload OR sync that day)."""
+    ac = _EMAIL_ACCT.get(str(email).lower().strip())
+    today = pd.Timestamp(date.today()).normalize()
+    if ac is None:
+        return 0, "0" * 28
+    start = today - pd.Timedelta(days=27)
+    days = set()
+    if "date" in _UPL.columns:
+        u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)]
+        if "total_uploads" in u.columns:
+            u = u[u["total_uploads"].fillna(0) > 0]
+        days |= set(u["date"].dt.normalize())
+    if "event_date" in _SYN.columns:
+        sy = _SYN[(_SYN["account_id"] == ac) & (_SYN["event_date"] >= start) & (_SYN["event_date"] <= today)]
+        if "items_count" in sy.columns:
+            sy = sy[sy["items_count"].fillna(0) > 0]
+        days |= set(sy["event_date"].dt.normalize())
+    streak = "".join("1" if (today - pd.Timedelta(days=i)) in days else "0"
+                     for i in range(28))
+    return len(days), streak
+
+
+def _va_mrr(record_ids):
+    """₹ MRR_VA (DAX): for the given paid VA records, sum unit_price/term over
+    their line items (excluding One-time), preferring 'New' lines when present."""
+    li = _VA_LI[_VA_LI["record_id"].isin(set(record_ids))]
+    if "recurring_type" in li.columns:
+        li = li[li["recurring_type"] != "One-time"]
+        if (li["recurring_type"] == "New").any():
+            li = li[li["recurring_type"] == "New"]
+    if len(li) == 0:
+        return 0
+    term = pd.to_numeric(li["term"], errors="coerce").fillna(1)
+    term = term.where(term > 0, 1)
+    return int((li["unit_price"] / term).sum())
+
+
+def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=None):
+    """Marketing performance broken down by period (month/week): Spend, Leads,
+    CPL, DC, DC%, Paid, MRR, CAC, ARPU, Payback — with a pinned Total row."""
+    spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
+                if "day" in mkt_df.columns and len(mkt_df) else pd.Series(dtype=float))
+    aa = aia_df
+    leads_by = (aa.dropna(subset=["create_date"]).groupby(aa.dropna(subset=["create_date"])["create_date"].dt.to_period(freq))["record_id"].nunique()
+                if "create_date" in aa.columns else pd.Series(dtype=float))
+    dcs = aa[aa["dc_date"].notna()] if "dc_date" in aa.columns else aa.iloc[0:0]
+    dc_by  = dcs.groupby(dcs["dc_date"].dt.to_period(freq))["record_id"].nunique() if len(dcs) else pd.Series(dtype=float)
+    pps = aa[aa["payment_date"].notna()] if "payment_date" in aa.columns else aa.iloc[0:0]
+    paid_by = pps.groupby(pps["payment_date"].dt.to_period(freq))["record_id"].nunique() if len(pps) else pd.Series(dtype=float)
+    lim = li_df.dropna(subset=["date_paid"]) if "date_paid" in li_df.columns else li_df.iloc[0:0]
+    mrr_by = lim.groupby(lim["date_paid"].dt.to_period(freq))["mrr"].sum() if len(lim) else pd.Series(dtype=float)
+
+    idxs = [s.index for s in [spend_by, leads_by, dc_by, paid_by, mrr_by] if len(s)]
+    if not idxs:
+        return pd.DataFrame()
+    lo = min(i.min() for i in idxs); hi = max(i.max() for i in idxs)
+    full = pd.period_range(lo, hi, freq=freq)
+    if last_n:
+        full = full[-last_n:]
+    g = lambda s: s.reindex(full, fill_value=0)
+    spend, leads, dc, paid, mrr = g(spend_by), g(leads_by), g(dc_by), g(paid_by), g(mrr_by)
+
+    def _row(lbl, sp, ld, d, pv, mr):
+        return {label_name: lbl, "Spend (₹)": sp, "Leads": ld,
+                "CPL": sp // ld if ld else 0, "DC": d,
+                "DC %": (f"{round(d/ld*100)}%" if ld else ""), "Paid": pv, "MRR": mr,
+                "CAC": sp // pv if pv else 0, "ARPU": mr // pv if pv else 0,
+                "Payback (mo)": round((sp/pv)/(mr/pv)) if (pv and mr) else 0}
+    rows = [_row(label_fn(p), int(spend[p]), int(leads[p]), int(dc[p]),
+                 int(paid[p]), int(mrr[p])) for p in full]
+    rows.append(_row("Total", int(spend.sum()), int(leads.sum()), int(dc.sum()),
+                     int(paid.sum()), int(mrr.sum())))
+    return pd.DataFrame(rows)
+
+
+def _usage_cohort():
+    """Customer Usage Cohort (last 10 integration weeks). Rows = integration-week
+    Monday; columns = Integrated (cohort size) + W0..W9 (active accounts that had
+    any upload/sync activity in that week-offset window). Returns (counts_df,
+    pct_df), each with a pinned Total row. Replicates the DAX cohort measures."""
+    base = _AIA[(_AIA["integration_done_date"].notna())
+                & (_AIA["login_email_id"].notna())
+                & (_AIA["module_type"] == "AIA Paid")].copy()
+    if len(base) == 0:
+        return pd.DataFrame(), pd.DataFrame()
+    iw = base["integration_done_date"].dt.normalize()
+    base["iw"] = iw - pd.to_timedelta(iw.dt.weekday, unit="D")     # Monday
+    weeks = sorted([w for w in base["iw"].dropna().unique()])[-10:]  # last 10 weeks
+    if not weeks:
+        return pd.DataFrame(), pd.DataFrame()
+    today = pd.Timestamp(date.today())
+    OFFS = list(range(10))
+
+    cnt_rows, pct_rows = [], []
+    tot_int = 0
+    tot_act = {o: 0 for o in OFFS}
+    tot_size = {o: 0 for o in OFFS}
+    tot_valid = {o: False for o in OFFS}
+
+    for wk in weeks:
+        wk = pd.Timestamp(wk)
+        sub  = base[base["iw"] == wk]
+        size = sub["record_id"].nunique()
+        tot_int += size
+        accts = {_EMAIL_ACCT.get(em) for em in
+                 sub["login_email_id"].dropna().astype(str).str.lower().str.strip().unique()}
+        accts.discard(None)
+        label = wk.strftime("%d %b")
+        crow = {"Integration Week": label, "Integrated": size}
+        prow = {"Integration Week": label, "Integrated": size}
+        for o in OFFS:
+            cws = wk + pd.Timedelta(days=o * 7)
+            col = f"W{o}"
+            if cws > today:
+                crow[col] = ""; prow[col] = ""
+                continue
+            active = sum(1 for a in accts if (a, cws) in _ACTIVE_WEEKS)
+            crow[col] = active
+            pct = round(active / size * 100) if size else 0
+            prow[col] = (f"{pct}%" if pct else "")   # blank when 0%
+            tot_act[o] += active; tot_size[o] += size; tot_valid[o] = True
+        cnt_rows.append(crow); pct_rows.append(prow)
+
+    cnt_tot = {"Integration Week": "Total", "Integrated": tot_int}
+    pct_tot = {"Integration Week": "Total", "Integrated": tot_int}
+    for o in OFFS:
+        col = f"W{o}"
+        cnt_tot[col] = tot_act[o] if tot_valid[o] else ""
+        _tp = round(tot_act[o] / tot_size[o] * 100) if (tot_valid[o] and tot_size[o]) else 0
+        pct_tot[col] = (f"{_tp}%" if _tp else "")   # blank when 0%
+    cnt_rows.append(cnt_tot); pct_rows.append(pct_tot)
+    return pd.DataFrame(cnt_rows), pd.DataFrame(pct_rows)
+
+
+def _mrr_matrix(li, refund_map, mode):
+    """Refunds-adjusted billing-to-MRR cohort matrix (replicates the DAX
+    total_monthly_collection / #Active Paid Users). Each non-refunded line item
+    is recognised across its active term (date_paid month .. +term, exclusive),
+    attributed to its cohort row.
+      mode="revenue"   -> cell = sum(unit_price / term); Fresh Renewals = sum(unit_price)
+      mode="retention" -> cell = distinct active record_ids; Fresh Renewals = distinct record_ids
+    Adds a 'Fresh Renewals' row (recurring_type == 'Renewal', by date_paid month)
+    and a pinned 'Total' row (column sums of the cohort rows). YYYY-MM labels,
+    continuous month span. Returns an empty frame when there is no data."""
+    need = {"date_paid", "cohort_month", "term", "unit_price", "record_id", "recurring_type"}
+    if li is None or len(li) == 0 or not need.issubset(li.columns):
+        return pd.DataFrame()
+    li = li.dropna(subset=["date_paid", "cohort_month"]).copy()
+    if len(li) == 0:
+        return pd.DataFrame()
+    li["billing_p"] = li["date_paid"].dt.to_period("M")
+    li["cohort_p"]  = li["cohort_month"].dt.to_period("M")
+    if refund_map is not None:
+        ref = li["record_id"].map(refund_map).astype("string").str.strip().str.lower()
+        li = li[(ref != "yes").fillna(True)]
+    if len(li) == 0:
+        return pd.DataFrame()
+    li["term_n"]  = li["term"].fillna(1).where(li["term"].fillna(1) > 0, 1).astype(int)
+    li["monthly"] = li["unit_price"] / li["term_n"]
+
+    recs = []
+    for r in li.itertuples(index=False):
+        for k in range(int(r.term_n)):
+            recs.append((str(r.cohort_p), r.billing_p + k, r.record_id, r.monthly))
+    sp = pd.DataFrame(recs, columns=["Cohort", "bp", "rid", "amt"])
+    if len(sp) == 0:
+        return pd.DataFrame()
+
+    lo = min(li["cohort_p"].min(), li["billing_p"].min())
+    hi = li["billing_p"].max()
+    full = pd.period_range(lo, hi, freq="M")
+
+    if mode == "revenue":
+        piv = sp.pivot_table(index="Cohort", columns="bp", values="amt",
+                             aggfunc="sum", fill_value=0)
+    else:
+        piv = sp.pivot_table(index="Cohort", columns="bp", values="rid",
+                             aggfunc=pd.Series.nunique, fill_value=0)
+    piv = piv.reindex(columns=full, fill_value=0)
+    piv = piv.reindex(sorted(piv.index)).round(0).astype(int)
+    cols = [p.strftime("%b %y") for p in full]      # mmm yy column headers
+    piv.columns = cols
+    out = piv.reset_index()
+    out["Cohort"] = out["Cohort"].apply(lambda v: pd.Period(v, freq="M").strftime("%b %y"))
+
+    fr = li[li["recurring_type"] == "Renewal"]
+    if mode == "revenue":
+        frb = fr.groupby(fr["date_paid"].dt.to_period("M"))["unit_price"].sum()
+    else:
+        frb = fr.groupby(fr["date_paid"].dt.to_period("M"))["record_id"].nunique()
+    frb = frb.reindex(full, fill_value=0).round(0).astype(int)
+
+    fr_row  = {"Cohort": "Fresh Renewals", **{c: int(frb[p]) for c, p in zip(cols, full)}}
+    tot_row = {"Cohort": "Total",          **{c: int(piv[c].sum()) for c in cols}}
+    return pd.concat([out, pd.DataFrame([fr_row, tot_row])], ignore_index=True)
 
 NEON_URL     = os.getenv("NEON_DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
@@ -34,10 +329,10 @@ def _load_all():
         mkt = _q(SUPABASE_URL, "SELECT * FROM public.marketing_spends ORDER BY day ASC")
         upl = _q(SUPABASE_URL, "SELECT * FROM public.user_daily_upload_summary ORDER BY date ASC")
         syn = _q(SUPABASE_URL, "SELECT * FROM public.accounting_sync_mixpanel")
-        print(f"✓ AIA:{len(aia)} VA:{len(va)} LI:{len(li)} INC:{len(inc)} MKT:{len(mkt)} UPL:{len(upl)} SYN:{len(syn)}")
+        print(f"[OK] AIA:{len(aia)} VA:{len(va)} LI:{len(li)} INC:{len(inc)} MKT:{len(mkt)} UPL:{len(upl)} SYN:{len(syn)}")
         return aia, va, li, inc, mkt, upl, syn
     except Exception as ex:
-        print(f"⚠ DB error: {ex} — using empty frames")
+        print(f"[WARN] DB error: {ex} -- using empty frames")
         cols_aia = ["record_id","deal_name","deal_stage","deal_owner","deal_source","create_date",
                     "ds_date","dc_date","eta_pay_date","payment_date","integration_done_date",
                     "activation_date","adopted_date","renewed_date","parked_date","discard_date",
@@ -62,7 +357,7 @@ def _load_all():
                 pd.DataFrame(columns=cols_mkt), pd.DataFrame(columns=cols_upl),
                 pd.DataFrame(columns=cols_syn))
 
-print("Loading data…")
+print("Loading data...")
 _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN = _load_all()
 
 # ═══════════════════════════════════════════════════════════════════
@@ -197,6 +492,185 @@ if "event_date" in _SYN.columns:
     _SYN["event_date"] = pd.to_datetime(_SYN["event_date"], errors="coerce")
     _SYN = _nums(_SYN, ["items_count"])
 
+# ── Usage-cohort lookups (precomputed once) ─────────────────────────────────
+# email -> account_id, and the set of (account_id, week-Monday) that had any
+# upload OR sync activity. Used to build the Customer Usage Cohort table fast.
+def _build_activity_lookups():
+    email_acct = {}
+    active_weeks = set()
+    for src, dcol in [(_UPL, "date"), (_SYN, "event_date")]:
+        if "account_id" not in src.columns or dcol not in src.columns:
+            continue
+        t = src[["account_id", dcol]].dropna(subset=["account_id", dcol]).copy()
+        if "email" in src.columns:
+            for em, ac in src[["email", "account_id"]].dropna().itertuples(index=False):
+                em = str(em).lower().strip()
+                if em and em not in email_acct:
+                    email_acct[em] = ac
+        d = pd.to_datetime(t[dcol], errors="coerce").dt.normalize()
+        mon = d - pd.to_timedelta(d.dt.weekday, unit="D")
+        for ac, mm in zip(t["account_id"], mon):
+            if pd.notna(mm):
+                active_weeks.add((ac, mm))
+    return email_acct, active_weeks
+
+_EMAIL_ACCT, _ACTIVE_WEEKS = _build_activity_lookups()
+
+def _build_acct_dates():
+    """account_id -> set of normalised dates that had any real upload/sync."""
+    m = {}
+    for src, dcol, vcol in [(_UPL, "date", "total_uploads"),
+                            (_SYN, "event_date", "items_count")]:
+        if dcol not in src.columns or "account_id" not in src.columns:
+            continue
+        cols = ["account_id", dcol] + ([vcol] if vcol in src.columns else [])
+        t = src[cols].dropna(subset=["account_id", dcol]).copy()
+        if vcol in src.columns:
+            t = t[t[vcol].fillna(0) > 0]
+        d = pd.to_datetime(t[dcol], errors="coerce").dt.normalize()
+        for ac, dd in zip(t["account_id"], d):
+            if pd.notna(dd):
+                m.setdefault(ac, set()).add(dd)
+    return m
+
+_ACCT_DATES = _build_acct_dates()
+
+def _build_billing_end():
+    """record_id -> billing end date (DAX billing_end_date): max over the
+    record's line items of billing_start_date shifted by term/frequency, plus
+    days_extended."""
+    li = _AIA_LI
+    need = {"record_id", "billing_start_date"}
+    if li is None or len(li) == 0 or not need.issubset(li.columns):
+        return {}
+    def _end(r):
+        sd = r.get("billing_start_date")
+        if pd.isna(sd):
+            return pd.NaT
+        term = r.get("term"); term = 1 if (pd.isna(term) or term <= 0) else int(term)
+        f = r.get("billing_frequency")
+        if pd.isna(f) or str(f).strip() == "":
+            base = sd
+        else:
+            months = {"monthly": term, "quarterly": 3, "per_six_months": 6,
+                      "annually": 12}.get(str(f).strip())
+            base = sd + relativedelta(months=months) if months else sd
+        de = r.get("days_extended"); de = 0 if pd.isna(de) else int(de)
+        return base + pd.Timedelta(days=de)
+    tmp = li.copy()
+    tmp["_end"] = tmp.apply(_end, axis=1)
+    return tmp.groupby("record_id")["_end"].max().to_dict()
+
+_BILLING_END = _build_billing_end()
+
+def _due_on(record_id):
+    d = _BILLING_END.get(record_id)
+    return "" if (d is None or pd.isna(d)) else pd.Timestamp(d).strftime("%d-%b-%y")
+
+def _acct_for(email):
+    return _EMAIL_ACCT.get(str(email).lower().strip())
+
+def _activity_between(acct, start, end):
+    """count of active days for an account within [start, end] inclusive."""
+    ds = _ACCT_DATES.get(acct)
+    if not ds:
+        return 0
+    return sum(1 for d in ds if start <= d <= end)
+
+# ── CSM health measures (per integrated AIA-paid customer record) ───────────
+_CAD_W      = {"Daily": 4, "Weekly": 7, "Bi weekly": 10, "Monthly": 14}
+_CAD_INITEND = {"Daily": 15, "Weekly": 20, "Bi weekly": 25, "Monthly": 29}
+_CAD_NWIN   = {"Daily": 7, "Weekly": 4, "Bi weekly": 3, "Monthly": 2}
+_CAD_PASTINIT = {"Daily": 15, "Weekly": 20, "Bi weekly": 25, "Monthly": 29}
+_MILESTONES = {
+    "Daily":     {3:1, 5:2, 7:3, 9:4, 11:5, 13:6, 15:7},
+    "Weekly":    {4:1, 8:2, 12:3, 16:4, 20:5},
+    "Bi weekly": {4:1, 9:2, 14:3, 19:4, 25:5},
+    "Monthly":   {3:1, 8:2, 15:3, 22:4, 29:5},
+}
+
+def _cadence_of(row):
+    def _norm(v):
+        v = str(v).strip() if pd.notna(v) else ""
+        return "" if v in ("NA", "") else v
+    bf = _norm(row.get("bill_frequency"));  sf = _norm(row.get("statement_frequency"))
+    pr = {"Daily": 4, "Weekly": 3, "Bi weekly": 2, "Monthly": 1}
+    bp, sp = pr.get(bf, 0), pr.get(sf, 0)
+    if bp > sp and bf: return bf
+    if sp > bp and sf: return sf
+    return bf or sf or "Monthly"
+
+def _continuous_missed(acct, intdate, cad, days_since, today):
+    """Replica of Continuous_Missed_measure (post-initial window logic)."""
+    W = _CAD_W.get(cad, 7)
+    past_initial = days_since > _CAD_PASTINIT.get(cad, 29)
+    if past_initial:
+        used = []
+        for k in range(6):                       # W6 (most recent) .. W1
+            wend = today - pd.Timedelta(days=k * W)
+            wstart = wend - pd.Timedelta(days=W)
+            if wstart < intdate:
+                used.append(None)
+            else:
+                used.append(1 if (acct and _activity_between(acct, wstart, wend - pd.Timedelta(days=1))) else 0)
+        miss = [1 if (u is None or u == 0) else 0 for u in used]   # miss6..miss1
+        recent = miss[0] + miss[1]
+        silent = miss[0] + miss[1] + miss[2] + miss[3]
+        total = sum(miss)
+        if silent >= 4: return 6
+        if recent == 0: return 0
+        return total
+    # initial phase: count due milestones missed (consecutive from start)
+    due = sorted([d for d in _MILESTONES.get(cad, {}) if d <= days_since])
+    if not due:
+        return 0
+    missed = 0
+    for day in due:
+        req = _MILESTONES[cad][day]
+        usage = _activity_between(acct, intdate, intdate + pd.Timedelta(days=day)) if acct else 0
+        if usage < req:
+            missed += 1
+        else:
+            missed = 0   # streak resets on a hit
+    return missed
+
+def _customer_status_m(acct, intdate, cad, days_since, today):
+    m = _continuous_missed(acct, intdate, cad, days_since, today)
+    if m is None: return None
+    if m >= 6: return "Inactive"
+    if m >= 3: return "Risk of Churn"
+    return "Active"
+
+def _total_flags_30d(acct, intdate, cad, today):
+    W = _CAD_W.get(cad, 7); n = _CAD_NWIN.get(cad, 4)
+    flags = 0
+    for i in range(1, n + 1):
+        wend = today - pd.Timedelta(days=(i - 1) * W)
+        wstart = wend - pd.Timedelta(days=W)
+        if wstart >= intdate:
+            if not acct or _activity_between(acct, wstart, wend - pd.Timedelta(days=1)) == 0:
+                flags += 1
+    return flags
+
+def _flagged_yesterday(acct, intdate, cad, days_since, today):
+    yest = days_since - 1
+    if days_since < 3:
+        return False
+    W = _CAD_W.get(cad, 7); init_end = _CAD_INITEND.get(cad, 20)
+    if yest > init_end:
+        post_start = yest - init_end
+        if post_start > 0 and post_start % W == 0:
+            wend = today - pd.Timedelta(days=1)
+            wstart = wend - pd.Timedelta(days=W)
+            eff = max(wstart, intdate)
+            return (not acct) or _activity_between(acct, eff, wend) == 0
+        return False
+    milestone = _MILESTONES.get(cad, {}).get(yest)
+    if milestone is None:
+        return False
+    usage = _activity_between(acct, intdate, today - pd.Timedelta(days=1)) if acct else 0
+    return usage < milestone
+
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════
@@ -210,6 +684,18 @@ def _rng(df, col, s, e):
         return df[m]
     except Exception:
         return df.iloc[0:0]
+
+def _atp_amount(d, s, e):
+    """ATP (DAX #Amount? ATP / cAmount?): for High-Intent records whose
+    eta_pay_date falls in range, sum the max 'amount?' per record."""
+    if "amount?" not in d.columns:
+        return 0
+    sub = _rng(d, "eta_pay_date", s, e)
+    sub = sub[sub["deal_stage"] == "High Intent"]
+    if len(sub) == 0:
+        return 0
+    amt = pd.to_numeric(sub["amount?"], errors="coerce")
+    return int(amt.groupby(sub["record_id"]).max().sum())
 
 def _fmt(v):
     v = int(v)
@@ -270,6 +756,11 @@ def _aia_ops_refresh(state):
     df = _AIA.copy()
     if state.aia_selected_owner != "All":    df = df[df["deal_owner"]==state.aia_selected_owner]
     if state.aia_selected_campaign != "All": df = df[df["utm_campaign"]==state.aia_selected_campaign]
+    df_allchan = df  # before channel cross-filter — the pie always shows every channel
+    if state.aia_channel_filter != "All" and "deal_source_group" in df.columns:
+        df = df[df["deal_source_group"]==state.aia_channel_filter]
+    state.aia_filter_label = (f"Channel: {state.aia_channel_filter}  (click pie again or Show All to clear)"
+                              if state.aia_channel_filter != "All" else "")
 
     state.aia_kpi_leads       = _rng(df,"create_date",s,e)["record_id"].nunique()
     state.aia_kpi_ds          = _rng(df,"ds_date",s,e)["record_id"].nunique()
@@ -307,33 +798,31 @@ def _aia_ops_refresh(state):
     hi2   = coh[hi2_mask]["record_id"].nunique()
     paid2 = coh[coh["payment_date"].notna()&(coh["payment_date"]>=s)&(coh["payment_date"]<=e)]["record_id"].nunique()
     p = lambda n: f"{n/leads*100:.0f}%" if leads else "0%"
-    _labels = [str(leads), f"{ds_n} ({p(ds_n)})", f"{dc_n} ({p(dc_n)})",
-               f"{hi2} ({p(hi2)})", f"{paid2} ({p(paid2)})"]
-    _fig = go.Figure(go.Funnel(
-        y=["Leads", "DS", "DC", "High Intent", "Paid"],
-        x=[leads, ds_n, dc_n, hi2, paid2],
-        text=_labels,
-        textinfo="text",
-        textposition="auto",
-        marker={"color": ["#90CAF9","#42A5F5","#1E88E5","#1976D2","#1565C0"]},
-    ))
-    _fig.update_layout(**aia_funnel_layout)
-    state.aia_funnel_fig = _fig
+    _labels = [f"<b>{leads}</b>", f"<b>{ds_n} ({p(ds_n)})</b>", f"<b>{dc_n} ({p(dc_n)})</b>",
+               f"<b>{hi2} ({p(hi2)})</b>", f"<b>{paid2} ({p(paid2)})</b>"]
+    state.aia_funnel_fig = _make_funnel(
+        ["Leads", "DS", "DC", "High Intent", "Paid"],
+        [leads, ds_n, dc_n, hi2, paid2], _labels)
 
-    # DC trend
-    dc_sub = _rng(df,"dc_date",s,e).copy()
+    # DC vs Qualified trend — bars (DC) + line (Qualified), capped at today
+    e_cap  = min(e, pd.Timestamp(date.today()))
+    dc_sub = _rng(df,"dc_date",s,e_cap).copy()
     dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
     daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
     daily_q  = dc_sub[dc_sub["prospect_score"]>=60].groupby("date")["record_id"].nunique().reset_index(name="Qualified")
-    trend = pd.DataFrame({"date": pd.date_range(s, e, freq="D")})
+    trend = pd.DataFrame({"date": pd.date_range(s, e_cap, freq="D")})
     trend = trend.merge(daily_dc,on="date",how="left").merge(daily_q,on="date",how="left").fillna(0)
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
-    state.aia_trend_df = trend.astype({"DC":int,"Qualified":int})
+    trend = trend.astype({"DC":int,"Qualified":int})
+    state.aia_trend_fig = _make_trend(trend["date_label"].tolist(),
+                                      trend["DC"].tolist(), trend["Qualified"].tolist())
 
-    # Channel pie
-    ch = _rng(df,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
+    # Channel pie — always from the channel-unfiltered frame, sorted desc
+    ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
     ch.columns = ["Channel","Count"]
-    state.aia_channel_df = ch
+    ch = ch.sort_values("Count", ascending=False, ignore_index=True)
+    state.aia_channel_order = ch["Channel"].astype(str).tolist()
+    state.aia_channel_pie_json = pie_payload_b64(ch, "Channel", "Count")
 
     # GM table
     rows = []
@@ -357,12 +846,13 @@ def _aia_ops_refresh(state):
             "Paid":       paid_no_refund["record_id"].nunique(),
             "Revenue":    int(pd2.groupby("record_id")["amount_paid"].max().sum()),
             "MRR":        int(new_li["mrr"].sum()) if len(new_li) else 0,
+            "ATP":        _atp_amount(o, s, e),
         })
     gm = pd.DataFrame(rows)
     if len(gm):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
-    state.aia_gm_df = gm
+    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI", "ATP"])
 
     # UTM cohort
     rows2 = []
@@ -371,6 +861,14 @@ def _aia_ops_refresh(state):
         l2 = c["record_id"].nunique()
         if l2 == 0: continue
         pd3 = c[c["payment_date"].notna()&(c["payment_date"]>=s)&(c["payment_date"]<=e)]
+        # cActive PS >= 60: PS>=60, demo/HI stage, dc in same month as create
+        aps = c[(c["prospect_score"]>=60)
+                & (c["deal_stage"].isin(["Demo Conducted","High Intent"]))
+                & (c["dc_date"].notna())
+                & (c["create_date"].dt.year==c["dc_date"].dt.year)
+                & (c["create_date"].dt.month==c["dc_date"].dt.month)]["record_id"].nunique()
+        # MRR: line items of records paid in-range, unit_price / billing-frequency
+        mrr_u = int(_AIA_LI[_AIA_LI["record_id"].isin(pd3["record_id"])]["mrr"].sum())
         rows2.append({
             "UTM Source": src,
             "Leads": l2,
@@ -378,14 +876,17 @@ def _aia_ops_refresh(state):
             "HI":    c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
             "AIA Paid": pd3[pd3["module_type"]=="AIA Paid"]["record_id"].nunique(),
             "GST Paid": pd3[pd3["module_type"]=="GST Paid"]["record_id"].nunique(),
+            "Active PS60": aps,
             "Paid":     pd3["record_id"].nunique(),
             "Revenue":  int(pd3.groupby("record_id")["amount_paid"].max().sum()),
+            "MRR":      mrr_u,
+            "ATP":      _atp_amount(c, s, e),
         })
     utm = pd.DataFrame(rows2)
     if len(utm):
         tot2 = utm.select_dtypes("number").sum().to_dict(); tot2["UTM Source"] = "Total"
         utm = pd.concat([utm, pd.DataFrame([tot2])], ignore_index=True)
-    state.aia_utm_df = utm
+    state.aia_utm_json = grid_payload_b64(utm, "UTM Source", bar_cols=["HI", "ATP"])
 
     # Reason tables
     def _reason(date_col, label, rcol):
@@ -402,7 +903,7 @@ def _aia_ops_refresh(state):
     _INC_COLS = ["GM","Gap (Prev Month)","AIA+VA Revenue","Combined MRR",
                  "Base Target","Adjusted Target","Achievement %","Incentive Tier","Incentive Payout"]
     if len(_INCENTIVE_TARGETS) == 0:
-        state.aia_incentive_df = pd.DataFrame(columns=_INC_COLS)
+        state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
     else:
         m_start  = pd.Timestamp(state.aia_start_date).replace(day=1)
         m_end    = (m_start + relativedelta(months=1)) - pd.Timedelta(days=1)
@@ -411,7 +912,7 @@ def _aia_ops_refresh(state):
         curr_t   = _INCENTIVE_TARGETS[_INCENTIVE_TARGETS["month"] == m_start]
         prev_t   = _INCENTIVE_TARGETS[_INCENTIVE_TARGETS["month"] == pm_start]
         if len(curr_t) == 0:
-            state.aia_incentive_df = pd.DataFrame(columns=_INC_COLS)
+            state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
         else:
             aia_c = _rng(_AIA, "payment_date", m_start, m_end)
             va_c  = _rng(_VA,  "payment_date", m_start, m_end)
@@ -480,13 +981,32 @@ def _aia_ops_refresh(state):
                            "Adjusted Target":inc_df["Adjusted Target"].sum(),
                            "Achievement %":"","Incentive Tier":"",
                            "Incentive Payout":inc_df["Incentive Payout"].sum()}
-                state.aia_incentive_df = pd.concat([inc_df, pd.DataFrame([tot_row])], ignore_index=True)
+                inc_df = pd.concat([inc_df, pd.DataFrame([tot_row])], ignore_index=True)
+                state.aia_incentive_json = grid_payload_b64(
+                    inc_df, "GM", sort_default_col="Incentive Payout",
+                    center_cols=["Achievement %", "Incentive Tier"])
             else:
-                state.aia_incentive_df = pd.DataFrame(columns=_INC_COLS)
+                state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 2 — CS & FINANCE
 # ═══════════════════════════════════════════════════════════════════
+
+def _apply_usage_filter(state):
+    """Filter the Customer Usage & Health grid by the Deal Name / CSM dropdowns."""
+    d = state.cs_usage_all
+    if d is None or len(d) == 0:
+        state.cs_usage_json = grid_payload_b64(pd.DataFrame())
+        return
+    if state.cs_usage_deal != "All":
+        d = d[d["Deal Name"] == state.cs_usage_deal]
+    if state.cs_usage_csm != "All":
+        d = d[d["CSM"] == state.cs_usage_csm]
+    state.cs_usage_json = grid_payload_b64(
+        d, sort_default_col="Usage Active Days (28d)",
+        streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
+        center_cols=["Paid On", "Int Date", "Due On", "Cadence", "Status"],
+        heat_cols={"Usage Active Days (28d)": "green"})
 
 def _cs_refresh(state):
     s = pd.Timestamp(state.cs_start_date)
@@ -514,15 +1034,20 @@ def _cs_refresh(state):
         (paid_active["next_renewal"]>=today-pd.Timedelta(days=7))
         &(paid_active["next_renewal"]<=today+pd.Timedelta(days=7))]["record_id"].nunique()
 
-    int_done_mask = (df["integration_done_date"].notna()
-                     & df["login_email_id"].notna()
-                     & (df["module_type"]=="AIA Paid"))
-    int_done = df[int_done_mask]
-    not_activated = (int_done["activation_date"].isna()
-                     & int_done["adopted_date"].isna()
-                     & ~int_done["deal_stage"].isin(["Churned","CS Parked","Blocked",
-                                                     "Integration Failed","Integration Done"]))
-    state.cs_kpi_int_due = int_done[not_activated]["record_id"].nunique()
+    # #Integration Due (DAX): AIA Paid, paid in range, not activated/adopted,
+    # and not in a terminal/done stage. (No integration_done_date requirement.)
+    _excl_id = ["Churned","CS Parked","Blocked","Integration Failed","Integration Done"]
+    intd = _rng(df, "payment_date", s, e)
+    intd = intd[(intd["module_type"]=="AIA Paid")
+                & (intd["activation_date"].isna())
+                & (intd["adopted_date"].isna())
+                & (~intd["deal_stage"].isin(_excl_id))]
+    state.cs_kpi_int_due = intd["record_id"].nunique()
+
+    # Customer-usage table still needs the integration-done base set
+    int_done = df[(df["integration_done_date"].notna())
+                  & (df["login_email_id"].notna())
+                  & (df["module_type"]=="AIA Paid")]
 
     renewed_sub          = _rng(df, "renewed_date", s, e)
     state.cs_kpi_renewed = renewed_sub[renewed_sub["module_type"]=="AIA Paid"]["record_id"].nunique()
@@ -539,74 +1064,187 @@ def _cs_refresh(state):
     statuses = int_customers.apply(lambda r: _customer_status(r, _UPL, _SYN), axis=1)
     state.cs_kpi_active = int((statuses=="Active").sum())
 
-    # Revenue matrix
-    li_sub = _AIA_LI.copy()
-    if len(li_sub) > 0 and "cohort_month" in li_sub.columns and "date_paid" in li_sub.columns:
-        li_sub["billing_month"] = li_sub["date_paid"].dt.to_period("M").astype(str)
-        li_sub["cohort_label"]  = li_sub["cohort_month"].dt.strftime("%b %y")
-        rev_piv = li_sub.pivot_table(index="cohort_label", columns="billing_month",
-                                      values="unit_price", aggfunc="sum", fill_value=0)
-        state.cs_revenue_matrix = rev_piv.reset_index().rename(columns={"cohort_label":"Cohort"})
-        ret_piv = li_sub.pivot_table(index="cohort_label", columns="billing_month",
-                                      values="record_id", aggfunc=pd.Series.nunique, fill_value=0)
-        state.cs_retention_matrix = ret_piv.reset_index().rename(columns={"cohort_label":"Cohort"})
-    else:
-        state.cs_revenue_matrix   = pd.DataFrame()
-        state.cs_retention_matrix = pd.DataFrame()
+    # Revenue + Retention matrices — refunds-adjusted billing-to-MRR breakdown
+    # (DAX total_monthly_collection / #Active Paid Users) with Fresh Renewals
+    # and Total rows. YYYY-MM labels, blank zeros, chronological order.
+    _refund_map = None
+    if "asked_refund" in _AIA.columns:
+        _refund_map = (_AIA.dropna(subset=["record_id"]).drop_duplicates("record_id")
+                           .set_index("record_id")["asked_refund"])
+    _rev_m = _mrr_matrix(_AIA_LI, _refund_map, "revenue")
+    _ret_m = _mrr_matrix(_AIA_LI, _refund_map, "retention")
+    state.cs_revenue_matrix_json = (grid_payload_b64(_rev_m, total_id_col="Cohort",
+                                    blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                    if len(_rev_m) else grid_payload_b64(pd.DataFrame()))
+    state.cs_retention_matrix_json = (grid_payload_b64(_ret_m, total_id_col="Cohort",
+                                      blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                      if len(_ret_m) else grid_payload_b64(pd.DataFrame()))
 
-    # CSM table
-    csm_rows = []
+    # ── Three stacked CSM Performance tables ────────────────────────────────
+    def _idrfr(sub):
+        bc = sub["billing_cycle"] if "billing_cycle" in sub.columns else pd.Series("", index=sub.index)
+        mod = sub["module_type"].notna()
+        integ  = sub[mod & (sub["deal_stage"]=="Integration Done")]["record_id"].nunique()
+        rfr    = sub[mod & (sub["deal_stage"]=="Ready for Renewal") & (bc=="Monthly")]["record_id"].nunique()
+        allren = sub[mod & ((sub["deal_stage"]=="Renewal Done")
+                            | ((sub["deal_stage"]=="Ready for Renewal") & (bc!="Monthly")))]["record_id"].nunique()
+        return int(integ + rfr + allren)
+
+    # per-customer health (integrated AIA-paid base), deduped by email
+    today_n = pd.Timestamp(date.today()).normalize()
+    seen_email = set()
+    hrows = []
+    for _, row in int_done.iterrows():
+        em = str(row.get("login_email_id","")).lower().strip()
+        if not em or em in seen_email:
+            continue
+        seen_email.add(em)
+        ac = _acct_for(em)
+        intd = row.get("integration_done_date")
+        if pd.isna(intd):
+            continue
+        intd = pd.Timestamp(intd).normalize()
+        dsince = (today_n - intd).days
+        cad = _cadence_of(row)
+        hrows.append({
+            "cs_owner": row.get("cs_owner"),
+            "stage": row.get("deal_stage"),
+            "a7":  1 if _activity_between(ac, today_n-pd.Timedelta(days=6),  today_n) else 0,
+            "a14": 1 if _activity_between(ac, today_n-pd.Timedelta(days=13), today_n) else 0,
+            "a21": 1 if _activity_between(ac, today_n-pd.Timedelta(days=20), today_n) else 0,
+            "a28": 1 if _activity_between(ac, today_n-pd.Timedelta(days=27), today_n) else 0,
+            "status": _customer_status_m(ac, intd, cad, dsince, today_n),
+            "fy":  1 if _flagged_yesterday(ac, intd, cad, dsince, today_n) else 0,
+            "tf":  _total_flags_30d(ac, intd, cad, today_n),
+        })
+    hdf = pd.DataFrame(hrows)
+    # Health metrics consider only these stages
+    _HEALTH_STAGES = ["Integration Done", "Ready for Renewal", "Renewal Done"]
+    hdf_health = hdf[hdf["stage"].isin(_HEALTH_STAGES)] if len(hdf) else hdf
+
+    _excl_uc = ["Churned","CS Parked","Blocked","Integration Failed","Integration Done"]
+    t1_rows, t2_rows, t3_rows = [], [], []
     for csm in sorted(df["cs_owner"].dropna().unique()):
-        c  = df[df["cs_owner"]==csm]
-        cp = c[c["payment_date"].notna() & (c["module_type"]=="AIA Paid")]
-        csm_rows.append({
+        c   = df[df["cs_owner"]==csm]
+        cp  = c[c["payment_date"].notna() & (c["module_type"]=="AIA Paid")]
+        mod = c[c["module_type"].notna()]
+        int_due    = c[(c["module_type"]=="AIA Paid") & c["payment_date"].notna()
+                       & c["activation_date"].isna() & c["adopted_date"].isna()
+                       & ~c["deal_stage"].isin(_excl_uc)]["record_id"].nunique()
+        int_failed = mod[mod["deal_stage"]=="Integration Failed"]["record_id"].nunique()
+        integrated = mod[mod["deal_stage"]=="Integration Done"]["record_id"].nunique()
+        t1_rows.append({
             "CSM":       csm,
             "AIA Paid":  cp["record_id"].nunique(),
-            "Under CS":  cp[cp["deal_stage"].isin(["Payment Done","Integration Due"])]["record_id"].nunique(),
-            "Int Due":   cp[cp["activation_date"].isna()
-                            &~cp["deal_stage"].isin(["Churned","CS Parked","Blocked",
-                                                     "Integration Failed","Integration Done"])]["record_id"].nunique(),
-            "Int Failed":cp[cp["deal_stage"]=="Integration Failed"]["record_id"].nunique(),
-            "Integrated":cp[cp["deal_stage"]=="Integration Done"]["record_id"].nunique(),
-            "RFR":       cp[cp["deal_stage"]=="Ready for Renewal"]["record_id"].nunique(),
-            "Renewed":   _rng(c,"renewed_date",s,e)["record_id"].nunique(),
-            "Parked":    cp[cp["deal_stage"]=="CS Parked"]["record_id"].nunique(),
+            "Under CS":  int(int_due + int_failed + integrated),   # DAX: ID + IF + Integrated
+            "Int Due":   int(int_due),
+            "Int Failed":int(int_failed),
+            "Integrated":int(integrated),
             "Blocked":   cp[cp["deal_stage"]=="Blocked"]["record_id"].nunique(),
+            "Ready for Renewal": cp[cp["deal_stage"]=="Ready for Renewal"]["record_id"].nunique(),
+            "Renewed":   _rng(c,"renewed_date",s,e)["record_id"].nunique(),
+            "CS Parked": cp[cp["deal_stage"]=="CS Parked"]["record_id"].nunique(),
             "Churned":   c[c["deal_stage"]=="Churned"]["record_id"].nunique(),
         })
-    state.cs_csm_aia_df = pd.DataFrame(csm_rows)
+        idr = _idrfr(c)
+        h  = hdf[hdf["cs_owner"]==csm] if len(hdf) else hdf
+        hh = hdf_health[hdf_health["cs_owner"]==csm] if len(hdf_health) else hdf_health
+        t2_rows.append({
+            "CSM": csm, "ID + RFR + Renewed": idr,
+            "Active Last 7d":  int(h["a7"].sum())  if len(h) else 0,
+            "Active Last 14d": int(h["a14"].sum()) if len(h) else 0,
+            "Active Last 21d": int(h["a21"].sum()) if len(h) else 0,
+            "Active Last 28d": int(h["a28"].sum()) if len(h) else 0,
+        })
+        t3_rows.append({
+            "CSM": csm, "ID + RFR + Renewed": idr,
+            "Red Flags Yesterday":  int(hh["fy"].sum()) if len(hh) else 0,
+            "Last 30d Total Flags": int(hh["tf"].sum()) if len(hh) else 0,
+            "Active Customers":        int((hh["status"]=="Active").sum()) if len(hh) else 0,
+            "Risk of Churn Customers": int((hh["status"]=="Risk of Churn").sum()) if len(hh) else 0,
+            "Inactive Customers":      int((hh["status"]=="Inactive").sum()) if len(hh) else 0,
+        })
+
+    def _with_total(rows, idcol):
+        d = pd.DataFrame(rows)
+        if len(d):
+            tot = d.select_dtypes("number").sum().to_dict(); tot[idcol] = "Total"
+            d = pd.concat([d, pd.DataFrame([tot])], ignore_index=True)
+        return d
+
+    state.cs_csm_aia_json = grid_payload_b64(
+        _with_total(t1_rows, "CSM"), total_id_col="CSM", sort_default_col="AIA Paid",
+        blank_zeros=True, bar_cols=["Int Due"], bar_color="#f4a98c")
+    state.cs_csm_eng_json = grid_payload_b64(
+        _with_total(t2_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
+        blank_zeros=True)
+    state.cs_csm_health_json = grid_payload_b64(
+        _with_total(t3_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
+        blank_zeros=True, bar_cols=["Red Flags Yesterday"], bar_color="#f1a0a0")
+
+    # Customer Usage Cohort (last 10 integration weeks) — counts + % tables.
+    # Both use fixed column widths so they line up as a comparison; % values
+    # (strings) are centre-aligned.
+    cnt_df, pct_df = _usage_cohort()
+    _coh_heat = {f"W{o}": "green" for o in range(10)}
+    state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
+                                  blank_zeros=True, no_sort=True, fixed=True,
+                                  sortable=False, center_all=True, heat_cols=_coh_heat)
+                                  if len(cnt_df) else grid_payload_b64(pd.DataFrame()))
+    state.cs_cohort_pct_json   = (grid_payload_b64(pct_df, total_id_col="Integration Week",
+                                  no_sort=True, fixed=True, sortable=False, center_all=True,
+                                  heat_cols=_coh_heat)
+                                  if len(pct_df) else grid_payload_b64(pd.DataFrame()))
 
     # Usage table (top 50)
     usage_rows = []
-    for _, row in int_done.head(50).iterrows():
+    for _, row in int_done.iterrows():
         email  = str(row.get("login_email_id","")).lower().strip()
-        acct_u = _UPL[_UPL["email"]==email]["account_id"].dropna()
-        acct_s = _SYN[_SYN["email"]==email]["account_id"].dropna()
-        acct   = acct_u.iloc[0] if len(acct_u) else (acct_s.iloc[0] if len(acct_s) else None)
+        active_days, streak = _usage_28(email)
+        intd = row.get("integration_done_date")
+        dsince = (today.normalize() - pd.Timestamp(intd).normalize()).days if pd.notna(intd) else 0
+        cad = _cadence_of(row)
+        _ddmy = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
         usage_rows.append({
             "Deal Name":       row.get("deal_name",""),
             "CSM":             row.get("cs_owner",""),
             "Stage":           row.get("deal_stage",""),
-            "Paid On":         str(row.get("payment_date",""))[:10],
-            "Int Date":        str(row.get("integration_done_date",""))[:10],
-            "Cadence":         row.get("cadence",""),
-            "Usage (28d)":     _streak(email, acct, _UPL, _SYN, 28),
-            "Status":          _customer_status(row, _UPL, _SYN) or "",
+            "Paid On":         _ddmy(row.get("payment_date")),
+            "Int Date":        _ddmy(row.get("integration_done_date")),
+            "Due On":          _due_on(row.get("record_id")),
+            "Cadence":         cad,
+            "Usage Active Days (28d)": active_days,
+            "Usage Streak Last 28D (desc)": streak,
+            "Status": _customer_status_m(_acct_for(email),
+                        pd.Timestamp(intd).normalize() if pd.notna(intd) else today,
+                        cad, dsince, today.normalize()) or "",
         })
-    state.cs_usage_df = pd.DataFrame(usage_rows)
+    usage_all = pd.DataFrame(usage_rows)
+    state.cs_usage_all = usage_all
+    state.cs_usage_deal_list = ["All"] + (sorted(usage_all["Deal Name"].dropna().unique().tolist())
+                                          if len(usage_all) else [])
+    state.cs_usage_csm_list  = ["All"] + (sorted(usage_all["CSM"].dropna().unique().tolist())
+                                          if len(usage_all) else [])
+    _apply_usage_filter(state)
 
-    # Renewal window ±14d
-    rw = paid_active.copy()
-    rw["next_renewal_date"] = rw.apply(_next_renewal, axis=1)
-    w14 = rw[(rw["next_renewal_date"]>=today-pd.Timedelta(days=14))
-             &(rw["next_renewal_date"]<=today+pd.Timedelta(days=14))]
-    cols_needed = [c for c in ["deal_name","cs_owner","poc_number","poc_email",
-                                "deal_stage","next_renewal_date","amount_paid"] if c in w14.columns]
-    state.cs_renewal_window_df = (w14[cols_needed]
-        .rename(columns={"deal_name":"Deal Name","cs_owner":"CSM","poc_number":"POC",
-                         "poc_email":"Email","deal_stage":"Stage",
-                         "next_renewal_date":"Due On","amount_paid":"Amount"})
-        .sort_values("Due On").reset_index(drop=True))
+    # Renewal window ±14d — only Ready for Renewal / Renewal Done; Due On =
+    # billing end date, shown first in dd-MMM-yy.
+    rw = df[df["deal_stage"].isin(["Ready for Renewal", "Renewal Done"])].copy()
+    rw["_due"] = pd.to_datetime(rw["record_id"].map(_BILLING_END), errors="coerce")
+    rw = rw[(rw["_due"] >= today - pd.Timedelta(days=14))
+            & (rw["_due"] <= today + pd.Timedelta(days=14))].sort_values("_due")
+    rwd = pd.DataFrame({
+        "Due On":    rw["_due"].dt.strftime("%d-%b-%y"),
+        "Deal Name": rw.get("deal_name", ""),
+        "CSM":       rw.get("cs_owner", ""),
+        "POC":       rw.get("poc_number", ""),
+        "Email":     rw.get("poc_email", ""),
+        "Stage":     rw.get("deal_stage", ""),
+        "Amount":    rw.get("amount_paid", 0),
+    })
+    state.cs_renewal_window_json = (grid_payload_b64(
+        rwd, no_sort=True, center_cols=["Due On", "Amount"], autosize=True)
+        if len(rwd) else grid_payload_b64(pd.DataFrame()))
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 3 — MARKETING
@@ -615,16 +1253,29 @@ def _cs_refresh(state):
 def _mkt_refresh(state):
     s = pd.Timestamp(state.mkt_start_date)
     e = pd.Timestamp(state.mkt_end_date)
-    mkt = _MKT[(_MKT["day"]>=s)&(_MKT["day"]<=e)] if "day" in _MKT.columns else _MKT
+    mkt_all = _MKT[(_MKT["day"]>=s)&(_MKT["day"]<=e)] if "day" in _MKT.columns else _MKT
+
+    # channel cross-filter (set by clicking a pie). Spend filters _MKT.channel,
+    # leads/conversions filter _AIA.deal_source_group with the same label.
+    cf = state.mkt_channel_filter
+    state.mkt_filter_label = (f"Channel: {cf}  (click pie again or Show All to clear)"
+                              if cf != "All" else "")
+    mkt = mkt_all
+    aia_base = _AIA
+    if cf != "All":
+        if "channel" in mkt.columns:
+            mkt = mkt[mkt["channel"] == cf]
+        if "deal_source_group" in _AIA.columns:
+            aia_base = _AIA[_AIA["deal_source_group"] == cf]
 
     total_spend  = int(mkt["cost"].sum()) if "cost" in mkt.columns else 0
     state.mkt_kpi_spend = _fmt(total_spend)
 
-    aia_sub      = _rng(_AIA,"create_date",s,e)
+    aia_sub      = _rng(aia_base,"create_date",s,e)
     total_leads  = aia_sub["record_id"].nunique()
     state.mkt_kpi_leads = _fmtn(total_leads)
 
-    paid_sub = _rng(_AIA,"payment_date",s,e)
+    paid_sub = _rng(aia_base,"payment_date",s,e)
     if "asked_refund" in paid_sub.columns:
         paid_ch = paid_sub[paid_sub["asked_refund"].isna()]["record_id"].nunique()
     else:
@@ -646,55 +1297,49 @@ def _mkt_refresh(state):
     arpu_v = total_mrr//paid_ch   if paid_ch else 0
     state.mkt_kpi_payback = f"{round(cac_v/arpu_v)} mo" if arpu_v else "—"
 
-    # Monthly table
-    if "day" in _MKT.columns:
-        tmp = _MKT.copy()
-        tmp["YearMonth"] = tmp["day"].dt.to_period("M").astype(str)
-        ms = tmp.groupby("YearMonth")["cost"].sum().reset_index(); ms.columns=["YM","Spend"]
+    _mkt_full = _MKT[_MKT["channel"]==cf] if (cf!="All" and "channel" in _MKT.columns) else _MKT
+    li_full = _AIA_LI
+    if cf != "All" and "deal_source_group" in _AIA.columns:
+        li_full = _AIA_LI[_AIA_LI["record_id"].isin(aia_base["record_id"])]
+    _heat_mkt = {"MRR": "green", "ARPU": "green", "CAC": "red"}
 
-        aa = _AIA.copy(); aa["YM"] = aa["create_date"].dt.to_period("M").astype(str)
-        ml = aa.groupby("YM")["record_id"].nunique().reset_index(); ml.columns=["YM","Leads"]
+    # Monthly Performance — all months, expanding, with Total
+    mdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "M", "Month",
+                         lambda p: p.strftime("%b %y"))
+    state.mkt_monthly_json = (grid_payload_b64(mdf, total_id_col="Month", no_sort=True,
+                              sortable=False, center_all=True, bar_cols=["Spend (₹)"],
+                              bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
+                              if len(mdf) else grid_payload_b64(pd.DataFrame()))
 
-        dc_t = aa[aa["dc_date"].notna()].copy(); dc_t["YM_dc"]=dc_t["dc_date"].dt.to_period("M").astype(str)
-        mdc  = dc_t.groupby("YM_dc")["record_id"].nunique().reset_index(); mdc.columns=["YM","DC"]
+    # Weekly Breakdown — same structure, by week
+    wdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "W", "Week",
+                         lambda p: p.start_time.strftime("%d %b %y"), last_n=8)
+    state.mkt_weekly_json = (grid_payload_b64(wdf, total_id_col="Week", no_sort=True,
+                             sortable=False, center_all=True, bar_cols=["Spend (₹)"],
+                             bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
+                             if len(wdf) else grid_payload_b64(pd.DataFrame()))
 
-        pp_t = aa[aa["payment_date"].notna()].copy(); pp_t["YM_p"]=pp_t["payment_date"].dt.to_period("M").astype(str)
-        mpp  = pp_t.groupby("YM_p")["record_id"].nunique().reset_index(); mpp.columns=["YM","Paid"]
-
-        monthly = (ms.merge(ml,on="YM",how="outer")
-                     .merge(mdc,on="YM",how="outer")
-                     .merge(mpp,on="YM",how="outer").fillna(0))
-        monthly["CPL"] = (monthly["Spend"]/monthly["Leads"].replace(0,np.nan)).fillna(0).astype(int)
-        monthly["CAC"] = (monthly["Spend"]/monthly["Paid"].replace(0,np.nan)).fillna(0).astype(int)
-        monthly = monthly.sort_values("YM").reset_index(drop=True)
-        monthly.rename(columns={"YM":"Month","Spend":"Spend (₹)"},inplace=True)
-        state.mkt_monthly_df  = monthly
-        state.mkt_spend_df    = monthly
-        state.mkt_cpl_df      = monthly
+    # charts (trend) — derive from the monthly breakdown
+    if len(mdf):
+        chart = mdf[mdf["Month"] != "Total"].rename(columns={"Spend (₹)": "Spend"})
+        state.mkt_spend_df = chart[["Month","Spend","Leads"]].rename(columns={"Month":"YearMonth"})
+        state.mkt_cpl_df   = chart[["Month","CPL","CAC"]].rename(columns={"Month":"YearMonth"})
     else:
-        state.mkt_monthly_df  = pd.DataFrame()
-        state.mkt_spend_df    = pd.DataFrame()
-        state.mkt_cpl_df      = pd.DataFrame()
+        state.mkt_spend_df = pd.DataFrame(); state.mkt_cpl_df = pd.DataFrame()
 
-    # Weekly
-    cur_start = date.today().replace(day=1)
-    mwk = _MKT[_MKT["day"]>=pd.Timestamp(cur_start)] if "day" in _MKT.columns else pd.DataFrame()
-    if len(mwk):
-        mwk = mwk.copy(); mwk["Week"] = mwk["day"].dt.to_period("W").astype(str)
-        state.mkt_weekly_df = mwk.groupby("Week").agg(Spend=("cost","sum"),Impressions=("impressions","sum")).reset_index()
+    # Channel pies — always show ALL channels (from the channel-unfiltered data)
+    # so a different slice can be clicked.
+    if "channel" in mkt_all.columns and len(mkt_all):
+        cs = mkt_all.groupby("channel")["cost"].sum().reset_index(); cs.columns=["Channel","Spend"]
+        cs = cs.sort_values("Spend", ascending=False, ignore_index=True)
+        state.mkt_channel_spend_json = pie_payload_b64(cs, "Channel", "Spend")
     else:
-        state.mkt_weekly_df = pd.DataFrame()
-
-    # Channel pies
-    if "channel" in _MKT.columns and len(mkt):
-        cs = mkt.groupby("channel")["cost"].sum().reset_index(); cs.columns=["Channel","Spend"]
-        state.mkt_channel_spend_df = cs
-    else:
-        state.mkt_channel_spend_df = pd.DataFrame()
+        state.mkt_channel_spend_json = pie_payload_b64(pd.DataFrame())
 
     cl = _rng(_AIA,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
     cl.columns = ["Channel","Leads"]
-    state.mkt_channel_leads_df = cl
+    cl = cl.sort_values("Leads", ascending=False, ignore_index=True)
+    state.mkt_channel_leads_json = pie_payload_b64(cl, "Channel", "Leads")
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 4 — VA OPS
@@ -706,6 +1351,11 @@ def _va_ops_refresh(state):
     df = _VA.copy()
     if state.va_selected_owner != "All":    df = df[df["deal_owner"]==state.va_selected_owner]
     if state.va_selected_campaign != "All": df = df[df["utm_campaign"]==state.va_selected_campaign]
+    df_allchan = df  # before channel cross-filter — the pie always shows every channel
+    if state.va_channel_filter != "All" and "deal_source_group" in df.columns:
+        df = df[df["deal_source_group"]==state.va_channel_filter]
+    state.va_filter_label = (f"Channel: {state.va_channel_filter}  (click pie again or Show All to clear)"
+                             if state.va_channel_filter != "All" else "")
 
     state.va_kpi_leads       = _rng(df,"create_date",s,e)["record_id"].nunique()
     state.va_kpi_ds          = _rng(df,"ds_date",s,e)["record_id"].nunique()
@@ -736,21 +1386,23 @@ def _va_ops_refresh(state):
     hi2  = coh[coh["eta_pay_date"].notna()&(coh["eta_pay_date"]>=s)&(coh["eta_pay_date"]<=e)&(coh["deal_stage"]=="High Intent")]["record_id"].nunique()
     paid2= coh[coh["payment_date"].notna()&(coh["payment_date"]>=s)&(coh["payment_date"]<=e)]["record_id"].nunique()
     p = lambda n: f"{n/leads*100:.0f}%" if leads else "0%"
-    state.va_funnel_df = pd.DataFrame({
-        "Stage":["Leads","DS","DC","Agreed","Paid"],
-        "Count":[leads,ds2,dc2,hi2,paid2],
-        "Label":[str(leads),f"{ds2} ({p(ds2)})",f"{dc2} ({p(dc2)})",f"{hi2} ({p(hi2)})",f"{paid2} ({p(paid2)})"]
-    })
+    _vlabels = [f"<b>{leads}</b>", f"<b>{ds2} ({p(ds2)})</b>", f"<b>{dc2} ({p(dc2)})</b>",
+                f"<b>{hi2} ({p(hi2)})</b>", f"<b>{paid2} ({p(paid2)})</b>"]
+    state.va_funnel_fig = _make_funnel(
+        ["Leads", "DS", "DC", "Agreed", "Paid"],
+        [leads, ds2, dc2, hi2, paid2], _vlabels)
 
-    dc_sub = _rng(df,"dc_date",s,e).copy(); dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
+    e_cap = min(e, pd.Timestamp(date.today()))     # cap trend at today, like AIA Ops
+    dc_sub = _rng(df,"dc_date",s,e_cap).copy(); dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
     daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
-    trend = pd.DataFrame({"date":pd.date_range(s,e,freq="D")}).merge(daily_dc,on="date",how="left").fillna(0)
+    trend = pd.DataFrame({"date":pd.date_range(s,e_cap,freq="D")}).merge(daily_dc,on="date",how="left").fillna(0)
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
     state.va_trend_df = trend.astype({"DC":int})
 
-    ch = _rng(df,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
+    ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
     ch.columns = ["Channel","Count"]
-    state.va_channel_df = ch
+    ch = ch.sort_values("Count", ascending=False, ignore_index=True)
+    state.va_channel_pie_json = pie_payload_b64(ch, "Channel", "Count")
 
     rows = []
     for owner in sorted(df["deal_owner"].dropna().unique()):
@@ -762,27 +1414,31 @@ def _va_ops_refresh(state):
             "DC":_rng(o,"dc_date",s,e)["record_id"].nunique(),
             "HI":_rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
             "Paid":pd2["record_id"].nunique(),
-            "Revenue":int(pd2["amount_paid"].sum()+pd2["ot_amount_paid"].sum())})
+            "Revenue":int(pd2["amount_paid"].sum()+pd2["ot_amount_paid"].sum()),
+            "MRR":_va_mrr(pd2["record_id"])})
     va_gm = pd.DataFrame(rows)
     if len(va_gm):
         tot = va_gm.select_dtypes("number").sum().to_dict(); tot["GM"]="Total"
-        va_gm = pd.concat([va_gm,pd.DataFrame([tot])],ignore_index=True)
-    state.va_gm_df = va_gm
+        va_gm = pd.concat([va_gm, pd.DataFrame([tot])], ignore_index=True)
+    state.va_gm_json = grid_payload_b64(va_gm, "GM", bar_cols=["HI", "Revenue"], fixed=True)
 
     rows2 = []
     for src in sorted(coh["utm_source_cohort"].dropna().unique()):
         c = coh[coh["utm_source_cohort"]==src]; l2 = c["record_id"].nunique()
         if l2==0: continue
-        pd3 = c[c["payment_date"].notna()&(c["payment_date"]>=s)&(c["payment_date"]<=e)]
+        g   = df[df["utm_source_cohort"]==src]            # whole source group
+        pd3 = g[g["payment_date"].notna()&(g["payment_date"]>=s)&(g["payment_date"]<=e)]
         rows2.append({"UTM":src,"Leads":l2,
             "DC":c[c["dc_date"].notna()&(c["dc_date"]>=s)&(c["dc_date"]<=e)]["record_id"].nunique(),
             "HI":c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
-            "Paid":pd3["record_id"].nunique(),"Revenue":int(pd3["amount_paid"].sum())})
+            "Paid":pd3["record_id"].nunique(),
+            "Revenue":int(pd3["amount_paid"].sum()+pd3["ot_amount_paid"].sum()),
+            "MRR":_va_mrr(pd3["record_id"])})
     va_utm = pd.DataFrame(rows2)
     if len(va_utm):
         tot2 = va_utm.select_dtypes("number").sum().to_dict(); tot2["UTM"]="Total"
-        va_utm = pd.concat([va_utm,pd.DataFrame([tot2])],ignore_index=True)
-    state.va_utm_df = va_utm
+        va_utm = pd.concat([va_utm, pd.DataFrame([tot2])], ignore_index=True)
+    state.va_utm_json = grid_payload_b64(va_utm, "UTM", bar_cols=["HI", "Revenue"], fixed=True)
 
     def _rv(col,label,rcol):
         sub = _rng(df,col,s,e)
@@ -798,12 +1454,18 @@ def _va_ops_refresh(state):
 # ═══════════════════════════════════════════════════════════════════
 
 def _vaf_refresh(state):
-    s = pd.Timestamp(state.vaf_start_date)
-    e = pd.Timestamp(state.vaf_end_date)
     today = pd.Timestamp(date.today())
     df = _VA.copy()
-    paid = df[df["payment_date"].notna()]
+    li = _VA_LI.copy()
+    # Deal Name + Line Item Name filters
+    if state.vaf_selected_deal != "All":
+        df = df[df["deal_name"] == state.vaf_selected_deal]
+        li = li[li["record_id"].isin(df["record_id"])]
+    if state.vaf_selected_line_item != "All" and "line_item_name" in li.columns:
+        li = li[li["line_item_name"] == state.vaf_selected_line_item]
+        df = df[df["record_id"].isin(li["record_id"])]
 
+    paid = df[df["payment_date"].notna()]
     state.vaf_kpi_active  = paid[~paid["deal_stage"].isin(["Churned"])]["record_id"].nunique()
     state.vaf_kpi_revenue = _fmt(int(paid["amount_paid"].sum()+paid["ot_amount_paid"].sum()))
     cycle_map = {"Annual":12,"Half-yearly":6,"Quarterly":3,"Bi-monthly":2,"Monthly":1}
@@ -820,41 +1482,58 @@ def _vaf_refresh(state):
         (paid2["next_renewal"]>=today-pd.Timedelta(days=14))
         &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))]["record_id"].nunique()
 
-    if len(_VA_LI) > 0 and "cohort_month" in _VA_LI.columns:
-        li2 = _VA_LI.copy()
-        li2["billing_month"] = li2["date_paid"].dt.to_period("M").astype(str)
-        li2["cohort_label"]  = li2["cohort_month"].dt.strftime("%b %y")
-        rev_piv = li2.pivot_table(index="cohort_label",columns="billing_month",values="unit_price",aggfunc="sum",fill_value=0)
-        state.vaf_revenue_matrix    = rev_piv.reset_index().rename(columns={"cohort_label":"Cohort"})
-        ret_piv = li2.pivot_table(index="cohort_label",columns="billing_month",values="record_id",aggfunc=pd.Series.nunique,fill_value=0)
-        state.vaf_retention_matrix  = ret_piv.reset_index().rename(columns={"cohort_label":"Cohort"})
-    else:
-        state.vaf_revenue_matrix    = pd.DataFrame()
-        state.vaf_retention_matrix  = pd.DataFrame()
+    _vrev = _mrr_matrix(li, None, "revenue")    # VA has no asked_refund concept
+    _vret = _mrr_matrix(li, None, "retention")
+    state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
+                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                       if len(_vrev) else grid_payload_b64(pd.DataFrame()))
+    state.vaf_retention_matrix_json = (grid_payload_b64(_vret, total_id_col="Cohort",
+                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                       if len(_vret) else grid_payload_b64(pd.DataFrame()))
 
-    if len(_VA_LI) > 0:
-        li3 = _VA_LI.copy(); li3["BillingMonth"] = li3["date_paid"].dt.to_period("M").astype(str)
+    if len(li) > 0:
+        li3 = li.dropna(subset=["date_paid"]).copy()
+        li3["BillingMonth"] = li3["date_paid"].dt.to_period("M").astype(str)
         t = li3.groupby("BillingMonth")["unit_price"].sum().reset_index(); t.columns=["BillingMonth","Revenue"]
         state.vaf_revenue_trend_df = t.sort_values("BillingMonth").reset_index(drop=True)
     else:
         state.vaf_revenue_trend_df = pd.DataFrame()
 
-    rw = paid2[(paid2["next_renewal"]>=today-pd.Timedelta(days=14))&(paid2["next_renewal"]<=today+pd.Timedelta(days=14))]
-    cols_v = [c for c in ["deal_name","poc_email","deal_stage","next_renewal","amount_paid"] if c in rw.columns]
-    state.vaf_renewal_df = (rw[cols_v]
-        .rename(columns={"deal_name":"Deal","poc_email":"Email","deal_stage":"Stage",
-                         "next_renewal":"Due On","amount_paid":"Amount"})
-        .sort_values("Due On").reset_index(drop=True))
+    rw = paid2[(paid2["next_renewal"]>=today-pd.Timedelta(days=14))
+               &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))].sort_values("next_renewal")
+    svc_map = {}
+    if "line_item_name" in li.columns:
+        svc_map = (li.dropna(subset=["line_item_name"])
+                     .groupby("record_id")["line_item_name"]
+                     .apply(lambda x: ", ".join(sorted(set(x.astype(str))))).to_dict())
+    rwd = pd.DataFrame({
+        "Due On":    rw["next_renewal"].dt.strftime("%d-%b-%y"),
+        "Deal":      rw.get("deal_name", ""),
+        "VA Service Name": rw["record_id"].map(svc_map).fillna(""),
+        "POC Email": rw.get("poc_email", ""),
+        "Stage":     rw.get("deal_stage", ""),
+        "Amount":    rw.get("amount_paid", 0),
+    })
+    state.vaf_renewal_json = (grid_payload_b64(rwd, no_sort=True,
+                              center_cols=["Due On", "Amount"], autosize=True)
+                              if len(rwd) else grid_payload_b64(pd.DataFrame()))
 
 # ═══════════════════════════════════════════════════════════════════
 # STATE VARIABLES
 # ═══════════════════════════════════════════════════════════════════
 
+import calendar as _calendar
 _today       = date.today()
 _month_start = date(_today.year, _today.month, 1)
+_month_end   = date(_today.year, _today.month,
+                    _calendar.monthrange(_today.year, _today.month)[1])
+# earliest lead (create_date) across AIA + VA — lower bound for the date filters
+_lead_dates  = pd.concat([_AIA.get("create_date", pd.Series(dtype="datetime64[ns]")),
+                          _VA.get("create_date", pd.Series(dtype="datetime64[ns]"))]).dropna()
+_lead_min    = _lead_dates.min().date() if len(_lead_dates) else date(2024, 12, 1)
 
 # Page 1
-aia_start_date = _month_start;  aia_end_date = _today
+aia_start_date = _month_start;  aia_end_date = _month_end
 aia_owner_list    = ["All"] + sorted(_AIA["deal_owner"].dropna().unique().tolist())
 aia_campaign_list = ["All"] + sorted(_AIA["utm_campaign"].dropna().unique().tolist())
 aia_selected_owner = "All";  aia_selected_campaign = "All"
@@ -863,53 +1542,63 @@ aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
 aia_kpi_collected="₹0"; aia_kpi_mrr="₹0"
 aia_funnel_fig = go.Figure()
-aia_trend_df  = pd.DataFrame({"date_label":[],"DC":[],"Qualified":[]})
-aia_channel_df= pd.DataFrame({"Channel":[],"Count":[]})
-aia_gm_df=pd.DataFrame(); aia_utm_df=pd.DataFrame()
+aia_trend_fig = go.Figure()
+aia_channel_pie_json = ""
+aia_channel_filter = "All"; aia_channel_order = []; aia_filter_label = ""
+aia_channel_click = ""; aia_channel_click_last = ""
+aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""
 aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.DataFrame()
-aia_incentive_df=pd.DataFrame()
 
 # Page 2
-cs_start_date = _month_start;  cs_end_date = _today
+cs_start_date = date(2020,1,1);  cs_end_date = _today   # no date filter on CS page (all-time)
 cs_owner_list = ["All"] + sorted(_AIA["cs_owner"].dropna().unique().tolist())
 cs_deal_list  = ["All"] + sorted(_AIA["deal_name"].dropna().unique().tolist()[:200])
 cs_selected_owner="All"; cs_selected_deal="All"
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
 cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
 cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
-cs_revenue_matrix=pd.DataFrame(); cs_retention_matrix=pd.DataFrame()
-cs_csm_aia_df=pd.DataFrame(); cs_usage_df=pd.DataFrame(); cs_renewal_window_df=pd.DataFrame()
+cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
+cs_csm_eng_json=""; cs_csm_health_json=""
+cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
+cs_usage_all=pd.DataFrame(); cs_usage_deal="All"; cs_usage_csm="All"
+cs_usage_deal_list=["All"]; cs_usage_csm_list=["All"]
+cs_renewal_window_json=""
 
 # Page 3
-mkt_start_date = date(2024,12,1); mkt_end_date = _today
+mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)
 mkt_deal_list = ["All"] + sorted(_AIA["deal_name"].dropna().unique().tolist()[:100])
 mkt_line_item_list = (["All"] + sorted(_AIA_LI["line_item_name"].dropna().unique().tolist()[:100])
                       if "line_item_name" in _AIA_LI.columns else ["All"])
 mkt_selected_deal="All"; mkt_selected_line_item="All"
 mkt_kpi_spend="₹0"; mkt_kpi_leads="0"; mkt_kpi_cpl="₹0"; mkt_kpi_cac="₹0"
 mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
-mkt_monthly_df=pd.DataFrame(); mkt_spend_df=pd.DataFrame(); mkt_cpl_df=pd.DataFrame()
-mkt_weekly_df=pd.DataFrame(); mkt_channel_spend_df=pd.DataFrame(); mkt_channel_leads_df=pd.DataFrame()
+mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_df=pd.DataFrame()
+mkt_channel_spend_json=""; mkt_channel_leads_json=""
+mkt_channel_filter="All"; mkt_filter_label=""
+mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_click_last=""
 
 # Page 4
-va_start_date = _month_start;  va_end_date = _today
+va_start_date = _month_start;  va_end_date = _month_end
 va_owner_list    = ["All"] + sorted(_VA["deal_owner"].dropna().unique().tolist())
 va_campaign_list = ["All"] + sorted(_VA["utm_campaign"].dropna().unique().tolist())
 va_selected_owner="All"; va_selected_campaign="All"
 va_kpi_leads=0; va_kpi_ds=0; va_kpi_dc=0; va_kpi_hi=0; va_kpi_paid=0
 va_kpi_discards=0; va_kpi_parked=0; va_kpi_closed_lost=0
 va_kpi_revenue="₹0"; va_kpi_mrr="₹0"; va_kpi_eom="0"
-va_funnel_df=pd.DataFrame(); va_trend_df=pd.DataFrame(); va_channel_df=pd.DataFrame()
-va_gm_df=pd.DataFrame(); va_utm_df=pd.DataFrame()
+va_funnel_fig=go.Figure(); va_trend_df=pd.DataFrame(); va_channel_pie_json=""
+va_channel_filter="All"; va_filter_label=""; va_channel_click=""; va_channel_click_last=""
+va_gm_json=""; va_utm_json=""
 va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFrame()
 
 # Page 5
-vaf_start_date = date(2024,12,1); vaf_end_date = _today
-vaf_deal_list = ["All"] + sorted(_VA["deal_name"].dropna().unique().tolist()[:200])
-vaf_selected_deal="All"
+vaf_start_date = date(2020,1,1); vaf_end_date = _today   # no date filter (all-time)
+vaf_deal_list = ["All"] + sorted(_VA["deal_name"].dropna().unique().tolist())
+vaf_line_item_list = (["All"] + sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
+                      if "line_item_name" in _VA_LI.columns else ["All"])
+vaf_selected_deal="All"; vaf_selected_line_item="All"
 vaf_kpi_active=0; vaf_kpi_revenue="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_due_14d=0
-vaf_revenue_matrix=pd.DataFrame(); vaf_retention_matrix=pd.DataFrame()
-vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_df=pd.DataFrame()
+vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
+vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
 
 # ── Chart configs ──────────────────────────────────────────────────
 chart_config = {
@@ -923,13 +1612,14 @@ _font = {"family":"Inter,sans-serif","size":12}
 
 aia_funnel_layout = {
     "funnelmode": "stack",
-    "margin": {"l": 20, "r": 110, "t": 20, "b": 20},
-    "height": 320,
+    "margin": {"l": 95, "r": 95, "t": 20, "b": 20},
+    "height": 340,
     "paper_bgcolor": "rgba(0,0,0,0)",
     "plot_bgcolor": "rgba(0,0,0,0)",
-    "font": {"family": "Inter,sans-serif", "size": 12},
+    "font": {"family": "Inter,sans-serif", "size": 13},
     "showlegend": False,
-    "yaxis": {"side": "right", "automargin": True, "title": ""},
+    "yaxis": {"side": "left", "automargin": True, "title": "",
+              "tickfont": {"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"}},
 }
 aia_trend_layout  = {"barmode":"group","margin":{"l":40,"r":20,"t":10,"b":70},
                      "height":320,"legend":{"orientation":"h","y":-0.28,"x":0},
@@ -962,36 +1652,83 @@ vaf_trend_layout  = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":300,
 
 def on_aia_filter_change(state): _aia_ops_refresh(state)
 def on_cs_filter_change(state):  _cs_refresh(state)
+def on_cs_usage_filter(state):   _apply_usage_filter(state)
 def on_mkt_filter_change(state): _mkt_refresh(state)
 def on_va_filter_change(state):  _va_ops_refresh(state)
 def on_vaf_filter_change(state): _vaf_refresh(state)
 
-def total_row_style(state, index, row):
-    vals = list(row.values()) if row else []
-    return "total-row" if vals and str(vals[0]) == "Total" else ""
 
-def _sort_pinned(df, col, asc, id_col):
-    if len(df) == 0 or col not in df.columns: return df
-    mask = df[id_col] == "Total"
-    data = df[~mask].sort_values(col, ascending=asc, ignore_index=True)
-    return pd.concat([data, df[mask]], ignore_index=True)
+def _bridge_channel(raw):
+    """The pie iframe writes 'Channel||<counter>' into a hidden input; strip the
+    counter (which only exists so the value always changes and on_change fires)."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    return raw.split("||")[0].strip()
 
-def on_sort_gm(state, action, payload):
-    state.aia_gm_df = _sort_pinned(state.aia_gm_df, payload["col"], payload["order"]=="asc", "GM")
+def on_aia_channel_click(state):
+    raw = state.aia_channel_click
+    if not raw or raw == state.aia_channel_click_last:
+        return  # dedupe duplicate events fired for the same click
+    state.aia_channel_click_last = raw
+    ch = _bridge_channel(raw)
+    if not ch:
+        return
+    state.aia_channel_filter = "All" if ch == state.aia_channel_filter else ch
+    _aia_ops_refresh(state)
 
-def on_sort_utm(state, action, payload):
-    state.aia_utm_df = _sort_pinned(state.aia_utm_df, payload["col"], payload["order"]=="asc", "UTM Source")
+def on_aia_channel_reset(state):
+    state.aia_channel_filter = "All"
+    _aia_ops_refresh(state)
 
-def on_sort_incentive(state, action, payload):
-    state.aia_incentive_df = _sort_pinned(state.aia_incentive_df, payload["col"], payload["order"]=="asc", "GM")
+def on_va_channel_click(state):
+    raw = state.va_channel_click
+    if not raw or raw == state.va_channel_click_last:
+        return
+    state.va_channel_click_last = raw
+    ch = _bridge_channel(raw)
+    if not ch:
+        return
+    state.va_channel_filter = "All" if ch == state.va_channel_filter else ch
+    _va_ops_refresh(state)
 
-def on_sort_va_gm(state, action, payload):
-    state.va_gm_df = _sort_pinned(state.va_gm_df, payload["col"], payload["order"]=="asc", "GM")
+def on_va_channel_reset(state):
+    state.va_channel_filter = "All"
+    _va_ops_refresh(state)
 
-def on_sort_va_utm(state, action, payload):
-    state.va_utm_df = _sort_pinned(state.va_utm_df, payload["col"], payload["order"]=="asc", "UTM")
+def on_mkt_channel_click(state):
+    raw = state.mkt_channel_click
+    if not raw or raw == state.mkt_channel_click_last:
+        return
+    state.mkt_channel_click_last = raw
+    ch = _bridge_channel(raw)
+    if not ch:
+        return
+    state.mkt_channel_filter = "All" if ch == state.mkt_channel_filter else ch
+    _mkt_refresh(state)
+
+def on_mkt_leads_click(state):
+    raw = state.mkt_leads_click
+    if not raw or raw == state.mkt_leads_click_last:
+        return
+    state.mkt_leads_click_last = raw
+    ch = _bridge_channel(raw)
+    if not ch:
+        return
+    state.mkt_channel_filter = "All" if ch == state.mkt_channel_filter else ch
+    _mkt_refresh(state)
+
+def on_mkt_channel_reset(state):
+    state.mkt_channel_filter = "All"
+    _mkt_refresh(state)
+
+
+def on_navigate(state, page_name, params):
+    if page_name == "/":
+        navigate(state, "aia")
+    return page_name
 
 def on_init(state):
+    navigate(state, "aia")
     _aia_ops_refresh(state)
     _cs_refresh(state)
     _mkt_refresh(state)
@@ -1008,8 +1745,22 @@ from pages.marketing  import MARKETING_PAGE
 from pages.va_ops     import VA_OPS_PAGE
 from pages.va_finance import VA_FINANCE_PAGE
 
+ROOT_PAGE = """
+<|navbar|lov={nav_links}|class_name=main-nav|>
+<|content|>
+"""
+
+nav_links = [
+    ("/aia",        "AIA Ops"),
+    ("/cs",         "CS & Finance"),
+    ("/marketing",  "Marketing"),
+    ("/va-ops",     "VA Ops"),
+    ("/va-finance", "VA Finance"),
+]
+
 pages = {
-    "/":          AIA_OPS_PAGE,
+    "/":          ROOT_PAGE,
+    "aia":        AIA_OPS_PAGE,
     "cs":         CS_FINANCE_PAGE,
     "marketing":  MARKETING_PAGE,
     "va-ops":     VA_OPS_PAGE,
@@ -1021,12 +1772,13 @@ pages = {
 # ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    gui = Gui(pages=pages, css_file="main.css")
+    gui = Gui(pages=pages, css_file="main.css", flask=flask_app)
     gui.run(
         title="AiA + VA Dashboard",
         dark_mode=False,
         port=8080,
         host="0.0.0.0",
         on_init=on_init,
+        on_navigate=on_navigate,
         use_reloader=False,
     )
