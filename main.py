@@ -9,15 +9,19 @@ try:
     sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass
+import threading
+import time as _time
 import pandas as pd
 import numpy as np
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 import psycopg2
 import plotly.graph_objects as go
 from flask import Flask
 from taipy.gui import Gui, navigate
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 from grid_server import grid_bp, grid_payload_b64, pie_payload_b64
 
@@ -150,7 +154,8 @@ def _va_mrr(record_ids):
     return int((li["unit_price"] / term).sum())
 
 
-def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=None):
+def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=None,
+                   drop_zero_spend=False):
     """Marketing performance broken down by period (month/week): Spend, Leads,
     CPL, DC, DC%, Paid, MRR, CAC, ARPU, Payback — with a pinned Total row."""
     spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
@@ -170,8 +175,13 @@ def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=Non
         return pd.DataFrame()
     lo = min(i.min() for i in idxs); hi = max(i.max() for i in idxs)
     full = pd.period_range(lo, hi, freq=freq)
+    if drop_zero_spend:
+        sp_full = spend_by.reindex(full, fill_value=0)
+        full = full[[float(sp_full[p]) > 0 for p in full]]
     if last_n:
         full = full[-last_n:]
+    if len(full) == 0:
+        return pd.DataFrame()
     g = lambda s: s.reindex(full, fill_value=0)
     spend, leads, dc, paid, mrr = g(spend_by), g(leads_by), g(dc_by), g(paid_by), g(mrr_by)
 
@@ -247,7 +257,7 @@ def _usage_cohort():
     return pd.DataFrame(cnt_rows), pd.DataFrame(pct_rows)
 
 
-def _mrr_matrix(li, refund_map, mode):
+def _mrr_matrix(li, refund_map, mode, add_onetime=False):
     """Refunds-adjusted billing-to-MRR cohort matrix (replicates the DAX
     total_monthly_collection / #Active Paid Users). Each non-refunded line item
     is recognised across its active term (date_paid month .. +term, exclusive),
@@ -298,16 +308,21 @@ def _mrr_matrix(li, refund_map, mode):
     out = piv.reset_index()
     out["Cohort"] = out["Cohort"].apply(lambda v: pd.Period(v, freq="M").strftime("%b %y"))
 
-    fr = li[li["recurring_type"] == "Renewal"]
-    if mode == "revenue":
-        frb = fr.groupby(fr["date_paid"].dt.to_period("M"))["unit_price"].sum()
-    else:
-        frb = fr.groupby(fr["date_paid"].dt.to_period("M"))["record_id"].nunique()
-    frb = frb.reindex(full, fill_value=0).round(0).astype(int)
+    def _by_month(sub):
+        if mode == "revenue":
+            b = sub.groupby(sub["date_paid"].dt.to_period("M"))["unit_price"].sum()
+        else:
+            b = sub.groupby(sub["date_paid"].dt.to_period("M"))["record_id"].nunique()
+        return b.reindex(full, fill_value=0).round(0).astype(int)
 
-    fr_row  = {"Cohort": "Fresh Renewals", **{c: int(frb[p]) for c, p in zip(cols, full)}}
-    tot_row = {"Cohort": "Total",          **{c: int(piv[c].sum()) for c in cols}}
-    return pd.concat([out, pd.DataFrame([fr_row, tot_row])], ignore_index=True)
+    extra = []
+    frb = _by_month(li[li["recurring_type"] == "Renewal"])
+    extra.append({"Cohort": "Fresh Renewals", **{c: int(frb[p]) for c, p in zip(cols, full)}})
+    if add_onetime:
+        otb = _by_month(li[li["recurring_type"] == "One-time"])
+        extra.append({"Cohort": "One-time", **{c: int(otb[p]) for c, p in zip(cols, full)}})
+    extra.append({"Cohort": "Total", **{c: int(piv[c].sum()) for c in cols}})
+    return pd.concat([out, pd.DataFrame(extra)], ignore_index=True)
 
 NEON_URL     = os.getenv("NEON_DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
@@ -344,7 +359,7 @@ def _load_all():
                     "ds_date","dc_date","eta_pay_date","payment_date","amount_paid","billing_cycle",
                     "ot_amount_paid","ot_payment_date","renewed_date","parked_date","discard_date",
                     "closed_lost_date","prospect_score","utm_campaign","utm_source","amount?",
-                    "va_discard_reason","va_parked_reason","va_lost_reason","services_bought","poc_email"]
+                    "va_discard_reason","va_parked_reason","va_lost_reason","services_bought","poc_number","poc_email"]
         cols_li  = ["record_id","deal_name","line_item_name","term","billing_frequency",
                     "unit_price","recurring_type","date_paid","billing_start_date","pipeline",
                     "days_extended","deleted","due_on"]
@@ -563,6 +578,36 @@ def _build_billing_end():
 
 _BILLING_END = _build_billing_end()
 
+def _reload_data():
+    """Re-pull everything from the databases and rebuild the in-memory frames /
+    lookups. Used by the scheduled auto-refresh so the dashboard shows fresh
+    data without a restart."""
+    global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN
+    global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACCT_DATES, _BILLING_END
+    _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN = _load_all()
+    _AIA = _prep_aia(_RAW_AIA)
+    _VA  = _prep_va(_RAW_VA)
+    _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
+    _INCENTIVE_TARGETS = _RAW_INC.copy()
+    if "month" in _INCENTIVE_TARGETS.columns:
+        _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
+    _MKT = _RAW_MKT.copy()
+    if "day" in _MKT.columns:
+        _MKT["day"] = pd.to_datetime(_MKT["day"], errors="coerce")
+        _MKT = _nums(_MKT, ["cost", "conversions", "impressions"])
+    _UPL = _RAW_UPL.copy()
+    if "date" in _UPL.columns:
+        _UPL["date"] = pd.to_datetime(_UPL["date"], errors="coerce")
+        _UPL = _nums(_UPL, ["total_uploads", "bill_uploads", "statement_uploads"])
+    _SYN = _RAW_SYN.copy()
+    if "event_date" in _SYN.columns:
+        _SYN["event_date"] = pd.to_datetime(_SYN["event_date"], errors="coerce")
+        _SYN = _nums(_SYN, ["items_count"])
+    _EMAIL_ACCT, _ACTIVE_WEEKS = _build_activity_lookups()
+    _ACCT_DATES = _build_acct_dates()
+    _BILLING_END = _build_billing_end()
+
 def _due_on(record_id):
     d = _BILLING_END.get(record_id)
     return "" if (d is None or pd.isna(d)) else pd.Timestamp(d).strftime("%d-%b-%y")
@@ -696,6 +741,19 @@ def _atp_amount(d, s, e):
         return 0
     amt = pd.to_numeric(sub["amount?"], errors="coerce")
     return int(amt.groupby(sub["record_id"]).max().sum())
+
+def _atp_amount_va(d, s, e):
+    """ATP for VA (DAX #Amount? ATP_VA): sum 'amount?' for records whose
+    eta_pay_date is in range AND payment/discard/parked/closed-lost are all blank."""
+    if "amount?" not in d.columns:
+        return 0
+    sub = _rng(d, "eta_pay_date", s, e)
+    for col in ["payment_date", "discard_date", "parked_date", "closed_lost_date"]:
+        if col in sub.columns:
+            sub = sub[sub[col].isna()]
+    if len(sub) == 0:
+        return 0
+    return int(pd.to_numeric(sub["amount?"], errors="coerce").sum())
 
 def _fmt(v):
     v = int(v)
@@ -852,12 +910,13 @@ def _aia_ops_refresh(state):
     if len(gm):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
-    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI", "ATP"])
+    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI", "ATP"], fixed=True)
 
     # UTM cohort
     rows2 = []
-    for src in sorted(coh["utm_source_cohort"].dropna().unique()):
-        c  = coh[coh["utm_source_cohort"]==src]
+    _utm_src = coh["utm_source_cohort"].fillna("(Blank)")
+    for src in sorted(_utm_src.unique()):
+        c  = coh[_utm_src==src]
         l2 = c["record_id"].nunique()
         if l2 == 0: continue
         pd3 = c[c["payment_date"].notna()&(c["payment_date"]>=s)&(c["payment_date"]<=e)]
@@ -886,7 +945,7 @@ def _aia_ops_refresh(state):
     if len(utm):
         tot2 = utm.select_dtypes("number").sum().to_dict(); tot2["UTM Source"] = "Total"
         utm = pd.concat([utm, pd.DataFrame([tot2])], ignore_index=True)
-    state.aia_utm_json = grid_payload_b64(utm, "UTM Source", bar_cols=["HI", "ATP"])
+    state.aia_utm_json = grid_payload_b64(utm, "UTM Source", bar_cols=["HI", "ATP"], fixed=True)
 
     # Reason tables
     def _reason(date_col, label, rcol):
@@ -984,7 +1043,10 @@ def _aia_ops_refresh(state):
                 inc_df = pd.concat([inc_df, pd.DataFrame([tot_row])], ignore_index=True)
                 state.aia_incentive_json = grid_payload_b64(
                     inc_df, "GM", sort_default_col="Incentive Payout",
-                    center_cols=["Achievement %", "Incentive Tier"])
+                    center_cols=["Achievement %", "Incentive Tier"],
+                    bar_cols=["Gap (Prev Month)", "Incentive Payout"],
+                    bar_color={"Gap (Prev Month)": "#f1a0a0", "Incentive Payout": "#c5e07a"},
+                    heat_cols={"AIA+VA Revenue": "green"})
             else:
                 state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
 
@@ -1073,11 +1135,15 @@ def _cs_refresh(state):
                            .set_index("record_id")["asked_refund"])
     _rev_m = _mrr_matrix(_AIA_LI, _refund_map, "revenue")
     _ret_m = _mrr_matrix(_AIA_LI, _refund_map, "retention")
+    _rev_heat = {c: "green" for c in _rev_m.columns if c != "Cohort"} if len(_rev_m) else {}
+    _ret_heat = {c: "green" for c in _ret_m.columns if c != "Cohort"} if len(_ret_m) else {}
     state.cs_revenue_matrix_json = (grid_payload_b64(_rev_m, total_id_col="Cohort",
-                                    blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                    blank_zeros=True, no_sort=True, sortable=False, center_all=True,
+                                    autosize=True, heat_cols=_rev_heat)
                                     if len(_rev_m) else grid_payload_b64(pd.DataFrame()))
     state.cs_retention_matrix_json = (grid_payload_b64(_ret_m, total_id_col="Cohort",
-                                      blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                      blank_zeros=True, no_sort=True, sortable=False, center_all=True,
+                                      autosize=True, heat_cols=_ret_heat)
                                       if len(_ret_m) else grid_payload_b64(pd.DataFrame()))
 
     # ── Three stacked CSM Performance tables ────────────────────────────────
@@ -1174,13 +1240,13 @@ def _cs_refresh(state):
 
     state.cs_csm_aia_json = grid_payload_b64(
         _with_total(t1_rows, "CSM"), total_id_col="CSM", sort_default_col="AIA Paid",
-        blank_zeros=True, bar_cols=["Int Due"], bar_color="#f4a98c")
+        blank_zeros=True, bar_cols=["Int Due"], bar_color="#f4a98c", autosize=True)
     state.cs_csm_eng_json = grid_payload_b64(
         _with_total(t2_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
-        blank_zeros=True)
+        blank_zeros=True, autosize=True)
     state.cs_csm_health_json = grid_payload_b64(
         _with_total(t3_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
-        blank_zeros=True, bar_cols=["Red Flags Yesterday"], bar_color="#f1a0a0")
+        blank_zeros=True, bar_cols=["Red Flags Yesterday"], bar_color="#f1a0a0", autosize=True)
 
     # Customer Usage Cohort (last 10 integration weeks) — counts + % tables.
     # Both use fixed column widths so they line up as a comparison; % values
@@ -1305,7 +1371,7 @@ def _mkt_refresh(state):
 
     # Monthly Performance — all months, expanding, with Total
     mdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "M", "Month",
-                         lambda p: p.strftime("%b %y"))
+                         lambda p: p.strftime("%b %y"), drop_zero_spend=True)
     state.mkt_monthly_json = (grid_payload_b64(mdf, total_id_col="Month", no_sort=True,
                               sortable=False, center_all=True, bar_cols=["Spend (₹)"],
                               bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
@@ -1415,30 +1481,36 @@ def _va_ops_refresh(state):
             "HI":_rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
             "Paid":pd2["record_id"].nunique(),
             "Revenue":int(pd2["amount_paid"].sum()+pd2["ot_amount_paid"].sum()),
-            "MRR":_va_mrr(pd2["record_id"])})
+            "MRR":_va_mrr(pd2["record_id"]),
+            "ATP":_atp_amount_va(o, s, e)})
     va_gm = pd.DataFrame(rows)
     if len(va_gm):
         tot = va_gm.select_dtypes("number").sum().to_dict(); tot["GM"]="Total"
         va_gm = pd.concat([va_gm, pd.DataFrame([tot])], ignore_index=True)
-    state.va_gm_json = grid_payload_b64(va_gm, "GM", bar_cols=["HI", "Revenue"], fixed=True)
+    state.va_gm_json = grid_payload_b64(va_gm, "GM", bar_cols=["HI", "ATP"],
+                                        fixed=True, autosize=True, first_col_w=250)
 
     rows2 = []
-    for src in sorted(coh["utm_source_cohort"].dropna().unique()):
-        c = coh[coh["utm_source_cohort"]==src]; l2 = c["record_id"].nunique()
+    _utm_src = coh["utm_source_cohort"].fillna("(Blank)")
+    _utm_df  = df["utm_source_cohort"].fillna("(Blank)")
+    for src in sorted(_utm_src.unique()):
+        c = coh[_utm_src==src]; l2 = c["record_id"].nunique()
         if l2==0: continue
-        g   = df[df["utm_source_cohort"]==src]            # whole source group
+        g   = df[_utm_df==src]            # whole source group
         pd3 = g[g["payment_date"].notna()&(g["payment_date"]>=s)&(g["payment_date"]<=e)]
         rows2.append({"UTM":src,"Leads":l2,
             "DC":c[c["dc_date"].notna()&(c["dc_date"]>=s)&(c["dc_date"]<=e)]["record_id"].nunique(),
             "HI":c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
             "Paid":pd3["record_id"].nunique(),
             "Revenue":int(pd3["amount_paid"].sum()+pd3["ot_amount_paid"].sum()),
-            "MRR":_va_mrr(pd3["record_id"])})
+            "MRR":_va_mrr(pd3["record_id"]),
+            "ATP":_atp_amount_va(c, s, e)})
     va_utm = pd.DataFrame(rows2)
     if len(va_utm):
         tot2 = va_utm.select_dtypes("number").sum().to_dict(); tot2["UTM"]="Total"
         va_utm = pd.concat([va_utm, pd.DataFrame([tot2])], ignore_index=True)
-    state.va_utm_json = grid_payload_b64(va_utm, "UTM", bar_cols=["HI", "Revenue"], fixed=True)
+    state.va_utm_json = grid_payload_b64(va_utm, "UTM", bar_cols=["HI", "ATP"],
+                                         fixed=True, autosize=True, first_col_w=250)
 
     def _rv(col,label,rcol):
         sub = _rng(df,col,s,e)
@@ -1482,13 +1554,17 @@ def _vaf_refresh(state):
         (paid2["next_renewal"]>=today-pd.Timedelta(days=14))
         &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))]["record_id"].nunique()
 
-    _vrev = _mrr_matrix(li, None, "revenue")    # VA has no asked_refund concept
-    _vret = _mrr_matrix(li, None, "retention")
+    _vrev = _mrr_matrix(li, None, "revenue", add_onetime=True)   # VA: + One-time row
+    _vret = _mrr_matrix(li, None, "retention", add_onetime=True)
+    _vrev_heat = {c: "green" for c in _vrev.columns if c != "Cohort"} if len(_vrev) else {}
+    _vret_heat = {c: "green" for c in _vret.columns if c != "Cohort"} if len(_vret) else {}
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
-                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True,
+                                       autosize=True, heat_cols=_vrev_heat)
                                        if len(_vrev) else grid_payload_b64(pd.DataFrame()))
     state.vaf_retention_matrix_json = (grid_payload_b64(_vret, total_id_col="Cohort",
-                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True)
+                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True,
+                                       autosize=True, heat_cols=_vret_heat)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
 
     if len(li) > 0:
@@ -1510,6 +1586,7 @@ def _vaf_refresh(state):
         "Due On":    rw["next_renewal"].dt.strftime("%d-%b-%y"),
         "Deal":      rw.get("deal_name", ""),
         "VA Service Name": rw["record_id"].map(svc_map).fillna(""),
+        "POC Number": rw["poc_number"] if "poc_number" in rw.columns else pd.Series("", index=rw.index),
         "POC Email": rw.get("poc_email", ""),
         "Stage":     rw.get("deal_stage", ""),
         "Amount":    rw.get("amount_paid", 0),
@@ -1632,7 +1709,8 @@ aia_pie_layout    = {"margin":{"l":20,"r":20,"t":30,"b":60},"height":340,
 
 va_funnel_layout  = aia_funnel_layout
 va_trend_layout   = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":280,
-                     "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font}
+                     "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font,
+                     "xaxis":{"title":""}}
 va_pie_layout     = aia_pie_layout
 
 mkt_trend_layout  = {"barmode":"group","margin":{"l":40,"r":20,"t":10,"b":60},
@@ -1649,6 +1727,7 @@ vaf_trend_layout  = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":300,
 # ═══════════════════════════════════════════════════════════════════
 # CALLBACKS
 # ═══════════════════════════════════════════════════════════════════
+
 
 def on_aia_filter_change(state): _aia_ops_refresh(state)
 def on_cs_filter_change(state):  _cs_refresh(state)
@@ -1727,13 +1806,37 @@ def on_navigate(state, page_name, params):
         navigate(state, "aia")
     return page_name
 
-def on_init(state):
-    navigate(state, "aia")
+def _refresh_all(state):
     _aia_ops_refresh(state)
     _cs_refresh(state)
     _mkt_refresh(state)
     _va_ops_refresh(state)
     _vaf_refresh(state)
+
+def on_init(state):
+    navigate(state, "aia")
+    _refresh_all(state)
+
+def _broadcast_refresh(state):
+    """Re-run every page's compute for an already-connected client (no navigation)."""
+    try:
+        _refresh_all(state)
+    except Exception:
+        pass
+
+def _auto_refresh_loop(gui):
+    """Every 30 min between 08:00 and 19:00 IST: re-pull data and push it to all
+    connected sessions."""
+    while True:
+        _time.sleep(1800)   # 30 minutes
+        now = datetime.now(_IST)
+        if 8 <= now.hour < 19:
+            try:
+                _reload_data()
+                gui.broadcast_callback(_broadcast_refresh)
+                print(f"[auto-refresh] data reloaded at {now:%Y-%m-%d %H:%M IST}")
+            except Exception as ex:
+                print(f"[auto-refresh] error: {ex}")
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGES
@@ -1773,6 +1876,8 @@ pages = {
 
 if __name__ == "__main__":
     gui = Gui(pages=pages, css_file="main.css", flask=flask_app)
+    # background auto-refresh: every 30 min, 08:00–19:00 IST
+    threading.Thread(target=_auto_refresh_loop, args=(gui,), daemon=True).start()
     gui.run(
         title="AiA + VA Dashboard",
         dark_mode=False,

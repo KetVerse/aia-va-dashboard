@@ -27,7 +27,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      bar_cols=None, fixed=False, streak_cols=None,
                      bar_color="#c5e07a", sortable=True, center_all=False,
                      search_cols=None, status_cols=None, heat_cols=None,
-                     autosize=False):
+                     autosize=False, first_col_w=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -82,12 +82,20 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
     bars = [bool(cols[i] in bar_set) for i in range(len(cols))]
     streak_set = set(streak_cols or [])
     streak = [bool(cols[i] in streak_set) for i in range(len(cols))]
+    # bar_color may be a single colour or a {col: colour} map for per-column bars
+    if isinstance(bar_color, dict):
+        default_bc = "#c5e07a"
+        bar_colors = [bar_color.get(cols[i], default_bc) for i in range(len(cols))]
+    else:
+        default_bc = bar_color
+        bar_colors = None
 
     payload = {"columns": cols, "numeric": numeric, "center": center,
                "rows": rows, "total": total, "bars": bars, "fixed": bool(fixed),
-               "streak": streak, "barColor": bar_color,
+               "streak": streak, "barColor": default_bc, "barColors": bar_colors,
                "sortable": bool(sortable), "searchIdx": search_idx,
-               "statusCol": status_flag, "heat": heat, "autosize": bool(autosize)}
+               "statusCol": status_flag, "heat": heat, "autosize": bool(autosize),
+               "firstW": first_col_w}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -223,7 +231,7 @@ _GRID_HTML = r"""<!DOCTYPE html>
   table.fixed{ table-layout:fixed; }
   table.fixed thead th:first-child,
   table.fixed tbody td:first-child,
-  table.fixed tfoot td:first-child{ width:170px; }
+  table.fixed tfoot td:first-child{ width:var(--firstw, 210px); }
   thead th{
     position:sticky; top:0; z-index:3;
     background:var(--hdr); color:#fff; font-weight:600; font-size:11px;
@@ -392,7 +400,7 @@ function body(){
         html+='<td class="'+cls(i)+'"><span class="'+c+'">'+fmt(v,num[i])+'</span></td>';
       } else if(bars[i] && typeof v==="number" && v>0 && maxes[i]>0){
         const w=Math.max(3, Math.round(v/maxes[i]*100));
-        const bc=DATA.barColor||"#c5e07a";
+        const bc=(DATA.barColors && DATA.barColors[i]) ? DATA.barColors[i] : (DATA.barColor||"#c5e07a");
         html+='<td class="'+cls(i)+'"><span class="bar-wrap">'
              +'<span class="bar-fill" style="width:'+w+'%;background:'+bc+'"></span>'
              +'<span class="bar-val">'+fmt(v,num[i])+'</span></span></td>';
@@ -416,6 +424,8 @@ function render(){
   if(!DATA || !DATA.columns.length){ tbl.style.display="none"; em.style.display="block"; return; }
   tbl.style.display=""; em.style.display="none";
   tbl.className = DATA.fixed ? "fixed" : "";
+  if(DATA.firstW) tbl.style.setProperty("--firstw", DATA.firstW+"px");
+  else tbl.style.removeProperty("--firstw");
   document.getElementById("searchbar").style.display =
       (DATA.searchIdx && DATA.searchIdx.length) ? "block" : "none";
   header(); body(); foot();
@@ -423,7 +433,11 @@ function render(){
     try{
       document.querySelector(".wrap").style.maxHeight="none";
       if(window.frameElement){
-        window.frameElement.style.height=(document.documentElement.scrollHeight+6)+"px";
+        // measure the ACTUAL content (table + search bar), not the iframe viewport
+        const sb=document.getElementById("searchbar");
+        const sbh=(sb && sb.style.display!=="none") ? sb.offsetHeight : 0;
+        const h=tbl.offsetHeight + sbh + 8;
+        window.frameElement.style.height=h+"px";
       }
     }catch(e){}
   }
