@@ -1,19 +1,24 @@
 """VA Finance Dashboard page layout."""
 
 VA_FINANCE_PAGE = """
-<|part|class_name=page-header|
-# VA Finance Dashboard
-|>
-
+<|part|class_name=topbar|
+<|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
 <|layout|columns=1 1|gap=12px|
 <|part|
-<|{vaf_selected_deal}|selector|lov={vaf_deal_list}|dropdown|filter|label=Deal Name|on_change=on_vaf_filter_change|>
+<|{vaf_selected_deal}|selector|lov={vaf_deal_list}|dropdown|filter|label=Deal Name|on_change=on_vaf_filter_change|class_name=wide-filter|>
 |>
 <|part|
-<|{vaf_selected_line_item}|selector|lov={vaf_line_item_list}|dropdown|filter|label=Line Item Name|on_change=on_vaf_filter_change|>
+<|{vaf_selected_line_item}|selector|lov={vaf_line_item_list}|dropdown|filter|label=Line Item Name|on_change=on_vaf_filter_change|class_name=wide-filter|>
 |>
 |>
+|>
+|>
+
+<|part|class_name=page-header|
+# VA Finance Dashboard
+
+<|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
 <|layout|columns=1 1 1 1|gap=8px|

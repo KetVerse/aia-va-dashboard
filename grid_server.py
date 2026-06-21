@@ -27,7 +27,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      bar_cols=None, fixed=False, streak_cols=None,
                      bar_color="#c5e07a", sortable=True, center_all=False,
                      search_cols=None, status_cols=None, heat_cols=None,
-                     autosize=False, first_col_w=None):
+                     autosize=False, first_col_w=None, row_heat_cols=None,
+                     heat_by_row=False):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -95,7 +96,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "streak": streak, "barColor": default_bc, "barColors": bar_colors,
                "sortable": bool(sortable), "searchIdx": search_idx,
                "statusCol": status_flag, "heat": heat, "autosize": bool(autosize),
-               "firstW": first_col_w}
+               "firstW": first_col_w, "rowHeat": row_heat_cols or {},
+               "heatByRow": bool(heat_by_row)}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -105,18 +107,18 @@ def grid_page(name):
                     mimetype="text/html")
 
 
-_PIE_COLORS = ["#1a7fc4", "#16a34a", "#ea580c", "#8b5cf6", "#dc2626",
+_PIE_COLORS = ["#42a5f5", "#16a34a", "#ea580c", "#8b5cf6", "#dc2626",
                "#0891b2", "#ca8a04", "#475569", "#db2777", "#65a30d"]
 
 # Fixed colours for known channels (Google<->LinkedIn swapped, Meta a blue variant)
 _CHANNEL_COLORS = {
     "google ads":     "#FBBC05",   # Google yellow
-    "linkedin ads":   "#1a7fc4",   # blue
-    "linkedin_social":"#1a7fc4",
-    "linkedin":       "#1a7fc4",
-    "meta ads":       "#42a5f5",   # blue variant
-    "meta":           "#42a5f5",
-    "facebook":       "#42a5f5",
+    "linkedin ads":   "#42a5f5",   # light blue
+    "linkedin_social":"#42a5f5",
+    "linkedin":       "#42a5f5",
+    "meta ads":       "#1877F2",   # Meta blue (Facebook blue)
+    "meta":           "#1877F2",
+    "facebook":       "#1877F2",
 }
 
 
@@ -246,7 +248,7 @@ _GRID_HTML = r"""<!DOCTYPE html>
   #searchbar{ padding:8px 10px; display:none; }
   #search{ width:260px; max-width:60%; padding:7px 10px; font-size:13px;
            border:1px solid #cbd5e1; border-radius:6px; font-family:inherit; outline:none; }
-  #search:focus{ border-color:#1a7fc4; }
+  #search:focus{ border-color:#42a5f5; }
   thead th .arr{ font-size:10px; margin-left:5px; opacity:.9; }
   thead th .pri{ font-size:8px; vertical-align:super; opacity:.85; margin-left:1px; }
   tbody td{ padding:7px 12px; border-bottom:1px solid #f1f5f9; color:var(--txt);
@@ -341,7 +343,7 @@ function colMax(i){
   for(const r of DATA.rows){ const v=Number(r[i])||0; if(v>m) m=v; }
   return m;
 }
-const _HEATRGB={green:"22,163,74", red:"220,38,38", blue:"26,127,196", amber:"234,88,12"};
+const _HEATRGB={green:"22,163,74", red:"220,38,38", blue:"26,127,196", amber:"234,88,12", teal:"13,148,136", lightorange:"251,146,60", deepblue:"29,78,216"};
 function numOf(v){
   if(v===null||v===undefined||v==="") return null;
   if(typeof v==="number") return v;
@@ -349,7 +351,19 @@ function numOf(v){
   return isNaN(n)?null:n;
 }
 function heatMax(i){
-  let m=0; for(const r of DATA.rows){ const n=numOf(r[i]); if(n!==null && n>m) m=n; } return m;
+  // column max for the default (green) scale — EXCLUDE rows that have their own
+  // colour (Fresh Renewals/One-time) so they don't dilute the cohort greens
+  let m=0; for(const r of DATA.rows){
+    const rl=(r[0]==null?'':String(r[0]).trim());
+    if(DATA.rowHeat && DATA.rowHeat[rl]) continue;
+    const n=numOf(r[i]); if(n!==null && n>m) m=n;
+  } return m;
+}
+function rowHeatMax(r){
+  // max across a specially-coloured row, so it keeps its own gradient
+  const heat=DATA.heat||[]; let m=0;
+  for(let i=0;i<r.length;i++){ if(!heat[i]) continue; const n=numOf(r[i]); if(n!==null && n>m) m=n; }
+  return m;
 }
 const _MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function dateLabel(offset){
@@ -385,11 +399,22 @@ function body(){
     html+="<tr>";
     r.forEach((v,i)=>{
       let style="";
-      if(heat[i] && hmax[i]>0){
+      if(heat[i]){
         const n=numOf(v);
         if(n!==null && n>0){
-          const a=(0.10+0.32*(n/hmax[i])).toFixed(3);
-          style=' style="background:rgba('+(_HEATRGB[heat[i]]||_HEATRGB.green)+','+a+')"';
+          const rl=(r[0]==null?'':String(r[0]).trim());
+          const ro=(DATA.rowHeat && DATA.rowHeat[rl]) ? DATA.rowHeat[rl] : null;
+          // matrices (heatByRow) scale every cohort row to its OWN acquisition max,
+          // so the first-revenue diagonal is consistently the darkest shade.
+          const denom = (DATA.heatByRow || ro) ? rowHeatMax(r) : hmax[i];
+          if(denom>0){
+            // specially-coloured rows (Fresh Renewals/One-time) get a higher floor
+            // so even small values stay distinct from the pale Total row
+            const floor = ro ? 0.20 : 0.10;
+            const a=Math.min(0.50, floor+0.32*(n/denom)).toFixed(3);
+            const hc = ro || heat[i];
+            style=' style="background:rgba('+(_HEATRGB[hc]||_HEATRGB.green)+','+a+')"';
+          }
         }
       }
       if(strk[i] && typeof v==="string"){

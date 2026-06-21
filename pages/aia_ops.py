@@ -1,25 +1,30 @@
 """AIA Ops Dashboard page layout."""
 
 AIA_OPS_PAGE = """
-<|part|class_name=page-header|
-# AIA Ops Dashboard
-|>
-
+<|part|class_name=topbar|
+<|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
 <|layout|columns=1 1 1 1|gap=12px|
 <|part|
-<|{aia_start_date}|date|label=Start Date|on_change=on_aia_filter_change|>
+<|{aia_start_date}|date|label=Start Date|format=dd/MM/yyyy|on_change=on_aia_filter_change|>
 |>
 <|part|
-<|{aia_end_date}|date|label=End Date|on_change=on_aia_filter_change|>
+<|{aia_end_date}|date|label=End Date|format=dd/MM/yyyy|on_change=on_aia_filter_change|>
 |>
 <|part|
 <|{aia_selected_owner}|selector|lov={aia_owner_list}|dropdown|filter|label=Deal Owner|on_change=on_aia_filter_change|>
 |>
 <|part|
-<|{aia_selected_campaign}|selector|lov={aia_campaign_list}|dropdown|filter|label=UTM Campaign|on_change=on_aia_filter_change|>
+<|{aia_selected_campaign}|selector|lov={aia_campaign_list}|dropdown|filter|label=UTM Campaign|on_change=on_aia_filter_change|class_name=wide-filter|>
 |>
 |>
+|>
+|>
+
+<|part|class_name=page-header|
+# AIA Ops Dashboard
+
+<|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
 <|layout|columns=1 1 1 1 1 1 1|gap=8px|

@@ -1,8 +1,14 @@
 """AIA Marketing Tracker page layout."""
 
 MARKETING_PAGE = """
+<|part|class_name=topbar|
+<|navbar|lov={nav_links}|class_name=main-nav|>
+|>
+
 <|part|class_name=page-header|
 # AIA Marketing Tracker
+
+<|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
 <|layout|columns=1 1 1 1 1 1|gap=8px|

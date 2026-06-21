@@ -31,8 +31,98 @@ load_dotenv()
 flask_app = Flask(__name__)
 flask_app.register_blueprint(grid_bp)
 
+# ── Freeze the header against browser zoom ──────────────────────────────────
+# Browsers scale all content on zoom; this counter-scales the .topbar by the
+# inverse of the current zoom (detected via devicePixelRatio vs. load-time
+# baseline) so the nav bar + filters stay the same physical size at any zoom.
+_ZOOM_LOCK_SCRIPT = """
+<script id="zoom-lock">
+(function () {
+  var BASE = window.devicePixelRatio || 1;
+  function fix() {
+    var z = (window.devicePixelRatio || 1) / BASE;
+    var inv = 1 / z;
+    // measure the real content left edge (the page title / first card)
+    var ref = document.querySelector('.page-header')
+           || document.querySelector('.kpi-card')
+           || document.querySelector('.chart-card');
+    var L = ref ? ref.getBoundingClientRect().left : 16;
+    var vw = document.documentElement.clientWidth;
+    var bars = document.getElementsByClassName('topbar');
+    for (var i = 0; i < bars.length; i++) {
+      var b = bars[i];
+      // bar background tracks the content width (never spills).
+      // setProperty(..,'important') so it overrides the !important CSS rules.
+      b.style.setProperty('left', L + 'px', 'important');
+      b.style.setProperty('right', 'auto', 'important');
+      b.style.setProperty('width', (vw - 2 * L) + 'px', 'important');
+      // freeze the bar height + its contents against browser zoom
+      b.style.setProperty('min-height', (84 * inv) + 'px', 'important');
+      var kids = b.children;
+      for (var j = 0; j < kids.length; j++) kids[j].style.setProperty('zoom', String(inv), 'important');
+    }
+    var root = document.getElementById('root');
+    if (root) root.style.setProperty('padding-top', (104 * inv) + 'px', 'important');
+  }
+  fix();
+  setInterval(fix, 400);
+  window.addEventListener('resize', fix);
+})();
+</script>
+"""
+
+# ── Keyboard page navigation ────────────────────────────────────────────────
+# Alt+PageDown -> next page, Alt+PageUp -> previous page (Excel-style sheet hop),
+# Alt+1..5 -> jump straight to that page.
+# (Ctrl+PgDn/PgUp can't be used: browsers reserve those for switching browser tabs.)
+_PAGE_NAV_SCRIPT = """
+<script id="page-nav">
+(function () {
+  var ORDER = ["/aia", "/cs", "/marketing", "/va-ops", "/va-finance"];
+  function nav(target) {
+    var links = Array.prototype.slice.call(document.querySelectorAll(".main-nav a"));
+    var link = links.filter(function (a) { return a.pathname.replace(/\\/+$/, "") === target; })[0];
+    if (link) link.click();                     // use Taipy's SPA router (no reload)
+    else location.href = target;
+  }
+  function go(delta) {
+    var path = (location.pathname || "").replace(/\\/+$/, "");
+    var idx = ORDER.indexOf(path);
+    if (idx < 0) idx = 0;                        // "/" (root) -> treat as first page
+    nav(ORDER[(idx + delta + ORDER.length) % ORDER.length]);
+  }
+  document.addEventListener("keydown", function (e) {
+    if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey) return;
+    if (e.key === "PageDown") { e.preventDefault(); go(1); }
+    else if (e.key === "PageUp") { e.preventDefault(); go(-1); }
+    else if (/^Digit[1-5]$/.test(e.code || "")) {
+      var n = parseInt(e.code.slice(5), 10) - 1;  // Alt+1 -> page 0, ... Alt+5 -> page 4
+      if (n < ORDER.length) { e.preventDefault(); nav(ORDER[n]); }
+    }
+  });
+})();
+</script>
+"""
+
+@flask_app.after_request
+def _inject_zoom_lock(resp):
+    try:
+        if resp.headers.get("Content-Type", "").startswith("text/html"):
+            html = resp.get_data(as_text=True)
+            if "</body>" in html and 'id="zoom-lock"' not in html:
+                resp.set_data(html.replace("</body>", _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + "</body>"))
+                resp.headers["Content-Length"] = str(len(resp.get_data()))
+    except Exception:
+        pass
+    return resp
+
 _PIE_COLORS = ["#1a7fc4", "#16a34a", "#ea580c", "#8b5cf6", "#dc2626",
                "#0891b2", "#ca8a04", "#475569", "#db2777", "#65a30d"]
+
+# Per-row heatmap colours for the cohort matrices: the Fresh Renewals row uses a
+# deep-blue heatmap (distinct from the pale Total row) and the One-time row a
+# light-orange one (instead of the column green).
+_MATRIX_ROW_HEAT = {"Fresh Renewals": "deepblue", "One-time": "lightorange"}
 
 def _make_pie(df, label_col, value_col, height=340):
     """Pie with labels+percent pulled OUTSIDE the slices, bold and high-contrast,
@@ -375,6 +465,14 @@ def _load_all():
 print("Loading data...")
 _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN = _load_all()
 
+# Timestamp of the last successful data load, shown in each page header (IST).
+_LAST_SYNC = datetime.now(_IST)
+
+def _fmt_sync():
+    return _LAST_SYNC.strftime("%d %b %Y – %H:%M") if _LAST_SYNC else "—"
+
+last_synced = _fmt_sync()
+
 # ═══════════════════════════════════════════════════════════════════
 # COMPUTED COLUMNS
 # ═══════════════════════════════════════════════════════════════════
@@ -584,7 +682,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACCT_DATES, _BILLING_END
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACCT_DATES, _BILLING_END, _LAST_SYNC
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN = _load_all()
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
@@ -607,6 +705,7 @@ def _reload_data():
     _EMAIL_ACCT, _ACTIVE_WEEKS = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
     _BILLING_END = _build_billing_end()
+    _LAST_SYNC = datetime.now(_IST)
 
 def _due_on(record_id):
     d = _BILLING_END.get(record_id)
@@ -1046,7 +1145,7 @@ def _aia_ops_refresh(state):
                     center_cols=["Achievement %", "Incentive Tier"],
                     bar_cols=["Gap (Prev Month)", "Incentive Payout"],
                     bar_color={"Gap (Prev Month)": "#f1a0a0", "Incentive Payout": "#c5e07a"},
-                    heat_cols={"AIA+VA Revenue": "green"})
+                    heat_cols={"AIA+VA Revenue": "green"}, autosize=True)
             else:
                 state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
 
@@ -1139,11 +1238,13 @@ def _cs_refresh(state):
     _ret_heat = {c: "green" for c in _ret_m.columns if c != "Cohort"} if len(_ret_m) else {}
     state.cs_revenue_matrix_json = (grid_payload_b64(_rev_m, total_id_col="Cohort",
                                     blank_zeros=True, no_sort=True, sortable=False, center_all=True,
-                                    autosize=True, heat_cols=_rev_heat)
+                                    autosize=True, heat_cols=_rev_heat, row_heat_cols=_MATRIX_ROW_HEAT,
+                                    heat_by_row=True)
                                     if len(_rev_m) else grid_payload_b64(pd.DataFrame()))
     state.cs_retention_matrix_json = (grid_payload_b64(_ret_m, total_id_col="Cohort",
                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True,
-                                      autosize=True, heat_cols=_ret_heat)
+                                      autosize=True, heat_cols=_ret_heat, row_heat_cols=_MATRIX_ROW_HEAT,
+                                      heat_by_row=True)
                                       if len(_ret_m) else grid_payload_b64(pd.DataFrame()))
 
     # ── Three stacked CSM Performance tables ────────────────────────────────
@@ -1560,11 +1661,13 @@ def _vaf_refresh(state):
     _vret_heat = {c: "green" for c in _vret.columns if c != "Cohort"} if len(_vret) else {}
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
-                                       autosize=True, heat_cols=_vrev_heat)
+                                       autosize=True, heat_cols=_vrev_heat, row_heat_cols=_MATRIX_ROW_HEAT,
+                                       heat_by_row=True)
                                        if len(_vrev) else grid_payload_b64(pd.DataFrame()))
     state.vaf_retention_matrix_json = (grid_payload_b64(_vret, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
-                                       autosize=True, heat_cols=_vret_heat)
+                                       autosize=True, heat_cols=_vret_heat, row_heat_cols=_MATRIX_ROW_HEAT,
+                                       heat_by_row=True)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
 
     if len(li) > 0:
@@ -1729,11 +1832,23 @@ vaf_trend_layout  = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":300,
 # ═══════════════════════════════════════════════════════════════════
 
 
-def on_aia_filter_change(state): _aia_ops_refresh(state)
+def on_aia_filter_change(state):
+    # AIA Ops & VA Ops share Start Date, End Date and Deal Owner (Campaign stays independent).
+    # Owner falls back to "All" if the selected owner isn't a VA Ops deal owner.
+    state.va_start_date     = state.aia_start_date
+    state.va_end_date       = state.aia_end_date
+    state.va_selected_owner = state.aia_selected_owner if state.aia_selected_owner in state.va_owner_list else "All"
+    _aia_ops_refresh(state)
+    _va_ops_refresh(state)
 def on_cs_filter_change(state):  _cs_refresh(state)
 def on_cs_usage_filter(state):   _apply_usage_filter(state)
 def on_mkt_filter_change(state): _mkt_refresh(state)
-def on_va_filter_change(state):  _va_ops_refresh(state)
+def on_va_filter_change(state):
+    state.aia_start_date     = state.va_start_date
+    state.aia_end_date       = state.va_end_date
+    state.aia_selected_owner = state.va_selected_owner if state.va_selected_owner in state.aia_owner_list else "All"
+    _aia_ops_refresh(state)
+    _va_ops_refresh(state)
 def on_vaf_filter_change(state): _vaf_refresh(state)
 
 
@@ -1807,6 +1922,7 @@ def on_navigate(state, page_name, params):
     return page_name
 
 def _refresh_all(state):
+    state.last_synced = _fmt_sync()
     _aia_ops_refresh(state)
     _cs_refresh(state)
     _mkt_refresh(state)
@@ -1849,7 +1965,6 @@ from pages.va_ops     import VA_OPS_PAGE
 from pages.va_finance import VA_FINANCE_PAGE
 
 ROOT_PAGE = """
-<|navbar|lov={nav_links}|class_name=main-nav|>
 <|content|>
 """
 

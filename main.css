@@ -7,18 +7,44 @@ body {
     padding: 0;
 }
 
+/* push page content below the fixed header (top 8px + 84px tall) */
+#root {
+    padding-top: 104px !important;
+    box-sizing: border-box !important;
+}
+
 /* ── Navbar ─────────────────────────────────────────────────────────────── */
-.main-nav,
-.taipy-navbar {
-    background: #1a3a6b !important;
-    padding: 0 24px !important;
-    position: sticky !important;
-    top: 0 !important;
+/* Header row: nav links (left) + filters (right) in ONE pinned fixed-size bar */
+.topbar {
+    position: fixed !important;
+    top: 8px !important;
+    left: 24px !important;
+    right: 24px !important;
     z-index: 100 !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
     display: flex !important;
     align-items: center !important;
-    min-height: 50px !important;
+    background: #1a3a6b !important;
+    border-radius: 14px !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important;
+    padding: 0 24px !important;
+    min-height: 84px !important;
+    box-sizing: border-box !important;
+}
+
+/* nav links sit on the left; the topbar supplies the navy background */
+.main-nav,
+.taipy-navbar {
+    position: static !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    min-height: auto !important;
+    display: flex !important;
+    align-items: center !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
 }
 
 /* every nav item white by default … */
@@ -27,14 +53,14 @@ body {
 .main-nav .MuiTab-root, .main-nav .MuiButtonBase-root,
 .main-nav .MuiTab-root *, .main-nav button, .main-nav button * {
     color: #ffffff !important;
-    font-size: 13px !important;
-    font-weight: 500 !important;
+    font-size: 15px !important;
+    font-weight: 600 !important;
     text-decoration: none !important;
     letter-spacing: 0.3px !important;
 }
 
 .main-nav a, .taipy-navbar a {
-    padding: 8px 16px !important;
+    padding: 10px 18px !important;
     margin: 6px 4px !important;
     border-radius: 6px !important;
     display: inline-block !important;
@@ -57,39 +83,113 @@ body {
 }
 
 /* ── Page Header ────────────────────────────────────────────────────────── */
+/* title + sync stamp on one line, with a full-width underline under the whole row */
+.page-header {
+    display: flex !important;
+    align-items: baseline !important;
+    flex-wrap: wrap !important;
+    column-gap: 12px !important;
+    margin: 16px 0 12px 0 !important;
+    padding-bottom: 10px !important;
+    border-bottom: 3px solid #1a7fc4 !important;
+}
 .page-header h1 {
     font-size: 24px;
     font-weight: 700;
     color: #1a3a6b;
-    margin: 16px 0 12px 0;
-    padding-bottom: 10px;
-    border-bottom: 3px solid #1a7fc4;
+    margin: 0;
+    padding-bottom: 0;
+    border-bottom: none;
 }
 
-/* ── Filter Bar — horizontal, one line ─────────────────────────────────── */
+/* "Last synced at ..." stamp — next to the title, small + bold, black */
+.page-header .sync-stamp,
+.page-header .sync-stamp * {
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    color: #000000 !important;
+}
+
+/* ── Filter Bar — right-aligned within the topbar row ───────────────────── */
 .filter-bar {
-    background: white;
-    border-radius: 10px;
-    padding: 14px 18px;
-    margin-bottom: 16px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    margin: 0 0 0 auto !important;   /* push filters to the right end of the row */
+    display: flex !important;
+    align-items: center !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+    flex: 0 0 auto !important;
+    max-width: none !important;
 }
 
 .filter-bar .taipy-layout {
-    width: 100% !important;
-    align-items: end !important;
+    display: flex !important;
+    width: auto !important;
+    align-items: center !important;
+    gap: 10px !important;
 }
 
-/* every control (date pickers, dropdowns) fills its grid cell */
-.filter-bar .taipy-layout > * > *,
-.filter-bar .MuiFormControl-root,
-.filter-bar .MuiTextField-root,
-.filter-bar .MuiAutocomplete-root,
+/* fixed pixel sizes — the boxes are identical at every zoom level (no reflow) */
+.filter-bar .taipy-layout > * { margin: 0 !important; flex: none !important; }
+
 .filter-bar .taipy-date,
-.filter-bar .taipy-selector {
-    width: 100% !important;
-    min-width: 0 !important;
+.filter-bar .taipy-date .MuiFormControl-root,
+.filter-bar .taipy-date .MuiTextField-root,
+.filter-bar .taipy-date .MuiInputBase-root {
+    width: 170px !important;
+    min-width: 170px !important;
+    margin: 0 !important;
 }
+.filter-bar .taipy-selector,
+.filter-bar .taipy-selector .MuiFormControl-root,
+.filter-bar .taipy-selector .MuiAutocomplete-root,
+.filter-bar .taipy-selector .MuiInputBase-root,
+.filter-bar .MuiAutocomplete-root {
+    width: 200px !important;
+    min-width: 200px !important;
+    margin: 0 !important;
+}
+
+/* white labels / text / borders on the dark nav background */
+.filter-bar .MuiInputLabel-root,
+.filter-bar label,
+.filter-bar .MuiInputBase-input,
+.filter-bar input,
+.filter-bar .MuiAutocomplete-root .MuiInputBase-input,
+.filter-bar .MuiSvgIcon-root {
+    color: #ffffff !important;
+}
+/* floating label (notched into the box outline) — plain white text, no chip */
+.filter-bar .MuiInputLabel-root,
+.filter-bar .MuiInputLabel-outlined,
+.filter-bar .MuiInputLabel-root.Mui-focused,
+.filter-bar .MuiInputLabel-shrink {
+    color: #ffffff !important;
+    background: transparent !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+}
+.filter-bar .MuiInputBase-root { background: rgba(255,255,255,0.08) !important; }
+
+/* the open dropdown list sizes to its longest value, so names are never truncated
+   even when the input box itself is shrunk to fit the row */
+.MuiAutocomplete-popper {
+    width: max-content !important;
+    min-width: 200px !important;
+    max-width: 90vw !important;
+}
+.MuiAutocomplete-popper .MuiAutocomplete-option {
+    white-space: nowrap !important;
+}
+.filter-bar .MuiOutlinedInput-notchedOutline {
+    border-color: rgba(255,255,255,0.45) !important;
+}
+.filter-bar .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+    border-color: rgba(255,255,255,0.85) !important;
+}
+
 
 /* ── KPI Cards ──────────────────────────────────────────────────────────── */
 .kpi-card {

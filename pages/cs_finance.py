@@ -1,19 +1,24 @@
 """CS & Finance page layout."""
 
 CS_FINANCE_PAGE = """
-<|part|class_name=page-header|
-# CS & Finance
-|>
-
+<|part|class_name=topbar|
+<|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
 <|layout|columns=1 1|gap=12px|
 <|part|
 <|{cs_selected_owner}|selector|lov={cs_owner_list}|dropdown|filter|label=CS Owner|on_change=on_cs_filter_change|>
 |>
 <|part|
-<|{cs_selected_deal}|selector|lov={cs_deal_list}|dropdown|filter|label=Deal Name|on_change=on_cs_filter_change|>
+<|{cs_selected_deal}|selector|lov={cs_deal_list}|dropdown|filter|label=Deal Name|on_change=on_cs_filter_change|class_name=wide-filter|>
 |>
 |>
+|>
+|>
+
+<|part|class_name=page-header|
+# CS & Finance
+
+<|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
 <|layout|columns=1 1 1 1 1 1 1|gap=8px|
