@@ -1941,16 +1941,27 @@ def _broadcast_refresh(state):
         pass
 
 def _auto_refresh_loop(gui):
-    """Every 30 min between 08:00 and 19:00 IST: re-pull data and push it to all
-    connected sessions."""
+    """Re-pull data and push it to all connected sessions on every :00 / :30 clock
+    mark (IST), from 08:00 (first) through 19:00 (last) inclusive. These are absolute
+    clock times and do not drift with the container start time; the startup data load
+    is a separate, immediate refresh on top of this schedule."""
     while True:
-        _time.sleep(1800)   # 30 minutes
         now = datetime.now(_IST)
-        if 8 <= now.hour < 19:
+        # sleep until the next half-hour clock boundary (:00 or :30)
+        if now.minute < 30:
+            nxt = now.replace(minute=30, second=0, microsecond=0)
+        else:
+            nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        _time.sleep(max(1, (nxt - now).total_seconds()))
+
+        t = datetime.now(_IST)
+        # window: 08:00 first .. 19:00 last (19:30+ and overnight are skipped)
+        within = (8 <= t.hour <= 18) or (t.hour == 19 and t.minute == 0)
+        if within:
             try:
                 _reload_data()
                 gui.broadcast_callback(_broadcast_refresh)
-                print(f"[auto-refresh] data reloaded at {now:%Y-%m-%d %H:%M IST}")
+                print(f"[auto-refresh] data reloaded at {t:%Y-%m-%d %H:%M IST}")
             except Exception as ex:
                 print(f"[auto-refresh] error: {ex}")
 
