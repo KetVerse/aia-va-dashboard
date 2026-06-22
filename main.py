@@ -928,8 +928,8 @@ def _aia_ops_refresh(state):
     state.aia_kpi_aia_paid    = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
     state.aia_kpi_gst_paid    = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
     if "asked_refund" in pd_.columns:
-        state.aia_kpi_paid    = pd_[pd_["asked_refund"].isna()]["record_id"].nunique()
-        state.aia_kpi_refunds = _rng(df,"churned_date",s,e)[df["asked_refund"].notna()]["record_id"].nunique()
+        state.aia_kpi_paid    = pd_[pd_["asked_refund"] != "Yes"]["record_id"].nunique()
+        state.aia_kpi_refunds = pd_[pd_["asked_refund"] == "Yes"]["record_id"].nunique()
     else:
         state.aia_kpi_paid    = pd_["record_id"].nunique()
         state.aia_kpi_refunds = 0
@@ -939,7 +939,7 @@ def _aia_ops_refresh(state):
     state.aia_kpi_collected   = _fmt(int(pd_.groupby("record_id")["amount_paid"].max().sum()))
     cycle_map = {"Annual":12,"Half-yearly":6,"Quarterly":3,"Bi-monthly":2,"Monthly":1}
     if "asked_refund" in pd_.columns:
-        mrr_df = pd_[pd_["asked_refund"].isna()].copy()
+        mrr_df = pd_[pd_["asked_refund"] != "Yes"].copy()
     else:
         mrr_df = pd_.copy()
     mrr_df["_m"] = mrr_df["billing_cycle"].map(cycle_map)
@@ -991,7 +991,7 @@ def _aia_ops_refresh(state):
         li_sub = _AIA_LI[_AIA_LI["record_id"].isin(pd2["record_id"])
                           &(_AIA_LI["date_paid"]>=s)&(_AIA_LI["date_paid"]<=e)]
         new_li = li_sub[li_sub["recurring_type"]=="New"] if "recurring_type" in li_sub.columns and len(li_sub[li_sub["recurring_type"]=="New"]) else li_sub
-        paid_no_refund = pd2[pd2["asked_refund"].isna()] if "asked_refund" in pd2.columns else pd2
+        paid_no_refund = pd2[pd2["asked_refund"] != "Yes"] if "asked_refund" in pd2.columns else pd2
         rows.append({
             "GM":         owner,
             "Leads":      l,
@@ -1180,7 +1180,7 @@ def _cs_refresh(state):
 
     state.cs_kpi_paid_all = paid_all["record_id"].nunique()
     state.cs_kpi_aia_paid = paid_all[paid_all["module_type"]=="AIA Paid"]["record_id"].nunique()
-    state.cs_kpi_refunds  = df[df["asked_refund"].notna()]["record_id"].nunique() if "asked_refund" in df.columns else 0
+    state.cs_kpi_refunds  = df[df["asked_refund"] == "Yes"]["record_id"].nunique() if "asked_refund" in df.columns else 0
 
     def _next_renewal(row):
         base = row.get("renewed_date") if pd.notna(row.get("renewed_date")) else row.get("payment_date")

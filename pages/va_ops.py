@@ -27,7 +27,7 @@ VA_OPS_PAGE = """
 <|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
-<|layout|columns=1 1 1 1 1 1 1|gap=8px|
+<|layout|columns=1 1 1 1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Leads
 
@@ -62,24 +62,6 @@ Total Revenue
 MRR
 
 <|{va_kpi_mrr}|text|class_name=kpi-value|>
-|>
-|>
-
-<|layout|columns=1 1 1 1|gap=8px|
-<|part|class_name=kpi-card kpi-grey|
-Discard
-
-<|{va_kpi_discards}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Parked
-
-<|{va_kpi_parked}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Closed Lost
-
-<|{va_kpi_closed_lost}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-blue|
 EOM Estimate

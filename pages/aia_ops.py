@@ -27,7 +27,7 @@ AIA_OPS_PAGE = """
 <|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
-<|layout|columns=1 1 1 1 1 1 1|gap=8px|
+<|layout|columns=1 1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Leads
 
@@ -53,11 +53,6 @@ AIA Paid
 
 <|{aia_kpi_aia_paid}|text|class_name=kpi-value|>
 |>
-<|part|class_name=kpi-card kpi-blue|
-Paid
-
-<|{aia_kpi_paid}|text|class_name=kpi-value|>
-|>
 <|part|class_name=kpi-card kpi-green|
 Revenue Collected
 
@@ -65,7 +60,7 @@ Revenue Collected
 |>
 |>
 
-<|layout|columns=1 1 1 1 1 1|gap=8px|
+<|layout|columns=1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-grey|
 GST Paid
 
@@ -75,21 +70,6 @@ GST Paid
 Refunds
 
 <|{aia_kpi_refunds}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Parked
-
-<|{aia_kpi_parked}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Discards
-
-<|{aia_kpi_discards}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Closed Lost
-
-<|{aia_kpi_closed_lost}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-green|
 MRR
