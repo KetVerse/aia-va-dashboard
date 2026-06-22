@@ -1167,7 +1167,8 @@ def _apply_usage_filter(state):
         d, sort_default_col="Usage Active Days (28d)",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
         center_cols=["Paid On", "Int Date", "Due On", "Cadence", "Status"],
-        heat_cols={"Usage Active Days (28d)": "green"})
+        heat_cols={"Usage Active Days (28d)": "green"},
+        link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
 def _cs_refresh(state):
     s = pd.Timestamp(state.cs_start_date)
@@ -1374,6 +1375,7 @@ def _cs_refresh(state):
         _ddmy = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
         usage_rows.append({
             "Deal Name":       row.get("deal_name",""),
+            "record_id":       row.get("record_id",""),
             "CSM":             row.get("cs_owner",""),
             "Stage":           row.get("deal_stage",""),
             "Paid On":         _ddmy(row.get("payment_date")),
@@ -1403,6 +1405,7 @@ def _cs_refresh(state):
     rwd = pd.DataFrame({
         "Due On":    rw["_due"].dt.strftime("%d-%b-%y"),
         "Deal Name": rw.get("deal_name", ""),
+        "record_id": rw["record_id"].values,
         "CSM":       rw.get("cs_owner", ""),
         "POC":       rw.get("poc_number", ""),
         "Email":     rw.get("poc_email", ""),
@@ -1410,7 +1413,8 @@ def _cs_refresh(state):
         "Amount":    rw.get("amount_paid", 0),
     })
     state.cs_renewal_window_json = (grid_payload_b64(
-        rwd, no_sort=True, center_cols=["Due On", "Amount"], autosize=True)
+        rwd, no_sort=True, center_cols=["Due On", "Amount"], autosize=True,
+        link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
         if len(rwd) else grid_payload_b64(pd.DataFrame()))
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1687,7 +1691,8 @@ def _vaf_refresh(state):
                      .apply(lambda x: ", ".join(sorted(set(x.astype(str))))).to_dict())
     rwd = pd.DataFrame({
         "Due On":    rw["next_renewal"].dt.strftime("%d-%b-%y"),
-        "Deal":      rw.get("deal_name", ""),
+        "Deal Name": rw.get("deal_name", ""),
+        "record_id": rw["record_id"].values,
         "VA Service Name": rw["record_id"].map(svc_map).fillna(""),
         "POC Number": rw["poc_number"] if "poc_number" in rw.columns else pd.Series("", index=rw.index),
         "POC Email": rw.get("poc_email", ""),
@@ -1695,7 +1700,8 @@ def _vaf_refresh(state):
         "Amount":    rw.get("amount_paid", 0),
     })
     state.vaf_renewal_json = (grid_payload_b64(rwd, no_sort=True,
-                              center_cols=["Due On", "Amount"], autosize=True)
+                              center_cols=["Due On", "Amount"], autosize=True,
+                              link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
                               if len(rwd) else grid_payload_b64(pd.DataFrame()))
 
 # ═══════════════════════════════════════════════════════════════════

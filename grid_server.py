@@ -28,7 +28,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      bar_color="#c5e07a", sortable=True, center_all=False,
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
-                     heat_by_row=False):
+                     heat_by_row=False, link_cols=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -91,13 +91,25 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
         default_bc = bar_color
         bar_colors = None
 
+    # link_cols: {display_col: (id_col, base_url)} — renders display_col as a
+    # clickable link to base_url+row[id_col]. The id_col is hidden from display.
+    link_map = {}
+    hidden_cols = set()
+    if link_cols:
+        for display_col, (id_col, base_url) in link_cols.items():
+            if display_col in cols and id_col in cols:
+                link_map[display_col] = {"idCol": id_col, "baseUrl": base_url}
+                hidden_cols.add(id_col)
+    hidden = [bool(cols[i] in hidden_cols) for i in range(len(cols))]
+
     payload = {"columns": cols, "numeric": numeric, "center": center,
                "rows": rows, "total": total, "bars": bars, "fixed": bool(fixed),
                "streak": streak, "barColor": default_bc, "barColors": bar_colors,
                "sortable": bool(sortable), "searchIdx": search_idx,
                "statusCol": status_flag, "heat": heat, "autosize": bool(autosize),
                "firstW": first_col_w, "rowHeat": row_heat_cols or {},
-               "heatByRow": bool(heat_by_row)}
+               "heatByRow": bool(heat_by_row), "linkCols": link_map,
+               "hidden": hidden}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -301,8 +313,10 @@ function cls(i){ return DATA.center[i] ? (DATA.numeric[i]?"num":"") : "left"; }
 function header(){
   const h=document.getElementById("h"), cols=DATA.columns;
   const sortable=DATA.sortable!==false;
+  const hidden=DATA.hidden||[];
   let tr="<tr>";
   cols.forEach((c,i)=>{
+    if(hidden[i]) return;
     const s=sortable?SORT.find(s=>s.col===i):null;
     let arr="", pri="";
     if(s){ arr='<span class="arr">'+(s.dir===1?"▲":"▼")+'</span>';
@@ -383,6 +397,12 @@ function streakHtml(s){
 function body(){
   const b=document.getElementById("b"), num=DATA.numeric;
   const bars=DATA.bars||[], strk=DATA.streak||[];
+  const hidden=DATA.hidden||[];
+  const linkCols=DATA.linkCols||{};
+  const cols=DATA.columns;
+  // build a col-name→index map for resolving id columns in link_cols
+  const colIdx={};
+  cols.forEach((c,i)=>{ colIdx[c]=i; });
   const maxes={};
   bars.forEach((on,i)=>{ if(on) maxes[i]=colMax(i); });
   let rows=sortRows(DATA.rows);
@@ -398,6 +418,7 @@ function body(){
   for(const r of rows){
     html+="<tr>";
     r.forEach((v,i)=>{
+      if(hidden[i]) return;
       let style="";
       if(heat[i]){
         const n=numOf(v);
@@ -417,7 +438,19 @@ function body(){
           }
         }
       }
-      if(strk[i] && typeof v==="string"){
+      const colName=cols[i];
+      const lk=linkCols[colName];
+      if(lk){
+        const idIdx=colIdx[lk.idCol];
+        const id=(idIdx!==undefined)?String(r[idIdx]||""):"";
+        const href=id ? lk.baseUrl+id : "";
+        const inner=fmt(v,num[i]);
+        if(href){
+          html+='<td class="'+cls(i)+'"'+style+'><a href="'+href+'" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;cursor:pointer">'+inner+'</a></td>';
+        } else {
+          html+='<td class="'+cls(i)+'"'+style+'>'+inner+'</td>';
+        }
+      } else if(strk[i] && typeof v==="string"){
         html+='<td class="streakcell">'+streakHtml(v)+'</td>';
       } else if(stat[i]){
         const sv=String(v);
@@ -439,9 +472,10 @@ function body(){
 }
 function foot(){
   const f=document.getElementById("f"), num=DATA.numeric;
+  const hidden=DATA.hidden||[];
   if(!DATA.total){ f.innerHTML=""; return; }
   let tr="<tr>";
-  DATA.total.forEach((v,i)=>{ tr+='<td class="'+cls(i)+'">'+fmt(v,num[i])+'</td>'; });
+  DATA.total.forEach((v,i)=>{ if(!hidden[i]) tr+='<td class="'+cls(i)+'">'+fmt(v,num[i])+'</td>'; });
   f.innerHTML=tr+"</tr>";
 }
 function render(){

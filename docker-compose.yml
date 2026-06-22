@@ -4,6 +4,9 @@ services:
   dashboard:
     build: .
     container_name: aia-dashboard
+    # NOTE: public 8080 is kept for now (direct access, NO login). Once the
+    # ops.aiaccountant.com login is verified, delete this whole "ports:" block
+    # (or firewall 8080) so the ONLY way in is through the Microsoft login.
     ports:
       - "8080:8080"
     env_file:
@@ -14,3 +17,34 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
+
+  # ── Microsoft (Entra ID) login gate ──────────────────────────────────────
+  # Traefik terminates TLS for ops.aiaccountant.com and routes here. This
+  # authenticates the user against Microsoft 365, allows only @karboncard.com,
+  # then reverse-proxies the request to the dashboard. No app code changes.
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: aia-oauth2-proxy
+    depends_on:
+      - dashboard
+    env_file:
+      - .env                         # OAUTH2_PROXY_* values live here (see .env.example)
+    command:
+      - --upstream=http://dashboard:8080   # the app, reached over the compose network
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true               # trust X-Forwarded-* from Traefik
+      - --proxy-websockets=true            # Taipy needs WebSocket pass-through
+      - --skip-provider-button=true        # go straight to Microsoft, no extra click
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ops.rule=Host(`ops.aiaccountant.com`)"
+      - "traefik.http.routers.ops.entrypoints=websecure"
+      - "traefik.http.routers.ops.tls.certresolver=letsencrypt"
+      - "traefik.http.services.ops.loadbalancer.server.port=4180"
+      - "traefik.docker.network=taipy-dashboard_default"
+
+# Pin the network name so the traefik.docker.network label above always matches.
+networks:
+  default:
+    name: taipy-dashboard_default
