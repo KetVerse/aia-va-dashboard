@@ -21,7 +21,7 @@ CS_FINANCE_PAGE = """
 <|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
-<|layout|columns=1 1 1 1 1 1 1|gap=8px|
+<|layout|columns=1 1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Paid All
 
@@ -42,24 +42,24 @@ Blocked
 
 <|{cs_kpi_blocked}|text|class_name=kpi-value|>
 |>
-<|part|class_name=kpi-card kpi-red|
-Refunds
-
-<|{cs_kpi_refunds}|text|class_name=kpi-value|>
-|>
 <|part|class_name=kpi-card kpi-green|
 AiA Renewed
 
 <|{cs_kpi_renewed}|text|class_name=kpi-value|>
 |>
-<|part|class_name=kpi-card kpi-grey|
-Integration Due
+<|part|class_name=kpi-card kpi-green|
+MRR
 
-<|{cs_kpi_int_due}|text|class_name=kpi-value|>
+<|{cs_kpi_mrr}|text|class_name=kpi-value|>
 |>
 |>
 
 <|layout|columns=1 1 1 1|gap=8px|
+<|part|class_name=kpi-card kpi-red|
+Refunds
+
+<|{cs_kpi_refunds}|text|class_name=kpi-value|>
+|>
 <|part|class_name=kpi-card kpi-blue|
 Due ±7 Days
 
@@ -70,15 +70,10 @@ Overdue Renewals
 
 <|{cs_kpi_overdue}|text|class_name=kpi-value|>
 |>
-<|part|class_name=kpi-card kpi-green|
-MRR
+<|part|class_name=kpi-card kpi-grey|
+Integration Due
 
-<|{cs_kpi_mrr}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-blue|
-Active Customers
-
-<|{cs_kpi_active}|text|class_name=kpi-value|>
+<|{cs_kpi_int_due}|text|class_name=kpi-value|>
 |>
 |>
 

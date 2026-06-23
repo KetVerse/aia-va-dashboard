@@ -4,6 +4,8 @@ Run: python main.py
 """
 import os
 import sys
+import math
+import unicodedata
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -215,7 +217,7 @@ def _usage_28(email):
     """Usage in the last 28 days for a customer's account. Returns
     (active_days_count, streak) where streak is a 28-char string of '1'/'0'
     with index 0 = today, index 27 = today-27d (any upload OR sync that day)."""
-    ac = _EMAIL_ACCT.get(str(email).lower().strip())
+    ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
     if ac is None:
         return 0, "0" * 28
@@ -302,6 +304,7 @@ def _usage_cohort():
     pct_df), each with a pinned Total row. Replicates the DAX cohort measures."""
     base = _AIA[(_AIA["integration_done_date"].notna())
                 & (_AIA["login_email_id"].notna())
+                & (_AIA["login_email_id"].astype(str).str.strip() != "")
                 & (_AIA["module_type"] == "AIA Paid")].copy()
     if len(base) == 0:
         return pd.DataFrame(), pd.DataFrame()
@@ -324,8 +327,8 @@ def _usage_cohort():
         sub  = base[base["iw"] == wk]
         size = sub["record_id"].nunique()
         tot_int += size
-        accts = {_EMAIL_ACCT.get(em) for em in
-                 sub["login_email_id"].dropna().astype(str).str.lower().str.strip().unique()}
+        accts = {_EMAIL_ACCT.get(_clean_email(em)) for em in
+                 sub["login_email_id"].dropna().unique()}
         accts.discard(None)
         label = wk.strftime("%d %b")
         crow = {"Integration Week": label, "Integrated": size}
@@ -378,7 +381,12 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False):
     if len(li) == 0:
         return pd.DataFrame()
     li["term_n"]  = li["term"].fillna(1).where(li["term"].fillna(1) > 0, 1).astype(int)
-    li["monthly"] = li["unit_price"] / li["term_n"]
+    # Replicate PBI calculated column: renewal_amount
+    # monthly billing → unit_price is a per-month rate, so total = unit_price × term
+    # all other frequencies → unit_price is already the full contract amount
+    _is_monthly = li.get("billing_frequency", pd.Series("", index=li.index)).str.lower().str.strip() == "monthly"
+    li["renewal_amount"] = li["unit_price"].where(~_is_monthly, li["unit_price"] * li["term_n"])
+    li["monthly"] = li["renewal_amount"] / li["term_n"]
 
     recs = []
     for r in li.itertuples(index=False):
@@ -407,7 +415,7 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False):
 
     def _by_month(sub):
         if mode == "revenue":
-            b = sub.groupby(sub["date_paid"].dt.to_period("M"))["unit_price"].sum()
+            b = sub.groupby(sub["date_paid"].dt.to_period("M"))["renewal_amount"].sum()
         else:
             b = sub.groupby(sub["date_paid"].dt.to_period("M"))["record_id"].nunique()
         return b.reindex(full, fill_value=0).round(0).astype(int)
@@ -612,6 +620,15 @@ if "event_date" in _SYN.columns:
     _SYN["event_date"] = pd.to_datetime(_SYN["event_date"], errors="coerce")
     _SYN = _nums(_SYN, ["items_count"])
 
+def _clean_email(v):
+    """Normalise an email for lookup: lower-case, trim, and strip any Unicode
+    'other/control' characters (e.g. a stray U+2060 word-joiner that some CRM
+    exports prepend) which otherwise break email→account matching."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return ""
+    s = "".join(c for c in str(v) if unicodedata.category(c)[0] != "C")
+    return s.lower().strip()
+
 # ── Usage-cohort lookups (precomputed once) ─────────────────────────────────
 # email -> account_id, and the set of (account_id, week-Monday) that had any
 # upload OR sync activity. Used to build the Customer Usage Cohort table fast.
@@ -624,7 +641,7 @@ def _build_activity_lookups():
         t = src[["account_id", dcol]].dropna(subset=["account_id", dcol]).copy()
         if "email" in src.columns:
             for em, ac in src[["email", "account_id"]].dropna().itertuples(index=False):
-                em = str(em).lower().strip()
+                em = _clean_email(em)
                 if em and em not in email_acct:
                     email_acct[em] = ac
         d = pd.to_datetime(t[dcol], errors="coerce").dt.normalize()
@@ -637,16 +654,13 @@ def _build_activity_lookups():
 _EMAIL_ACCT, _ACTIVE_WEEKS = _build_activity_lookups()
 
 def _build_acct_dates():
-    """account_id -> set of normalised dates that had any real upload/sync."""
+    """account_id -> set of normalised dates that had any upload/sync row.
+    Matches PBI COUNTROWS approach — any row counts as activity regardless of items_count."""
     m = {}
-    for src, dcol, vcol in [(_UPL, "date", "total_uploads"),
-                            (_SYN, "event_date", "items_count")]:
+    for src, dcol in [(_UPL, "date"), (_SYN, "event_date")]:
         if dcol not in src.columns or "account_id" not in src.columns:
             continue
-        cols = ["account_id", dcol] + ([vcol] if vcol in src.columns else [])
-        t = src[cols].dropna(subset=["account_id", dcol]).copy()
-        if vcol in src.columns:
-            t = t[t[vcol].fillna(0) > 0]
+        t = src[["account_id", dcol]].dropna(subset=["account_id", dcol]).copy()
         d = pd.to_datetime(t[dcol], errors="coerce").dt.normalize()
         for ac, dd in zip(t["account_id"], d):
             if pd.notna(dd):
@@ -719,7 +733,7 @@ def _due_on(record_id):
     return "" if (d is None or pd.isna(d)) else pd.Timestamp(d).strftime("%d-%b-%y")
 
 def _acct_for(email):
-    return _EMAIL_ACCT.get(str(email).lower().strip())
+    return _EMAIL_ACCT.get(_clean_email(email))
 
 def _activity_between(acct, start, end):
     """count of active days for an account within [start, end] inclusive."""
@@ -728,17 +742,35 @@ def _activity_between(acct, start, end):
         return 0
     return sum(1 for d in ds if start <= d <= end)
 
+def _activity_to(acct, end):
+    """Count all activity dates up to `end` (no lower bound).
+    Matches PBI's DISTINCTCOUNT(date <= MilestoneDate) for initial-phase checks."""
+    ds = _ACCT_DATES.get(acct)
+    if not ds:
+        return 0
+    return sum(1 for d in ds if d <= end)
+
 # ── CSM health measures (per integrated AIA-paid customer record) ───────────
 _CAD_W      = {"Daily": 4, "Weekly": 7, "Bi weekly": 10, "Monthly": 14}
 _CAD_INITEND = {"Daily": 15, "Weekly": 20, "Bi weekly": 25, "Monthly": 29}
 _CAD_NWIN   = {"Daily": 7, "Weekly": 4, "Bi weekly": 3, "Monthly": 2}
 _CAD_PASTINIT = {"Daily": 15, "Weekly": 20, "Bi weekly": 25, "Monthly": 29}
+# Initial-phase checkpoint DAYS (the day-offsets at which a milestone is checked).
+# The REQUIRED active-day count at each checkpoint is computed dynamically as
+# ceil(day / cadence_window) — i.e. one active day per cadence window elapsed,
+# matching PBI (the prior hard-coded counts grew far too fast and over-flagged).
 _MILESTONES = {
     "Daily":     {3:1, 5:2, 7:3, 9:4, 11:5, 13:6, 15:7},
     "Weekly":    {4:1, 8:2, 12:3, 16:4, 20:5},
     "Bi weekly": {4:1, 9:2, 14:3, 19:4, 25:5},
     "Monthly":   {3:1, 8:2, 15:3, 22:4, 29:5},
 }
+
+def _milestone_req(cad, day):
+    """Required cumulative active-days by initial-phase day `day` for cadence
+    `cad`: ceil(day / window) = number of cadence windows elapsed. Matches PBI."""
+    w = _CAD_W.get(cad, 7)
+    return math.ceil(day / w) if w else 0
 
 def _cadence_of(row):
     def _norm(v):
@@ -777,8 +809,8 @@ def _continuous_missed(acct, intdate, cad, days_since, today):
         return 0
     missed = 0
     for day in due:
-        req = _MILESTONES[cad][day]
-        usage = _activity_between(acct, intdate, intdate + pd.Timedelta(days=day)) if acct else 0
+        req = _milestone_req(cad, day)
+        usage = _activity_to(acct, intdate + pd.Timedelta(days=day)) if acct else 0
         if usage < req:
             missed += 1
         else:
@@ -816,10 +848,10 @@ def _flagged_yesterday(acct, intdate, cad, days_since, today):
             eff = max(wstart, intdate)
             return (not acct) or _activity_between(acct, eff, wend) == 0
         return False
-    milestone = _MILESTONES.get(cad, {}).get(yest)
-    if milestone is None:
+    if yest not in _MILESTONES.get(cad, {}):
         return False
-    usage = _activity_between(acct, intdate, today - pd.Timedelta(days=1)) if acct else 0
+    milestone = _milestone_req(cad, yest)
+    usage = _activity_to(acct, today - pd.Timedelta(days=1)) if acct else 0
     return usage < milestone
 
 # ═══════════════════════════════════════════════════════════════════
@@ -849,17 +881,17 @@ def _atp_amount(d, s, e):
     return int(amt.groupby(sub["record_id"]).max().sum())
 
 def _atp_amount_va(d, s, e):
-    """ATP for VA (DAX #Amount? ATP_VA): sum 'amount?' for records whose
-    eta_pay_date is in range AND payment/discard/parked/closed-lost are all blank."""
+    """ATP for VA (DAX cohAmount?): SUMX(VALUES(record_id), MAX(amount?))
+    where deal_stage = 'High Intent' AND eta_pay_date in [s, e]."""
     if "amount?" not in d.columns:
         return 0
     sub = _rng(d, "eta_pay_date", s, e)
-    for col in ["payment_date", "discard_date", "parked_date", "closed_lost_date"]:
-        if col in sub.columns:
-            sub = sub[sub[col].isna()]
+    if "deal_stage" in sub.columns:
+        sub = sub[sub["deal_stage"] == "High Intent"]
     if len(sub) == 0:
         return 0
-    return int(pd.to_numeric(sub["amount?"], errors="coerce").sum())
+    return int(pd.to_numeric(sub["amount?"], errors="coerce")
+               .groupby(sub["record_id"]).max().sum())
 
 def _fmt(v):
     v = int(v)
@@ -888,7 +920,7 @@ def _streak(email, account_id, upl, syn, days=28):
 def _customer_status(row, upl, syn):
     if pd.isna(row.get("integration_done_date")) or pd.isna(row.get("login_email_id")):
         return None
-    email = str(row["login_email_id"]).lower().strip()
+    email = _clean_email(row["login_email_id"])
     cadence = row.get("cadence","Monthly")
     days_since = row.get("days_since_int", 0)
     window = {"Daily":4,"Weekly":7,"Bi weekly":10,"Monthly":14}.get(cadence, 7)
@@ -936,10 +968,10 @@ def _aia_ops_refresh(state):
     state.aia_kpi_gst_paid    = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
     if "asked_refund" in pd_.columns:
         state.aia_kpi_paid    = pd_[pd_["asked_refund"] != "Yes"]["record_id"].nunique()
-        state.aia_kpi_refunds = pd_[pd_["asked_refund"] == "Yes"]["record_id"].nunique()
     else:
         state.aia_kpi_paid    = pd_["record_id"].nunique()
-        state.aia_kpi_refunds = 0
+    rd_ = _rng(df, "churned_date", s, e)
+    state.aia_kpi_refunds = rd_[rd_["asked_refund"] == "Yes"]["record_id"].nunique() if "asked_refund" in rd_.columns else 0
     state.aia_kpi_parked      = _rng(df,"parked_date",s,e)["record_id"].nunique()
     state.aia_kpi_discards    = _rng(df,"discard_date",s,e)["record_id"].nunique()
     state.aia_kpi_closed_lost = _rng(df,"closed_lost_date",s,e)["record_id"].nunique()
@@ -1214,8 +1246,16 @@ def _cs_refresh(state):
     state.cs_kpi_int_due = intd["record_id"].nunique()
 
     # Customer-usage table still needs the integration-done base set
+    # health_base: all module types with non-blank email + intd, matches _idrfr (module_type.notna())
+    # and PBI's Customer_Status_measure which has no module_type filter.
+    health_base = df[(df["integration_done_date"].notna())
+                     & (df["login_email_id"].notna())
+                     & (df["login_email_id"].astype(str).str.strip() != "")
+                     & (df["module_type"].notna())]
+    # int_done: AIA Paid only — used for usage table and cs_kpi_active
     int_done = df[(df["integration_done_date"].notna())
                   & (df["login_email_id"].notna())
+                  & (df["login_email_id"].astype(str).str.strip() != "")
                   & (df["module_type"]=="AIA Paid")]
 
     renewed_sub          = _rng(df, "renewed_date", s, e)
@@ -1265,15 +1305,14 @@ def _cs_refresh(state):
                             | ((sub["deal_stage"]=="Ready for Renewal") & (bc!="Monthly")))]["record_id"].nunique()
         return int(integ + rfr + allren)
 
-    # per-customer health (integrated AIA-paid base), deduped by email
+    # per-customer health — one row per deal, matching PBI COUNTROWS (not deduplicated by email)
+    # Uses health_base (all module types, not just AIA Paid) to match PBI Customer_Status_measure
     today_n = pd.Timestamp(date.today()).normalize()
-    seen_email = set()
     hrows = []
-    for _, row in int_done.iterrows():
-        em = str(row.get("login_email_id","")).lower().strip()
-        if not em or em in seen_email:
+    for _, row in health_base.iterrows():
+        em = _clean_email(row.get("login_email_id",""))
+        if not em:
             continue
-        seen_email.add(em)
         ac = _acct_for(em)
         intd = row.get("integration_done_date")
         if pd.isna(intd):
@@ -1284,6 +1323,9 @@ def _cs_refresh(state):
         hrows.append({
             "cs_owner": row.get("cs_owner"),
             "stage": row.get("deal_stage"),
+            # dedup key for the engagement "Active" measure (PBI DISTINCTCOUNT of
+            # the AIA account — two deals sharing one account count once)
+            "akey": ac if ac else ("em:" + em),
             "a7":  1 if _activity_between(ac, today_n-pd.Timedelta(days=6),  today_n) else 0,
             "a14": 1 if _activity_between(ac, today_n-pd.Timedelta(days=13), today_n) else 0,
             "a21": 1 if _activity_between(ac, today_n-pd.Timedelta(days=20), today_n) else 0,
@@ -1316,20 +1358,32 @@ def _cs_refresh(state):
             "Int Failed":int(int_failed),
             "Integrated":int(integrated),
             "Blocked":   cp[cp["deal_stage"]=="Blocked"]["record_id"].nunique(),
-            "Ready for Renewal": cp[cp["deal_stage"]=="Ready for Renewal"]["record_id"].nunique(),
-            "Renewed":   _rng(c,"renewed_date",s,e)["record_id"].nunique(),
+            "Ready for Renewal": c[
+                (c["deal_stage"]=="Ready for Renewal") &
+                (c["billing_cycle"]=="Monthly" if "billing_cycle" in c.columns else False) &
+                c["module_type"].notna()
+            ]["record_id"].nunique(),
+            "Paid/Renewed": c[
+                (c["module_type"]=="AIA Paid") &
+                ((c["deal_stage"]=="Renewal Done") |
+                 ((c["deal_stage"]=="Ready for Renewal") &
+                  (c["billing_cycle"]!="Monthly" if "billing_cycle" in c.columns else True)))
+            ]["record_id"].nunique(),
             "CS Parked": cp[cp["deal_stage"]=="CS Parked"]["record_id"].nunique(),
             "Churned":   c[c["deal_stage"]=="Churned"]["record_id"].nunique(),
         })
         idr = _idrfr(c)
         h  = hdf[hdf["cs_owner"]==csm] if len(hdf) else hdf
         hh = hdf_health[hdf_health["cs_owner"]==csm] if len(hdf_health) else hdf_health
+        # Active counts: DISTINCTCOUNT of account (PBI) — dedupe deals sharing one account
+        def _act_n(col):
+            return int(hh[hh[col] == 1]["akey"].nunique()) if len(hh) else 0
         t2_rows.append({
             "CSM": csm, "ID + RFR + Renewed": idr,
-            "Active Last 7d":  int(h["a7"].sum())  if len(h) else 0,
-            "Active Last 14d": int(h["a14"].sum()) if len(h) else 0,
-            "Active Last 21d": int(h["a21"].sum()) if len(h) else 0,
-            "Active Last 28d": int(h["a28"].sum()) if len(h) else 0,
+            "Active Last 7d":  _act_n("a7"),
+            "Active Last 14d": _act_n("a14"),
+            "Active Last 21d": _act_n("a21"),
+            "Active Last 28d": _act_n("a28"),
         })
         t3_rows.append({
             "CSM": csm, "ID + RFR + Renewed": idr,
@@ -1374,7 +1428,7 @@ def _cs_refresh(state):
     # Usage table (top 50)
     usage_rows = []
     for _, row in int_done.iterrows():
-        email  = str(row.get("login_email_id","")).lower().strip()
+        email  = _clean_email(row.get("login_email_id",""))
         active_days, streak = _usage_28(email)
         intd = row.get("integration_done_date")
         dsince = (today.normalize() - pd.Timestamp(intd).normalize()).days if pd.notna(intd) else 0
@@ -1455,7 +1509,7 @@ def _mkt_refresh(state):
 
     paid_sub = _rng(aia_base,"payment_date",s,e)
     if "asked_refund" in paid_sub.columns:
-        paid_ch = paid_sub[paid_sub["asked_refund"].isna()]["record_id"].nunique()
+        paid_ch = paid_sub[paid_sub["asked_refund"] != "Yes"]["record_id"].nunique()
     else:
         paid_ch = paid_sub["record_id"].nunique()
 
@@ -1604,18 +1658,17 @@ def _va_ops_refresh(state):
 
     rows2 = []
     _utm_src = coh["utm_source_cohort"].fillna("(Blank)")
-    _utm_df  = df["utm_source_cohort"].fillna("(Blank)")
     for src in sorted(_utm_src.unique()):
         c = coh[_utm_src==src]; l2 = c["record_id"].nunique()
         if l2==0: continue
-        g   = df[_utm_df==src]            # whole source group
-        pd3 = g[g["payment_date"].notna()&(g["payment_date"]>=s)&(g["payment_date"]<=e)]
+        # DAX cohPaid: BOTH create_date AND payment_date must be in [s, e]
+        coh_paid = c[c["payment_date"].notna()&(c["payment_date"]>=s)&(c["payment_date"]<=e)]
         rows2.append({"UTM":src,"Leads":l2,
             "DC":c[c["dc_date"].notna()&(c["dc_date"]>=s)&(c["dc_date"]<=e)]["record_id"].nunique(),
             "HI":c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
-            "Paid":pd3["record_id"].nunique(),
-            "Revenue":int(pd3["amount_paid"].sum()+pd3["ot_amount_paid"].sum()),
-            "MRR":_va_mrr(pd3["record_id"]),
+            "Paid":coh_paid["record_id"].nunique(),
+            "Revenue":int(coh_paid["amount_paid"].sum()+coh_paid.get("ot_amount_paid", pd.Series(0, index=coh_paid.index)).sum()),
+            "MRR":_va_mrr(coh_paid["record_id"]),
             "ATP":_atp_amount_va(c, s, e)})
     va_utm = pd.DataFrame(rows2)
     if len(va_utm):
@@ -1656,7 +1709,16 @@ def _vaf_refresh(state):
     mrr_df = paid.copy(); mrr_df["_m"] = mrr_df["billing_cycle"].map(cycle_map)
     state.vaf_kpi_mrr = _fmt(int((mrr_df["amount_paid"]/mrr_df["_m"].fillna(1)).sum()))
 
+    # Build due_on map from line items — max due_on per record_id (matches PBI)
+    va_due_map = {}
+    if "due_on" in li.columns and "record_id" in li.columns:
+        va_due_map = (li.dropna(subset=["record_id","due_on"])
+                        .groupby("record_id")["due_on"].max().to_dict())
+
     def _next_va(row):
+        rid = row.get("record_id")
+        if rid in va_due_map:
+            return va_due_map[rid]
         base = row.get("renewed_date") if pd.notna(row.get("renewed_date")) else row.get("payment_date")
         if pd.isna(base): return pd.NaT
         m = cycle_map.get(row.get("billing_cycle",""))
