@@ -1425,9 +1425,12 @@ def _cs_refresh(state):
                                   heat_cols=_coh_heat)
                                   if len(pct_df) else grid_payload_b64(pd.DataFrame()))
 
-    # Usage table (top 50)
+    # Usage & Health table — every record with a non-blank payment_date (PBI rule:
+    # no integration / module-type / email filter). Paid-but-not-yet-integrated and
+    # GST-Paid records show too, with blank Int Date and 0 usage.
+    usage_base = df[df["payment_date"].notna()]
     usage_rows = []
-    for _, row in int_done.iterrows():
+    for _, row in usage_base.iterrows():
         email  = _clean_email(row.get("login_email_id",""))
         active_days, streak = _usage_28(email)
         intd = row.get("integration_done_date")
@@ -1445,9 +1448,10 @@ def _cs_refresh(state):
             "Cadence":         cad,
             "Usage Active Days (28d)": active_days,
             "Usage Streak Last 28D (desc)": streak,
-            "Status": _customer_status_m(_acct_for(email),
-                        pd.Timestamp(intd).normalize() if pd.notna(intd) else today,
-                        cad, dsince, today.normalize()) or "",
+            # Status is blank when not yet integrated (no days-since basis), matching PBI
+            "Status": (_customer_status_m(_acct_for(email),
+                        pd.Timestamp(intd).normalize(), cad, dsince, today.normalize()) or "")
+                      if pd.notna(intd) else "",
         })
     usage_all = pd.DataFrame(usage_rows)
     state.cs_usage_all = usage_all
