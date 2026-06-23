@@ -143,12 +143,15 @@ Integration Due
 <|part|class_name=chart-card|
 **Customer Usage & Health**
 
-<|layout|columns=1 1 2|gap=12px|
+<|layout|columns=1 1 1 1|gap=12px|
 <|part|
 <|{cs_usage_deal}|selector|lov={cs_usage_deal_list}|dropdown|filter|label=Deal Name|on_change=on_cs_usage_filter|>
 |>
 <|part|
 <|{cs_usage_csm}|selector|lov={cs_usage_csm_list}|dropdown|filter|label=CSM|on_change=on_cs_usage_filter|>
+|>
+<|part|
+<|{cs_usage_stage}|selector|lov={cs_usage_stage_list}|dropdown|filter|label=Deal Stage|on_change=on_cs_usage_filter|>
 |>
 <|part|
 

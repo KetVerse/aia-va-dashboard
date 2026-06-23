@@ -1209,6 +1209,8 @@ def _apply_usage_filter(state):
         d = d[d["Deal Name"] == state.cs_usage_deal]
     if state.cs_usage_csm != "All":
         d = d[d["CSM"] == state.cs_usage_csm]
+    if state.cs_usage_stage != "All":
+        d = d[d["Stage"] == state.cs_usage_stage]
     state.cs_usage_json = grid_payload_b64(
         d, sort_default_col="Usage Active Days (28d)",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
@@ -1466,6 +1468,8 @@ def _cs_refresh(state):
                                           if len(usage_all) else [])
     state.cs_usage_csm_list  = ["All"] + (sorted(usage_all["CSM"].dropna().unique().tolist())
                                           if len(usage_all) else [])
+    state.cs_usage_stage_list = ["All"] + (sorted(usage_all["Stage"].dropna().unique().tolist())
+                                           if len(usage_all) else [])
     _apply_usage_filter(state)
 
     # Renewal window ±14d — only Ready for Renewal / Renewal Done; Due On =
@@ -1826,8 +1830,8 @@ cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
 cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
-cs_usage_all=pd.DataFrame(); cs_usage_deal="All"; cs_usage_csm="All"
-cs_usage_deal_list=["All"]; cs_usage_csm_list=["All"]
+cs_usage_all=pd.DataFrame(); cs_usage_deal="All"; cs_usage_csm="All"; cs_usage_stage="All"
+cs_usage_deal_list=["All"]; cs_usage_csm_list=["All"]; cs_usage_stage_list=["All"]
 cs_renewal_window_json=""
 
 # Page 3
