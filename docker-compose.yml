@@ -1,14 +1,12 @@
-version: '3.8'
-
 services:
   dashboard:
     build: .
     container_name: aia-dashboard
-    # NOTE: public 8080 is kept for now (direct access, NO login). Once the
-    # ops.aiaccountant.com login is verified, delete this whole "ports:" block
-    # (or firewall 8080) so the ONLY way in is through the Microsoft login.
-    ports:
-      - "8080:8080"
+    # No published ports: the dashboard is reachable ONLY over the internal
+    # compose network (oauth2-proxy --upstream=http://dashboard:8080). The only
+    # way in from the internet is Traefik -> Microsoft login -> oauth2-proxy.
+    expose:
+      - "8080"
     env_file:
       - .env
     restart: unless-stopped
