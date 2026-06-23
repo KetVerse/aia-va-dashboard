@@ -94,6 +94,13 @@ _PAGE_NAV_SCRIPT = """
     nav(ORDER[(idx + delta + ORDER.length) % ORDER.length]);
   }
   document.addEventListener("keydown", function (e) {
+    // Ctrl+Shift+5 → manual data refresh (re-pull from the databases)
+    if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.code === "Digit5" || e.key === "%")) {
+      e.preventDefault();
+      var rbtn = document.querySelector("#manual-refresh-btn button") || document.getElementById("manual-refresh-btn");
+      if (rbtn) rbtn.click();
+      return;
+    }
     // Alt+Shift+R → reset all filters to defaults
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key === "R") {
       e.preventDefault();
@@ -2016,6 +2023,21 @@ def on_reset_filters(state, *_):
     state.vaf_selected_deal  = "All"
     _refresh_all(state)
 
+def on_manual_refresh(state, *_):
+    """Ctrl+Shift+5 — re-pull all data from the databases on demand and push the
+    fresh data to every connected session (same effect as the scheduled
+    auto-refresh, but immediate and not limited to 08:00–19:00)."""
+    try:
+        _reload_data()
+        print(f"[manual-refresh] data reloaded at {datetime.now(_IST):%Y-%m-%d %H:%M:%S IST}")
+    except Exception as ex:
+        print(f"[manual-refresh] error: {ex}")
+    _refresh_all(state)                                  # update the triggering session now
+    try:
+        gui.broadcast_callback(_broadcast_refresh)       # update all other open sessions
+    except Exception:
+        pass
+
 def on_navigate(state, page_name, params):
     if page_name == "/":
         navigate(state, "aia")
@@ -2077,6 +2099,7 @@ from pages.va_finance import VA_FINANCE_PAGE
 
 ROOT_PAGE = """
 <|↺|button|id=reset-filters-btn|on_action=on_reset_filters|class_name=hidden-reset|>
+<|⟳|button|id=manual-refresh-btn|on_action=on_manual_refresh|class_name=hidden-reset|>
 <|content|>
 """
 
