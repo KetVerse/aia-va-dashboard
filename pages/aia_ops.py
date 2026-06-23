@@ -27,6 +27,24 @@ AIA_OPS_PAGE = """
 <|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
+<|layout|columns=1 1 1|gap=8px|
+<|part|class_name=kpi-card kpi-blue|
+AIA Paid
+
+<|{aia_kpi_aia_paid}|text|class_name=kpi-value|>
+|>
+<|part|class_name=kpi-card kpi-green|
+Revenue Collected
+
+<|{aia_kpi_collected}|text|class_name=kpi-value|>
+|>
+<|part|class_name=kpi-card kpi-green|
+MRR
+
+<|{aia_kpi_mrr}|text|class_name=kpi-value|>
+|>
+|>
+
 <|layout|columns=1 1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Leads
@@ -48,19 +66,6 @@ High Intent
 
 <|{aia_kpi_hi}|text|class_name=kpi-value|>
 |>
-<|part|class_name=kpi-card kpi-blue|
-AIA Paid
-
-<|{aia_kpi_aia_paid}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-green|
-Revenue Collected
-
-<|{aia_kpi_collected}|text|class_name=kpi-value|>
-|>
-|>
-
-<|layout|columns=1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-grey|
 GST Paid
 
@@ -70,11 +75,6 @@ GST Paid
 Refunds
 
 <|{aia_kpi_refunds}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-green|
-MRR
-
-<|{aia_kpi_mrr}|text|class_name=kpi-value|>
 |>
 |>
 

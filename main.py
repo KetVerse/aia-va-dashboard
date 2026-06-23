@@ -92,6 +92,13 @@ _PAGE_NAV_SCRIPT = """
     nav(ORDER[(idx + delta + ORDER.length) % ORDER.length]);
   }
   document.addEventListener("keydown", function (e) {
+    // Alt+Shift+R → reset all filters to defaults
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key === "R") {
+      e.preventDefault();
+      var btn = document.querySelector("#reset-filters-btn button") || document.getElementById("reset-filters-btn");
+      if (btn) btn.click();
+      return;
+    }
     if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey) return;
     if (e.key === "PageDown") { e.preventDefault(); go(1); }
     else if (e.key === "PageUp") { e.preventDefault(); go(-1); }
@@ -1922,6 +1929,27 @@ def on_mkt_channel_reset(state):
     _mkt_refresh(state)
 
 
+def on_reset_filters(state, *_):
+    """Alt+Shift+R — reset all page filters to month defaults."""
+    today = date.today()
+    ms = today.replace(day=1)
+    me = (ms + relativedelta(months=1)) - timedelta(days=1)
+    # AIA Ops
+    state.aia_start_date     = ms;  state.aia_end_date     = me
+    state.aia_selected_owner = "All"; state.aia_selected_campaign = "All"
+    state.aia_channel_filter = "All"; state.aia_filter_label = ""
+    # VA Ops
+    state.va_start_date      = ms;  state.va_end_date      = me
+    state.va_selected_owner  = "All"; state.va_selected_campaign = "All"
+    state.va_channel_filter  = "All"; state.va_filter_label  = ""
+    # CS Finance
+    state.cs_selected_owner  = "All"; state.cs_selected_deal = "All"
+    # Marketing
+    state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
+    # VA Finance
+    state.vaf_selected_deal  = "All"
+    _refresh_all(state)
+
 def on_navigate(state, page_name, params):
     if page_name == "/":
         navigate(state, "aia")
@@ -1982,6 +2010,7 @@ from pages.va_ops     import VA_OPS_PAGE
 from pages.va_finance import VA_FINANCE_PAGE
 
 ROOT_PAGE = """
+<|↺|button|id=reset-filters-btn|on_action=on_reset_filters|class_name=hidden-reset|>
 <|content|>
 """
 

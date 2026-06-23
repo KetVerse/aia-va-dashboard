@@ -329,6 +329,11 @@ table.taipy-table thead tr th,
     display: none !important;
 }
 
+/* Hidden reset-filters button — triggered only via Alt+Shift+R shortcut */
+.hidden-reset {
+    display: none !important;
+}
+
 /* Hidden bridge input the pie iframe writes the clicked slice into */
 .piebridge {
     position: absolute !important;
