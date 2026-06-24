@@ -12,10 +12,12 @@ AIA_OPS_PAGE = """
 <|{aia_end_date}|date|label=End Date|format=dd/MM/yyyy|on_change=on_aia_filter_change|>
 |>
 <|part|
-<|{aia_selected_owner}|selector|lov={aia_owner_list}|dropdown|filter|label=Deal Owner|on_change=on_aia_filter_change|>
+<div class="msc" data-key="aia_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_owner_ms}|text|mode=raw|class_name=msc-data msc-data-aia_owner|>
 |>
 <|part|
-<|{aia_selected_campaign}|selector|lov={aia_campaign_list}|dropdown|filter|label=UTM Campaign|on_change=on_aia_filter_change|class_name=wide-filter|>
+<div class="msc wide" data-key="aia_campaign"><div class="msc-cap">UTM Campaign</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_campaign_ms}|text|mode=raw|class_name=msc-data msc-data-aia_campaign|>
 |>
 |>
 |>

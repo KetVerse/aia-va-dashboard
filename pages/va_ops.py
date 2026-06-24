@@ -12,10 +12,12 @@ VA_OPS_PAGE = """
 <|{va_end_date}|date|label=End Date|format=dd/MM/yyyy|on_change=on_va_filter_change|>
 |>
 <|part|
-<|{va_selected_owner}|selector|lov={va_owner_list}|dropdown|filter|label=Deal Owner|on_change=on_va_filter_change|>
+<div class="msc" data-key="va_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{va_owner_ms}|text|mode=raw|class_name=msc-data msc-data-va_owner|>
 |>
 <|part|
-<|{va_selected_campaign}|selector|lov={va_campaign_list}|dropdown|filter|label=UTM Campaign|on_change=on_va_filter_change|class_name=wide-filter|>
+<div class="msc wide" data-key="va_campaign"><div class="msc-cap">UTM Campaign</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{va_campaign_ms}|text|mode=raw|class_name=msc-data msc-data-va_campaign|>
 |>
 |>
 |>

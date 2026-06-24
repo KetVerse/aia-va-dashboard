@@ -5,6 +5,8 @@ Run: python main.py
 import os
 import sys
 import math
+import json
+import base64
 import unicodedata
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -120,13 +122,109 @@ _PAGE_NAV_SCRIPT = """
 </script>
 """
 
+# ── Custom multi-select dropdowns (checkbox panel + summary label) ──────────
+# Enhances each <div class="msc" data-key="..."> in the filter bar into a
+# checkbox dropdown. Options + current selection come from the sibling hidden
+# <div class="msc-data-KEY"> (JSON written by Taipy). On toggle it writes
+# "KEY|<json-list>||<counter>" into the shared .msbridge input → on_ms_change.
+# Summary text: 0 selected → "All", 1 → that name, >1 → "Multiple Selections".
+# The panel closes only on an outside click.
+_MULTISELECT_SCRIPT = """
+<script id="ms-dropdowns">
+(function () {
+  var CTR = 0;
+  function lbl(sel){ return sel.length===0 ? "All" : (sel.length===1 ? sel[0] : "Multiple Selections"); }
+  function bridge(key, sel){
+    try{
+      var host = document.querySelector(".msbridge");
+      var input = host && host.querySelector("input, textarea");
+      if(!input) return;
+      CTR += 1;
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(input, key + "|" + JSON.stringify(sel) + "||" + CTR);
+      input.dispatchEvent(new Event("input", {bubbles:true}));
+    }catch(e){}
+  }
+  function render(msc, data){
+    var key = msc.getAttribute("data-key");
+    var sel = (data.sel || []).slice();
+    var txt = msc.querySelector(".msc-text");
+    var panel = msc.querySelector(".msc-panel");
+    if(txt) txt.textContent = lbl(sel);
+    if(!panel) return;
+    panel.innerHTML = "";
+    (data.lov || []).forEach(function(opt){
+      var row = document.createElement("div");
+      row.className = "msc-opt" + (sel.indexOf(opt) >= 0 ? " sel" : "");
+      var cb = document.createElement("span"); cb.className = "msc-cb";
+      var t  = document.createElement("span"); t.className = "msc-optlabel"; t.textContent = opt;
+      row.appendChild(cb); row.appendChild(t);
+      row.addEventListener("click", function(e){
+        e.stopPropagation();
+        var i = sel.indexOf(opt);
+        if(i >= 0){ sel.splice(i,1); row.classList.remove("sel"); }
+        else { sel.push(opt); row.classList.add("sel"); }
+        if(txt) txt.textContent = lbl(sel);
+        bridge(key, sel);
+      });
+      panel.appendChild(row);
+    });
+  }
+  function dataFor(msc){
+    var h = document.querySelector(".msc-data-" + msc.getAttribute("data-key"));
+    if(!h) return null;
+    var raw = (h.textContent || "").trim();
+    if(!raw) return null;
+    try{
+      var bin = atob(raw);
+      var utf8 = decodeURIComponent(Array.prototype.map.call(bin, function(c){
+        return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+      }).join(""));
+      return {raw: raw, obj: JSON.parse(utf8)};
+    }catch(e){ return null; }
+  }
+  function bindOnce(msc){
+    if(msc.__msInit) return;
+    msc.__msInit = true;
+    var box = msc.querySelector(".msc-box");
+    if(box) box.addEventListener("click", function(e){
+      e.stopPropagation();
+      var open = msc.classList.contains("open");
+      document.querySelectorAll(".msc.open").forEach(function(o){ if(o!==msc) o.classList.remove("open"); });
+      msc.classList.toggle("open", !open);
+    });
+  }
+  function scan(){
+    document.querySelectorAll(".msc").forEach(function(msc){
+      bindOnce(msc);
+      // don't rebuild while the user has the panel open (avoids scroll reset
+      // mid-selection); it re-syncs from the server data once closed.
+      if(msc.classList.contains("open")) return;
+      var d = dataFor(msc);
+      if(d && d.raw !== msc.__msLast){ msc.__msLast = d.raw; render(msc, d.obj); }
+    });
+  }
+  document.addEventListener("click", function(){
+    document.querySelectorAll(".msc.open").forEach(function(o){ o.classList.remove("open"); });
+  });
+  var pending = false;
+  function schedule(){ if(pending) return; pending = true; setTimeout(function(){ pending = false; scan(); }, 40); }
+  try{ new MutationObserver(schedule).observe(document.body, {childList:true, subtree:true}); }catch(e){}
+  if(document.readyState !== "loading") scan();
+  else document.addEventListener("DOMContentLoaded", scan);
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
         if resp.headers.get("Content-Type", "").startswith("text/html"):
             html = resp.get_data(as_text=True)
             if "</body>" in html and 'id="zoom-lock"' not in html:
-                resp.set_data(html.replace("</body>", _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + "</body>"))
+                resp.set_data(html.replace(
+                    "</body>",
+                    _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass
@@ -875,6 +973,32 @@ def _rng(df, col, s, e):
     except Exception:
         return df.iloc[0:0]
 
+def _sel(v):
+    """Normalise a multi-select filter value to a list of chosen options.
+    Empty list / "All" / "" / None all mean 'no filter' (show everything).
+    Accepts a scalar too, so it works during the transition from single-select."""
+    if v is None or v == "All" or v == "":
+        return []
+    if isinstance(v, (list, tuple, set)):
+        return [x for x in v if x not in (None, "All", "")]
+    return [v]
+
+# ── Custom multi-select dropdown (checkbox panel + summary label) ────────────
+# A JS widget (see _MULTISELECT_SCRIPT) renders a checkbox dropdown for each
+# filter and pushes the chosen list back through one shared hidden Taipy input
+# (`ms_bridge`). Python keeps the real list var as the source of truth and feeds
+# the widget a JSON blob ({lov, sel, label}) per filter via a hidden text holder.
+def _ms_label(sel):
+    n = len(sel)
+    return "All" if n == 0 else (sel[0] if n == 1 else "Multiple Selections")
+
+def _ms_json(lov, sel):
+    # base64 so option text containing HTML-special chars (deal names like
+    # "… <> AIA") survives raw-HTML rendering; the JS decodes it.
+    s = _sel(sel)
+    payload = json.dumps({"lov": list(lov), "sel": s, "label": _ms_label(s)})
+    return base64.b64encode(payload.encode("utf-8")).decode("ascii")
+
 def _atp_amount(d, s, e):
     """ATP (DAX #Amount? ATP / cAmount?): for High-Intent records whose
     eta_pay_date falls in range, sum the max 'amount?' per record."""
@@ -957,8 +1081,10 @@ def _aia_ops_refresh(state):
     s = pd.Timestamp(state.aia_start_date)
     e = pd.Timestamp(state.aia_end_date)
     df = _AIA.copy()
-    if state.aia_selected_owner != "All":    df = df[df["deal_owner"]==state.aia_selected_owner]
-    if state.aia_selected_campaign != "All": df = df[df["utm_campaign"]==state.aia_selected_campaign]
+    _o = _sel(state.aia_selected_owner)
+    if _o:    df = df[df["deal_owner"].isin(_o)]
+    _c = _sel(state.aia_selected_campaign)
+    if _c:    df = df[df["utm_campaign"].isin(_c)]
     df_allchan = df  # before channel cross-filter — the pie always shows every channel
     if state.aia_channel_filter != "All" and "deal_source_group" in df.columns:
         df = df[df["deal_source_group"]==state.aia_channel_filter]
@@ -1205,12 +1331,15 @@ def _apply_usage_filter(state):
     if d is None or len(d) == 0:
         state.cs_usage_json = grid_payload_b64(pd.DataFrame())
         return
-    if state.cs_usage_deal != "All":
-        d = d[d["Deal Name"] == state.cs_usage_deal]
-    if state.cs_usage_csm != "All":
-        d = d[d["CSM"] == state.cs_usage_csm]
-    if state.cs_usage_stage != "All":
-        d = d[d["Stage"] == state.cs_usage_stage]
+    _d = _sel(state.cs_usage_deal)
+    if _d:
+        d = d[d["Deal Name"].isin(_d)]
+    _m = _sel(state.cs_usage_csm)
+    if _m:
+        d = d[d["CSM"].isin(_m)]
+    _st = _sel(state.cs_usage_stage)
+    if _st:
+        d = d[d["Stage"].isin(_st)]
     state.cs_usage_json = grid_payload_b64(
         d, sort_default_col="Usage Active Days (28d)",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
@@ -1222,7 +1351,10 @@ def _cs_refresh(state):
     s = pd.Timestamp(state.cs_start_date)
     e = pd.Timestamp(state.cs_end_date)
     df = _AIA.copy()
-    if state.cs_selected_owner != "All": df = df[df["cs_owner"]==state.cs_selected_owner]
+    _co = _sel(state.cs_selected_owner)
+    if _co: df = df[df["cs_owner"].isin(_co)]
+    _cd = _sel(state.cs_selected_deal)
+    if _cd and "deal_name" in df.columns: df = df[df["deal_name"].isin(_cd)]
     today = pd.Timestamp(date.today())
     paid_all = df[df["payment_date"].notna()]
 
@@ -1289,8 +1421,13 @@ def _cs_refresh(state):
     if "asked_refund" in _AIA.columns:
         _refund_map = (_AIA.dropna(subset=["record_id"]).drop_duplicates("record_id")
                            .set_index("record_id")["asked_refund"])
-    _rev_m = _mrr_matrix(_AIA_LI, _refund_map, "revenue")
-    _ret_m = _mrr_matrix(_AIA_LI, _refund_map, "retention")
+    # Matrices come from line items; restrict them to the filtered deals/owners
+    # (the CS Owner / Deal Name dropdowns) via record_id so the filter reaches here.
+    _li_cs = _AIA_LI
+    if _co or _cd:
+        _li_cs = _AIA_LI[_AIA_LI["record_id"].isin(df["record_id"])]
+    _rev_m = _mrr_matrix(_li_cs, _refund_map, "revenue")
+    _ret_m = _mrr_matrix(_li_cs, _refund_map, "retention")
     _rev_heat = {c: "green" for c in _rev_m.columns if c != "Cohort"} if len(_rev_m) else {}
     _ret_heat = {c: "green" for c in _ret_m.columns if c != "Cohort"} if len(_ret_m) else {}
     state.cs_revenue_matrix_json = (grid_payload_b64(_rev_m, total_id_col="Cohort",
@@ -1464,12 +1601,12 @@ def _cs_refresh(state):
         })
     usage_all = pd.DataFrame(usage_rows)
     state.cs_usage_all = usage_all
-    state.cs_usage_deal_list = ["All"] + (sorted(usage_all["Deal Name"].dropna().unique().tolist())
-                                          if len(usage_all) else [])
-    state.cs_usage_csm_list  = ["All"] + (sorted(usage_all["CSM"].dropna().unique().tolist())
-                                          if len(usage_all) else [])
-    state.cs_usage_stage_list = ["All"] + (sorted(usage_all["Stage"].dropna().unique().tolist())
-                                           if len(usage_all) else [])
+    state.cs_usage_deal_list = (sorted(usage_all["Deal Name"].dropna().unique().tolist())
+                                if len(usage_all) else [])
+    state.cs_usage_csm_list  = (sorted(usage_all["CSM"].dropna().unique().tolist())
+                                if len(usage_all) else [])
+    state.cs_usage_stage_list = (sorted(usage_all["Stage"].dropna().unique().tolist())
+                                 if len(usage_all) else [])
     _apply_usage_filter(state)
 
     # Renewal window ±14d — only Ready for Renewal / Renewal Done; Due On =
@@ -1596,8 +1733,10 @@ def _va_ops_refresh(state):
     s = pd.Timestamp(state.va_start_date)
     e = pd.Timestamp(state.va_end_date)
     df = _VA.copy()
-    if state.va_selected_owner != "All":    df = df[df["deal_owner"]==state.va_selected_owner]
-    if state.va_selected_campaign != "All": df = df[df["utm_campaign"]==state.va_selected_campaign]
+    _o = _sel(state.va_selected_owner)
+    if _o:    df = df[df["deal_owner"].isin(_o)]
+    _c = _sel(state.va_selected_campaign)
+    if _c:    df = df[df["utm_campaign"].isin(_c)]
     df_allchan = df  # before channel cross-filter — the pie always shows every channel
     if state.va_channel_filter != "All" and "deal_source_group" in df.columns:
         df = df[df["deal_source_group"]==state.va_channel_filter]
@@ -1710,11 +1849,13 @@ def _vaf_refresh(state):
     df = _VA.copy()
     li = _VA_LI.copy()
     # Deal Name + Line Item Name filters
-    if state.vaf_selected_deal != "All":
-        df = df[df["deal_name"] == state.vaf_selected_deal]
+    _vd = _sel(state.vaf_selected_deal)
+    if _vd:
+        df = df[df["deal_name"].isin(_vd)]
         li = li[li["record_id"].isin(df["record_id"])]
-    if state.vaf_selected_line_item != "All" and "line_item_name" in li.columns:
-        li = li[li["line_item_name"] == state.vaf_selected_line_item]
+    _vli = _sel(state.vaf_selected_line_item)
+    if _vli and "line_item_name" in li.columns:
+        li = li[li["line_item_name"].isin(_vli)]
         df = df[df["record_id"].isin(li["record_id"])]
 
     paid = df[df["payment_date"].notna()]
@@ -1804,9 +1945,9 @@ _lead_min    = _lead_dates.min().date() if len(_lead_dates) else date(2024, 12, 
 
 # Page 1
 aia_start_date = _month_start;  aia_end_date = _month_end
-aia_owner_list    = ["All"] + sorted(_AIA["deal_owner"].dropna().unique().tolist())
-aia_campaign_list = ["All"] + sorted(_AIA["utm_campaign"].dropna().unique().tolist())
-aia_selected_owner = "All";  aia_selected_campaign = "All"
+aia_owner_list    = sorted(_AIA["deal_owner"].dropna().unique().tolist())
+aia_campaign_list = sorted(_AIA["utm_campaign"].dropna().unique().tolist())
+aia_selected_owner = [];  aia_selected_campaign = []
 aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_hi=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
@@ -1821,17 +1962,17 @@ aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.Data
 
 # Page 2
 cs_start_date = date(2020,1,1);  cs_end_date = _today   # no date filter on CS page (all-time)
-cs_owner_list = ["All"] + sorted(_AIA["cs_owner"].dropna().unique().tolist())
-cs_deal_list  = ["All"] + sorted(_AIA["deal_name"].dropna().unique().tolist()[:200])
-cs_selected_owner="All"; cs_selected_deal="All"
+cs_owner_list = sorted(_AIA["cs_owner"].dropna().unique().tolist())
+cs_deal_list  = sorted(_AIA["deal_name"].dropna().unique().tolist()[:200])
+cs_selected_owner=[]; cs_selected_deal=[]
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
 cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
 cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
 cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
-cs_usage_all=pd.DataFrame(); cs_usage_deal="All"; cs_usage_csm="All"; cs_usage_stage="All"
-cs_usage_deal_list=["All"]; cs_usage_csm_list=["All"]; cs_usage_stage_list=["All"]
+cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]
+cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]
 cs_renewal_window_json=""
 
 # Page 3
@@ -1849,9 +1990,9 @@ mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_c
 
 # Page 4
 va_start_date = _month_start;  va_end_date = _month_end
-va_owner_list    = ["All"] + sorted(_VA["deal_owner"].dropna().unique().tolist())
-va_campaign_list = ["All"] + sorted(_VA["utm_campaign"].dropna().unique().tolist())
-va_selected_owner="All"; va_selected_campaign="All"
+va_owner_list    = sorted(_VA["deal_owner"].dropna().unique().tolist())
+va_campaign_list = sorted(_VA["utm_campaign"].dropna().unique().tolist())
+va_selected_owner=[]; va_selected_campaign=[]
 va_kpi_leads=0; va_kpi_ds=0; va_kpi_dc=0; va_kpi_hi=0; va_kpi_paid=0
 va_kpi_discards=0; va_kpi_parked=0; va_kpi_closed_lost=0
 va_kpi_revenue="₹0"; va_kpi_mrr="₹0"; va_kpi_eom="0"
@@ -1862,13 +2003,28 @@ va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFra
 
 # Page 5
 vaf_start_date = date(2020,1,1); vaf_end_date = _today   # no date filter (all-time)
-vaf_deal_list = ["All"] + sorted(_VA["deal_name"].dropna().unique().tolist())
-vaf_line_item_list = (["All"] + sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
-                      if "line_item_name" in _VA_LI.columns else ["All"])
-vaf_selected_deal="All"; vaf_selected_line_item="All"
+vaf_deal_list = sorted(_VA["deal_name"].dropna().unique().tolist())
+vaf_line_item_list = (sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
+                      if "line_item_name" in _VA_LI.columns else [])
+vaf_selected_deal=[]; vaf_selected_line_item=[]
 vaf_kpi_active=0; vaf_kpi_revenue="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_due_14d=0
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
+
+# Custom multi-select dropdowns — one shared JS→Python bridge + a JSON holder
+# ({lov, sel, label}) per filter that the JS checkbox dropdown renders from.
+ms_bridge = ""; ms_bridge_last = ""
+aia_owner_ms      = _ms_json(aia_owner_list,    [])
+aia_campaign_ms   = _ms_json(aia_campaign_list, [])
+va_owner_ms       = _ms_json(va_owner_list,     [])
+va_campaign_ms    = _ms_json(va_campaign_list,  [])
+cs_owner_ms       = _ms_json(cs_owner_list,     [])
+cs_deal_ms        = _ms_json(cs_deal_list,      [])
+cs_usage_deal_ms  = _ms_json([], [])
+cs_usage_csm_ms   = _ms_json([], [])
+cs_usage_stage_ms = _ms_json([], [])
+vaf_deal_ms       = _ms_json(vaf_deal_list,      [])
+vaf_line_item_ms  = _ms_json(vaf_line_item_list, [])
 
 # ── Chart configs ──────────────────────────────────────────────────
 chart_config = {
@@ -1927,19 +2083,76 @@ def on_aia_filter_change(state):
     # Owner falls back to "All" if the selected owner isn't a VA Ops deal owner.
     state.va_start_date     = state.aia_start_date
     state.va_end_date       = state.aia_end_date
-    state.va_selected_owner = state.aia_selected_owner if state.aia_selected_owner in state.va_owner_list else "All"
+    state.va_selected_owner = [o for o in _sel(state.aia_selected_owner) if o in state.va_owner_list]
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
-def on_cs_filter_change(state):  _cs_refresh(state)
-def on_cs_usage_filter(state):   _apply_usage_filter(state)
+def on_cs_filter_change(state):  _cs_refresh(state); _sync_ms(state)
+def on_cs_usage_filter(state):   _apply_usage_filter(state); _sync_ms(state)
 def on_mkt_filter_change(state): _mkt_refresh(state)
 def on_va_filter_change(state):
     state.aia_start_date     = state.va_start_date
     state.aia_end_date       = state.va_end_date
-    state.aia_selected_owner = state.va_selected_owner if state.va_selected_owner in state.aia_owner_list else "All"
+    state.aia_selected_owner = [o for o in _sel(state.va_selected_owner) if o in state.aia_owner_list]
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
-def on_vaf_filter_change(state): _vaf_refresh(state)
+def on_vaf_filter_change(state): _vaf_refresh(state); _sync_ms(state)
+
+# ── Custom multi-select bridge ──────────────────────────────────────────────
+# key -> (state var holding the chosen list, scope deciding which refresh runs)
+_MS_DISPATCH = {
+    "aia_owner":      ("aia_selected_owner",     "aia"),
+    "aia_campaign":   ("aia_selected_campaign",  "aia"),
+    "va_owner":       ("va_selected_owner",      "va"),
+    "va_campaign":    ("va_selected_campaign",   "va"),
+    "cs_owner":       ("cs_selected_owner",      "cs"),
+    "cs_deal":        ("cs_selected_deal",       "cs"),
+    "cs_usage_deal":  ("cs_usage_deal",          "usage"),
+    "cs_usage_csm":   ("cs_usage_csm",           "usage"),
+    "cs_usage_stage": ("cs_usage_stage",         "usage"),
+    "vaf_deal":       ("vaf_selected_deal",      "vaf"),
+    "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
+}
+
+def _sync_ms(state):
+    """Push each filter's {lov, sel, label} JSON to its hidden holder so the JS
+    checkbox dropdowns reflect the current (possibly server-changed) selection."""
+    state.aia_owner_ms      = _ms_json(aia_owner_list,    state.aia_selected_owner)
+    state.aia_campaign_ms   = _ms_json(aia_campaign_list, state.aia_selected_campaign)
+    state.va_owner_ms       = _ms_json(va_owner_list,     state.va_selected_owner)
+    state.va_campaign_ms    = _ms_json(va_campaign_list,  state.va_selected_campaign)
+    state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
+    state.cs_deal_ms        = _ms_json(cs_deal_list,      state.cs_selected_deal)
+    state.cs_usage_deal_ms  = _ms_json(state.cs_usage_deal_list,  state.cs_usage_deal)
+    state.cs_usage_csm_ms   = _ms_json(state.cs_usage_csm_list,   state.cs_usage_csm)
+    state.cs_usage_stage_ms = _ms_json(state.cs_usage_stage_list, state.cs_usage_stage)
+    state.vaf_deal_ms       = _ms_json(vaf_deal_list,      state.vaf_selected_deal)
+    state.vaf_line_item_ms  = _ms_json(vaf_line_item_list, state.vaf_selected_line_item)
+
+def on_ms_change(state):
+    """One shared handler for every custom multi-select. The JS writes
+    '<key>|<json-list>||<counter>' into the hidden ms_bridge input."""
+    raw = state.ms_bridge
+    if not raw or raw == state.ms_bridge_last:
+        return
+    state.ms_bridge_last = raw
+    try:
+        payload, _ctr = raw.rsplit("||", 1)
+        key, js = payload.split("|", 1)
+        sel = json.loads(js)
+        if not isinstance(sel, list):
+            return
+    except Exception:
+        return
+    if key not in _MS_DISPATCH:
+        return
+    var, scope = _MS_DISPATCH[key]
+    setattr(state, var, sel)
+    if scope == "aia":     on_aia_filter_change(state)
+    elif scope == "va":    on_va_filter_change(state)
+    elif scope == "cs":    _cs_refresh(state)
+    elif scope == "usage": _apply_usage_filter(state)
+    elif scope == "vaf":   _vaf_refresh(state)
+    _sync_ms(state)
 
 
 def _bridge_channel(raw):
@@ -2013,18 +2226,19 @@ def on_reset_filters(state, *_):
     me = (ms + relativedelta(months=1)) - timedelta(days=1)
     # AIA Ops
     state.aia_start_date     = ms;  state.aia_end_date     = me
-    state.aia_selected_owner = "All"; state.aia_selected_campaign = "All"
+    state.aia_selected_owner = []; state.aia_selected_campaign = []
     state.aia_channel_filter = "All"; state.aia_filter_label = ""
     # VA Ops
     state.va_start_date      = ms;  state.va_end_date      = me
-    state.va_selected_owner  = "All"; state.va_selected_campaign = "All"
+    state.va_selected_owner  = []; state.va_selected_campaign = []
     state.va_channel_filter  = "All"; state.va_filter_label  = ""
     # CS Finance
-    state.cs_selected_owner  = "All"; state.cs_selected_deal = "All"
+    state.cs_selected_owner  = []; state.cs_selected_deal = []
+    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []
     # Marketing
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
     # VA Finance
-    state.vaf_selected_deal  = "All"
+    state.vaf_selected_deal  = []; state.vaf_selected_line_item = []
     _refresh_all(state)
 
 def on_manual_refresh(state, *_):
@@ -2054,6 +2268,7 @@ def _refresh_all(state):
     _mkt_refresh(state)
     _va_ops_refresh(state)
     _vaf_refresh(state)
+    _sync_ms(state)
 
 def on_init(state):
     navigate(state, "aia")
@@ -2104,6 +2319,9 @@ from pages.va_finance import VA_FINANCE_PAGE
 ROOT_PAGE = """
 <|↺|button|id=reset-filters-btn|on_action=on_reset_filters|class_name=hidden-reset|>
 <|⟳|button|id=manual-refresh-btn|on_action=on_manual_refresh|class_name=hidden-reset|>
+<|part|class_name=piebridge msbridge|
+<|{ms_bridge}|input|on_change=on_ms_change|change_delay=0|>
+|>
 <|content|>
 """
 
