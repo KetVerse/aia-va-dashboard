@@ -153,9 +153,23 @@ _MULTISELECT_SCRIPT = """
     if(txt) txt.textContent = lbl(sel);
     if(!panel) return;
     panel.innerHTML = "";
+    // search box — filters the option rows as you type
+    var search = document.createElement("input");
+    search.className = "msc-search";
+    search.type = "text";
+    search.placeholder = "Search\\u2026";
+    search.addEventListener("input", function(){
+      var q = search.value.toLowerCase();
+      panel.querySelectorAll(".msc-opt").forEach(function(r){
+        var t = (r.getAttribute("data-opt") || "").toLowerCase();
+        r.style.display = (t.indexOf(q) >= 0) ? "" : "none";
+      });
+    });
+    panel.appendChild(search);
     (data.lov || []).forEach(function(opt){
       var row = document.createElement("div");
       row.className = "msc-opt" + (sel.indexOf(opt) >= 0 ? " sel" : "");
+      row.setAttribute("data-opt", opt);
       var cb = document.createElement("span"); cb.className = "msc-cb";
       var t  = document.createElement("span"); t.className = "msc-optlabel"; t.textContent = opt;
       row.appendChild(cb); row.appendChild(t);
@@ -193,6 +207,9 @@ _MULTISELECT_SCRIPT = """
       document.querySelectorAll(".msc.open").forEach(function(o){ if(o!==msc) o.classList.remove("open"); });
       msc.classList.toggle("open", !open);
     });
+    // clicks inside the panel (search box, option rows) must not close it
+    var panel = msc.querySelector(".msc-panel");
+    if(panel) panel.addEventListener("click", function(e){ e.stopPropagation(); });
   }
   function scan(){
     document.querySelectorAll(".msc").forEach(function(msc){
@@ -1354,7 +1371,11 @@ def _cs_refresh(state):
     _co = _sel(state.cs_selected_owner)
     if _co: df = df[df["cs_owner"].isin(_co)]
     _cd = _sel(state.cs_selected_deal)
-    if _cd and "deal_name" in df.columns: df = df[df["deal_name"].isin(_cd)]
+    if _cd:
+        # Deal Name list comes from line items; map back to the deals' records so
+        # the whole page (incl. the line-item Revenue/Retention matrices) filters.
+        _cd_rids = set(_AIA_LI[_AIA_LI["deal_name"].isin(_cd)]["record_id"].dropna())
+        df = df[df["record_id"].isin(_cd_rids)]
     today = pd.Timestamp(date.today())
     paid_all = df[df["payment_date"].notna()]
 
@@ -1851,8 +1872,9 @@ def _vaf_refresh(state):
     # Deal Name + Line Item Name filters
     _vd = _sel(state.vaf_selected_deal)
     if _vd:
-        df = df[df["deal_name"].isin(_vd)]
-        li = li[li["record_id"].isin(df["record_id"])]
+        # Deal Name list comes from the line-item table (the matrix source)
+        li = li[li["deal_name"].isin(_vd)]
+        df = df[df["record_id"].isin(li["record_id"])]
     _vli = _sel(state.vaf_selected_line_item)
     if _vli and "line_item_name" in li.columns:
         li = li[li["line_item_name"].isin(_vli)]
@@ -1963,7 +1985,7 @@ aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.Data
 # Page 2
 cs_start_date = date(2020,1,1);  cs_end_date = _today   # no date filter on CS page (all-time)
 cs_owner_list = sorted(_AIA["cs_owner"].dropna().unique().tolist())
-cs_deal_list  = sorted(_AIA["deal_name"].dropna().unique().tolist()[:200])
+cs_deal_list  = sorted(_AIA_LI["deal_name"].dropna().unique().tolist())  # from line items (matrix source)
 cs_selected_owner=[]; cs_selected_deal=[]
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
 cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
@@ -2003,7 +2025,7 @@ va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFra
 
 # Page 5
 vaf_start_date = date(2020,1,1); vaf_end_date = _today   # no date filter (all-time)
-vaf_deal_list = sorted(_VA["deal_name"].dropna().unique().tolist())
+vaf_deal_list = sorted(_VA_LI["deal_name"].dropna().unique().tolist())  # from line items (matrix source)
 vaf_line_item_list = (sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
                       if "line_item_name" in _VA_LI.columns else [])
 vaf_selected_deal=[]; vaf_selected_line_item=[]
