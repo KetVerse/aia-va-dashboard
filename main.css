@@ -413,12 +413,17 @@ table.taipy-table thead tr th,
 }
 .msc-arrow { color: #1a3a6b !important; font-size: 10px !important; margin-left: 8px !important; }
 
-/* on the dark navy filter bar — white text / translucent box */
+/* on the dark navy filter bar — white text / translucent box (the CLOSED box only) */
 .filter-bar .msc-cap   { color: #ffffff !important; opacity: 0.92 !important; }
 .filter-bar .msc-box   { background: rgba(255,255,255,0.08) !important; border-color: rgba(255,255,255,0.45) !important; }
 .filter-bar .msc-box:hover { border-color: rgba(255,255,255,0.85) !important; }
 .filter-bar .msc-text  { color: #ffffff !important; }
 .filter-bar .msc-arrow { color: #ffffff !important; }
+/* the open PANEL floats on white — keep its text dark even inside the navy bar
+   (overrides .filter-bar input/label rules that would otherwise whiten it) */
+.filter-bar .msc-search { color: #1a3a6b !important; background: #ffffff !important; }
+.filter-bar .msc-search::placeholder { color: #94a3b8 !important; opacity: 1 !important; }
+.filter-bar .msc-optlabel { color: #1a3a6b !important; }
 
 .msc-panel {
     display: none !important;
