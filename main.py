@@ -153,19 +153,35 @@ _MULTISELECT_SCRIPT = """
     if(txt) txt.textContent = lbl(sel);
     if(!panel) return;
     panel.innerHTML = "";
-    // search box — filters the option rows as you type
+    // search box — filters the option rows as you type (toggles a class, since
+    // .msc-opt uses display:flex !important which inline styles can't override)
     var search = document.createElement("input");
     search.className = "msc-search";
     search.type = "text";
     search.placeholder = "Search\\u2026";
     search.addEventListener("input", function(){
       var q = search.value.toLowerCase();
-      panel.querySelectorAll(".msc-opt").forEach(function(r){
+      panel.querySelectorAll(".msc-opt:not(.msc-all)").forEach(function(r){
         var t = (r.getAttribute("data-opt") || "").toLowerCase();
-        r.style.display = (t.indexOf(q) >= 0) ? "" : "none";
+        r.classList.toggle("msc-hidden", t.indexOf(q) < 0);
       });
     });
     panel.appendChild(search);
+    // "All" row — clears every chosen option in this list
+    var allRow = document.createElement("div");
+    allRow.className = "msc-opt msc-all" + (sel.length === 0 ? " sel" : "");
+    var acb = document.createElement("span"); acb.className = "msc-cb";
+    var alab = document.createElement("span"); alab.className = "msc-optlabel"; alab.textContent = "All";
+    allRow.appendChild(acb); allRow.appendChild(alab);
+    allRow.addEventListener("click", function(e){
+      e.stopPropagation();
+      sel.length = 0;
+      panel.querySelectorAll(".msc-opt").forEach(function(r){ r.classList.remove("sel"); });
+      allRow.classList.add("sel");
+      if(txt) txt.textContent = lbl(sel);
+      bridge(key, sel);
+    });
+    panel.appendChild(allRow);
     (data.lov || []).forEach(function(opt){
       var row = document.createElement("div");
       row.className = "msc-opt" + (sel.indexOf(opt) >= 0 ? " sel" : "");
@@ -178,6 +194,7 @@ _MULTISELECT_SCRIPT = """
         var i = sel.indexOf(opt);
         if(i >= 0){ sel.splice(i,1); row.classList.remove("sel"); }
         else { sel.push(opt); row.classList.add("sel"); }
+        allRow.classList.toggle("sel", sel.length === 0);
         if(txt) txt.textContent = lbl(sel);
         bridge(key, sel);
       });

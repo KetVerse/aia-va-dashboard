@@ -464,6 +464,8 @@ table.taipy-table thead tr th,
     cursor: pointer !important;
     white-space: nowrap !important;
 }
+.msc-opt.msc-hidden { display: none !important; }
+.msc-opt.msc-all { border-bottom: 1px solid #e2e8f0 !important; border-radius: 0 !important; margin-bottom: 2px !important; }
 .msc-opt:hover { background: #eff6ff !important; }
 .msc-cb {
     position: relative !important;
