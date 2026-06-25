@@ -354,27 +354,40 @@ def _make_trend(labels, dc, qual):
 
 def _usage_28(email):
     """Usage in the last 28 days for a customer's account. Returns
-    (active_days_count, streak) where streak is a 28-char string of '1'/'0'
-    with index 0 = today, index 27 = today-27d (any upload OR sync that day)."""
+    (active_days_count, streak). `streak` encodes 28 days as ';'-joined tokens
+    "on,bill,syncs,items" (index 0 = today .. 27 = today-27d): on=1 when there was
+    any upload OR sync that day; bill = sum of bill_uploads; syncs = number of sync
+    events; items = sum of items_count for that day. The grid renders dots + a
+    per-day tooltip from this."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
+    blank = ";".join(["0,0,0,0"] * 28)
     if ac is None:
-        return 0, "0" * 28
+        return 0, blank
     start = today - pd.Timedelta(days=27)
-    days = set()
+    active = set(); bill = {}; syncs = {}; items = {}
     if "date" in _UPL.columns:
-        u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)]
-        if "total_uploads" in u.columns:
-            u = u[u["total_uploads"].fillna(0) > 0]
-        days |= set(u["date"].dt.normalize())
+        u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)].copy()
+        if len(u):
+            u["_d"] = u["date"].dt.normalize()
+            if "total_uploads" in u.columns:
+                active |= set(u[u["total_uploads"].fillna(0) > 0]["_d"])
+            if "bill_uploads" in u.columns:
+                bill = u.groupby("_d")["bill_uploads"].sum().to_dict()
     if "event_date" in _SYN.columns:
-        sy = _SYN[(_SYN["account_id"] == ac) & (_SYN["event_date"] >= start) & (_SYN["event_date"] <= today)]
-        if "items_count" in sy.columns:
-            sy = sy[sy["items_count"].fillna(0) > 0]
-        days |= set(sy["event_date"].dt.normalize())
-    streak = "".join("1" if (today - pd.Timedelta(days=i)) in days else "0"
-                     for i in range(28))
-    return len(days), streak
+        sy = _SYN[(_SYN["account_id"] == ac) & (_SYN["event_date"] >= start) & (_SYN["event_date"] <= today)].copy()
+        if len(sy):
+            sy["_d"] = sy["event_date"].dt.normalize()
+            if "items_count" in sy.columns:
+                active |= set(sy[sy["items_count"].fillna(0) > 0]["_d"])
+                items = sy.groupby("_d")["items_count"].sum().to_dict()
+            syncs = sy.groupby("_d").size().to_dict()
+    toks = []
+    for i in range(28):
+        d = today - pd.Timedelta(days=i)
+        toks.append("%d,%d,%d,%d" % (1 if d in active else 0, int(bill.get(d, 0) or 0),
+                                     int(syncs.get(d, 0) or 0), int(items.get(d, 0) or 0)))
+    return len(active), ";".join(toks)
 
 
 def _va_mrr(record_ids):

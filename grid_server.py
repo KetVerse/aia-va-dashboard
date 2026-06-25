@@ -279,6 +279,11 @@ _GRID_HTML = r"""<!DOCTYPE html>
   .dot.on{ background:#16a34a; }
   .dot.off{ background:#d8dee6; }
   td.streakcell{ text-align:left; }
+  /* custom per-day tooltip — uniform white text, stays put for screenshots */
+  #streaktip{ position:fixed; display:none; z-index:99999; background:#1a3a6b;
+    color:#ffffff; font-size:12px; line-height:1.55; padding:7px 10px;
+    border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,0.28);
+    white-space:nowrap; pointer-events:none; }
   .st-active{ color:#16a34a; font-weight:700; }
   .st-risk{ color:#ea580c; font-weight:700; }
   .st-inactive{ color:#dc2626; font-weight:700; }
@@ -297,6 +302,7 @@ _GRID_HTML = r"""<!DOCTYPE html>
     <thead id="h"></thead><tbody id="b"></tbody><tfoot id="f"></tfoot>
   </table></div>
   <div id="empty" class="empty" style="display:none">No data</div>
+  <div id="streaktip"></div>
 <script>
 const NAME = __NAME__;
 let DATA = null;        // last parsed payload
@@ -385,15 +391,54 @@ function dateLabel(offset){
   return d.getDate()+" "+_MON[d.getMonth()]+" "+d.getFullYear();
 }
 function streakHtml(s){
-  // s is a 28-char string, index 0 = today .. 27 = today-27d
+  // s = 28 ';'-joined tokens "on,bill,syncs,items", index 0 = today .. 27 = today-27d.
+  // A custom DOM tooltip (see the streaktip IIFE) reads the data-* attributes —
+  // we don't use the native title= so the tooltip survives PrintScreen / Win+Shift+S.
+  const days=(s||"").split(";");
   let h='<span class="streak">';
-  for(let i=0;i<s.length;i++){
-    const on=s[i]==="1";
-    const lbl=dateLabel(i)+(i===0?" (today)":"");
-    h+='<span class="dot '+(on?"on":"off")+'" title="'+lbl+'"></span>';
+  for(let i=0;i<days.length;i++){
+    const p=(days[i]||"").split(",");
+    const on=p[0]==="1";
+    h+='<span class="dot '+(on?"on":"off")+'" data-i="'+i+'" data-on="'+(on?1:0)
+      +'" data-bill="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)+'"></span>';
   }
   return h+'</span>';
 }
+// ── Per-day custom tooltip for the streak dots ──────────────────────────────
+// A DOM tooltip (not native title=) so it survives PrintScreen / Win+Shift+S.
+// Active day -> Date + Bill Uploads + Accounting Syncs + Items Synced.
+// Inactive day -> Date only. Stays ~0.6s after the mouse leaves a dot.
+(function(){
+  var tip=null, hideT=null;
+  function el(){ if(!tip) tip=document.getElementById("streaktip"); return tip; }
+  function show(dot){
+    var t=el(); if(!t) return;
+    clearTimeout(hideT);
+    var i=+dot.getAttribute("data-i");
+    var html=dateLabel(i)+(i===0?" (today)":"");
+    if(dot.getAttribute("data-on")==="1"){
+      html+="<br>Bill Uploads: "+dot.getAttribute("data-bill")
+           +"<br>Accounting Syncs: "+dot.getAttribute("data-syncs")
+           +"<br>Items Synced: "+dot.getAttribute("data-items");
+    }
+    t.innerHTML=html;
+    t.style.display="block";
+    var r=dot.getBoundingClientRect(), tr=t.getBoundingClientRect();
+    var top=r.top-tr.height-8; if(top<4) top=r.bottom+8;
+    var left=r.left+r.width/2-tr.width/2;
+    left=Math.max(4, Math.min(left, window.innerWidth-tr.width-4));
+    t.style.top=top+"px"; t.style.left=left+"px";
+  }
+  function hide(){ var t=el(); if(t) t.style.display="none"; }
+  document.addEventListener("mouseover", function(e){
+    var dot=e.target.closest ? e.target.closest(".dot") : null;
+    if(dot) show(dot);
+  });
+  document.addEventListener("mouseout", function(e){
+    var dot=e.target.closest ? e.target.closest(".dot") : null;
+    if(dot){ clearTimeout(hideT); hideT=setTimeout(hide, 600); }
+  });
+})();
 function body(){
   const b=document.getElementById("b"), num=DATA.numeric;
   const bars=DATA.bars||[], strk=DATA.streak||[];
