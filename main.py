@@ -355,25 +355,23 @@ def _make_trend(labels, dc, qual):
 def _usage_28(email):
     """Usage in the last 28 days for a customer's account. Returns
     (active_days_count, streak). `streak` encodes 28 days as ';'-joined tokens
-    "on,bill,syncs,items" (index 0 = today .. 27 = today-27d): on=1 when there was
-    any upload OR sync that day; bill = sum of bill_uploads; syncs = number of sync
-    events; items = sum of items_count for that day. The grid renders dots + a
-    per-day tooltip from this."""
+    "on,uploads,syncs,items" (index 0 = today .. 27 = today-27d): on=1 when there was
+    any upload OR sync that day; uploads = sum of total_uploads (all upload types,
+    NOT syncs); syncs = number of sync events; items = sum of items_count for that
+    day. The grid renders dots + a per-day tooltip from this."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
     blank = ";".join(["0,0,0,0"] * 28)
     if ac is None:
         return 0, blank
     start = today - pd.Timedelta(days=27)
-    active = set(); bill = {}; syncs = {}; items = {}
+    active = set(); uploads = {}; syncs = {}; items = {}
     if "date" in _UPL.columns:
         u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)].copy()
-        if len(u):
+        if len(u) and "total_uploads" in u.columns:
             u["_d"] = u["date"].dt.normalize()
-            if "total_uploads" in u.columns:
-                active |= set(u[u["total_uploads"].fillna(0) > 0]["_d"])
-            if "bill_uploads" in u.columns:
-                bill = u.groupby("_d")["bill_uploads"].sum().to_dict()
+            active |= set(u[u["total_uploads"].fillna(0) > 0]["_d"])
+            uploads = u.groupby("_d")["total_uploads"].sum().to_dict()
     if "event_date" in _SYN.columns:
         sy = _SYN[(_SYN["account_id"] == ac) & (_SYN["event_date"] >= start) & (_SYN["event_date"] <= today)].copy()
         if len(sy):
@@ -385,7 +383,7 @@ def _usage_28(email):
     toks = []
     for i in range(28):
         d = today - pd.Timedelta(days=i)
-        toks.append("%d,%d,%d,%d" % (1 if d in active else 0, int(bill.get(d, 0) or 0),
+        toks.append("%d,%d,%d,%d" % (1 if d in active else 0, int(uploads.get(d, 0) or 0),
                                      int(syncs.get(d, 0) or 0), int(items.get(d, 0) or 0)))
     return len(active), ";".join(toks)
 

@@ -400,7 +400,7 @@ function streakHtml(s){
     const p=(days[i]||"").split(",");
     const on=p[0]==="1";
     h+='<span class="dot '+(on?"on":"off")+'" data-i="'+i+'" data-on="'+(on?1:0)
-      +'" data-bill="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)+'"></span>';
+      +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)+'"></span>';
   }
   return h+'</span>';
 }
@@ -417,7 +417,7 @@ function streakHtml(s){
     var i=+dot.getAttribute("data-i");
     var html=dateLabel(i)+(i===0?" (today)":"");
     if(dot.getAttribute("data-on")==="1"){
-      html+="<br>Bill Uploads: "+dot.getAttribute("data-bill")
+      html+="<br>Uploads: "+dot.getAttribute("data-up")
            +"<br>Accounting Syncs: "+dot.getAttribute("data-syncs")
            +"<br>Items Synced: "+dot.getAttribute("data-items");
     }
