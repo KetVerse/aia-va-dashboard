@@ -28,7 +28,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      bar_color="#c5e07a", sortable=True, center_all=False,
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
-                     heat_by_row=False, link_cols=None):
+                     heat_by_row=False, link_cols=None, date_cols=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -101,6 +101,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                 link_map[display_col] = {"idCol": id_col, "baseUrl": base_url}
                 hidden_cols.add(id_col)
     hidden = [bool(cols[i] in hidden_cols) for i in range(len(cols))]
+    date_set = set(date_cols or [])    # cols of "dd-MMM-yy" strings -> sort chronologically
+    date_flag = [bool(cols[i] in date_set) for i in range(len(cols))]
 
     payload = {"columns": cols, "numeric": numeric, "center": center,
                "rows": rows, "total": total, "bars": bars, "fixed": bool(fixed),
@@ -109,7 +111,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "statusCol": status_flag, "heat": heat, "autosize": bool(autosize),
                "firstW": first_col_w, "rowHeat": row_heat_cols or {},
                "heatByRow": bool(heat_by_row), "linkCols": link_map,
-               "hidden": hidden}
+               "hidden": hidden, "dateCols": date_flag}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -345,13 +347,27 @@ function onSort(col, shift){
   }
   render();
 }
+function parseDMY(s){
+  // "dd-MMM-yy" (e.g. 20-Jun-26) -> timestamp; null if not a date
+  const m=String(s||"").match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/);
+  if(!m) return null;
+  const mon=_MON.indexOf(m[2]); if(mon<0) return null;
+  return new Date(2000+(+m[3]), mon, +m[1]).getTime();
+}
 function sortRows(rows){
   if(!SORT.length) return rows;
-  const num=DATA.numeric;
+  const num=DATA.numeric, dcol=DATA.dateCols||[];
   return rows.slice().sort((a,b)=>{
     for(const s of SORT){
       let x=a[s.col], y=b[s.col], c;
-      if(num[s.col]){ c=(Number(x)||0)-(Number(y)||0); }
+      if(dcol[s.col]){
+        const dx=parseDMY(x), dy=parseDMY(y);
+        if(dx===null && dy===null){ c=0; }
+        else if(dx===null){ return 1; }      // blanks always sort last
+        else if(dy===null){ return -1; }
+        else { c=dx-dy; }
+      }
+      else if(num[s.col]){ c=(Number(x)||0)-(Number(y)||0); }
       else { c=String(x).toLowerCase().localeCompare(String(y).toLowerCase()); }
       if(c) return c*s.dir;
     }

@@ -1393,6 +1393,7 @@ def _apply_usage_filter(state):
         d, sort_default_col="Usage Active Days (28d)",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
         center_cols=["Paid On", "Int Date", "Due On", "Cadence", "Status"],
+        date_cols=["Paid On", "Int Date", "Due On"],
         heat_cols={"Usage Active Days (28d)": "green"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
@@ -1683,6 +1684,7 @@ def _cs_refresh(state):
     })
     state.cs_renewal_window_json = (grid_payload_b64(
         rwd, no_sort=True, center_cols=["Due On", "Amount"], autosize=True,
+        date_cols=["Due On"],
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
         if len(rwd) else grid_payload_b64(pd.DataFrame()))
 
@@ -1983,6 +1985,7 @@ def _vaf_refresh(state):
     })
     state.vaf_renewal_json = (grid_payload_b64(rwd, no_sort=True,
                               center_cols=["Due On", "Amount"], autosize=True,
+                              date_cols=["Due On"],
                               link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
                               if len(rwd) else grid_payload_b64(pd.DataFrame()))
 
