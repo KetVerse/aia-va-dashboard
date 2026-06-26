@@ -586,9 +586,33 @@ SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
 # DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════
 
-def _q(url, sql):
-    with psycopg2.connect(url) as conn:
-        return pd.read_sql_query(sql, conn)
+def _q(url, sql, _tries=5):
+    """Run a query, return a DataFrame. The container's NAT path to Neon is slow
+    and occasionally drops a transfer ("SSL connection closed unexpectedly"), so:
+    enable TCP keepalives (keeps the NAT conntrack entry alive during long pulls),
+    retry a few times on transient drops, and ALWAYS close the connection
+    (psycopg2's `with` only ends the transaction — it never closes the socket,
+    which otherwise leaks a connection per query)."""
+    last = None
+    for i in range(_tries):
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                url, connect_timeout=20,
+                keepalives=1, keepalives_idle=15,
+                keepalives_interval=5, keepalives_count=8)
+            return pd.read_sql_query(sql, conn)
+        except Exception as ex:
+            last = ex
+            print(f"[retry {i+1}/{_tries}] DB query failed: {ex}")
+            _time.sleep(3)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    raise last
 
 def _load_all():
     try:
