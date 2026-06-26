@@ -1371,7 +1371,7 @@ def _aia_ops_refresh(state):
 # ═══════════════════════════════════════════════════════════════════
 
 def _apply_usage_filter(state):
-    """Filter the Customer Usage & Health grid by the Deal Name / CSM dropdowns."""
+    """Filter the Customer Usage & Health grid by Deal Name / CSM / Stage / Deal Owner."""
     d = state.cs_usage_all
     if d is None or len(d) == 0:
         state.cs_usage_json = grid_payload_b64(pd.DataFrame())
@@ -1385,6 +1385,10 @@ def _apply_usage_filter(state):
     _st = _sel(state.cs_usage_stage)
     if _st:
         d = d[d["Stage"].isin(_st)]
+    _ow = _sel(state.cs_usage_owner)
+    if _ow:
+        d = d[d["Deal Owner"].isin(_ow)]
+    d = d.drop(columns=["Deal Owner"], errors="ignore")   # filter-only, never shown
     state.cs_usage_json = grid_payload_b64(
         d, sort_default_col="Usage Active Days (28d)",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
@@ -1635,6 +1639,7 @@ def _cs_refresh(state):
         usage_rows.append({
             "Deal Name":       row.get("deal_name",""),
             "record_id":       row.get("record_id",""),
+            "Deal Owner":      row.get("deal_owner",""),   # filter only (dropped before render)
             "CSM":             row.get("cs_owner",""),
             "Stage":           row.get("deal_stage",""),
             "Paid On":         _ddmy(row.get("payment_date")),
@@ -1655,6 +1660,8 @@ def _cs_refresh(state):
     state.cs_usage_csm_list  = (sorted(usage_all["CSM"].dropna().unique().tolist())
                                 if len(usage_all) else [])
     state.cs_usage_stage_list = (sorted(usage_all["Stage"].dropna().unique().tolist())
+                                 if len(usage_all) else [])
+    state.cs_usage_owner_list = (sorted(usage_all["Deal Owner"].dropna().unique().tolist())
                                  if len(usage_all) else [])
     _apply_usage_filter(state)
 
@@ -2021,8 +2028,8 @@ cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
 cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
-cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]
-cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]
+cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]
+cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]; cs_usage_owner_list=[]
 cs_renewal_window_json=""
 
 # Page 3
@@ -2073,6 +2080,7 @@ cs_deal_ms        = _ms_json(cs_deal_list,      [])
 cs_usage_deal_ms  = _ms_json([], [])
 cs_usage_csm_ms   = _ms_json([], [])
 cs_usage_stage_ms = _ms_json([], [])
+cs_usage_owner_ms = _ms_json([], [])
 vaf_deal_ms       = _ms_json(vaf_deal_list,      [])
 vaf_line_item_ms  = _ms_json(vaf_line_item_list, [])
 
@@ -2159,6 +2167,7 @@ _MS_DISPATCH = {
     "cs_usage_deal":  ("cs_usage_deal",          "usage"),
     "cs_usage_csm":   ("cs_usage_csm",           "usage"),
     "cs_usage_stage": ("cs_usage_stage",         "usage"),
+    "cs_usage_owner": ("cs_usage_owner",         "usage"),
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
 }
@@ -2175,6 +2184,7 @@ def _sync_ms(state):
     state.cs_usage_deal_ms  = _ms_json(state.cs_usage_deal_list,  state.cs_usage_deal)
     state.cs_usage_csm_ms   = _ms_json(state.cs_usage_csm_list,   state.cs_usage_csm)
     state.cs_usage_stage_ms = _ms_json(state.cs_usage_stage_list, state.cs_usage_stage)
+    state.cs_usage_owner_ms = _ms_json(state.cs_usage_owner_list, state.cs_usage_owner)
     state.vaf_deal_ms       = _ms_json(vaf_deal_list,      state.vaf_selected_deal)
     state.vaf_line_item_ms  = _ms_json(vaf_line_item_list, state.vaf_selected_line_item)
 
@@ -2284,7 +2294,7 @@ def on_reset_filters(state, *_):
     state.va_channel_filter  = "All"; state.va_filter_label  = ""
     # CS Finance
     state.cs_selected_owner  = []; state.cs_selected_deal = []
-    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []
+    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []
     # Marketing
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
     # VA Finance

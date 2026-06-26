@@ -159,7 +159,8 @@ Integration Due
 <|{cs_usage_stage_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_stage|>
 |>
 <|part|
-
+<div class="msc" data-key="cs_usage_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_usage_owner_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_owner|>
 |>
 |>
 
