@@ -6,10 +6,12 @@ VA_FINANCE_PAGE = """
 <|part|class_name=filter-bar|
 <|layout|columns=1 1|gap=12px|
 <|part|
-<|{vaf_selected_deal}|selector|lov={vaf_deal_list}|dropdown|filter|label=Deal Name|on_change=on_vaf_filter_change|class_name=wide-filter|>
+<div class="msc wide" data-key="vaf_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_deal_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_deal|>
 |>
 <|part|
-<|{vaf_selected_line_item}|selector|lov={vaf_line_item_list}|dropdown|filter|label=Line Item Name|on_change=on_vaf_filter_change|class_name=wide-filter|>
+<div class="msc wide" data-key="vaf_line_item"><div class="msc-cap">Line Item Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_line_item_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_line_item|>
 |>
 |>
 |>

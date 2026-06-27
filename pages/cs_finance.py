@@ -6,10 +6,12 @@ CS_FINANCE_PAGE = """
 <|part|class_name=filter-bar|
 <|layout|columns=1 1|gap=12px|
 <|part|
-<|{cs_selected_owner}|selector|lov={cs_owner_list}|dropdown|filter|label=CS Owner|on_change=on_cs_filter_change|>
+<div class="msc" data-key="cs_owner"><div class="msc-cap">CS Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_owner_ms}|text|mode=raw|class_name=msc-data msc-data-cs_owner|>
 |>
 <|part|
-<|{cs_selected_deal}|selector|lov={cs_deal_list}|dropdown|filter|label=Deal Name|on_change=on_cs_filter_change|class_name=wide-filter|>
+<div class="msc wide" data-key="cs_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_deal|>
 |>
 |>
 |>
@@ -145,16 +147,20 @@ Integration Due
 
 <|layout|columns=1 1 1 1|gap=12px|
 <|part|
-<|{cs_usage_deal}|selector|lov={cs_usage_deal_list}|dropdown|filter|label=Deal Name|on_change=on_cs_usage_filter|>
+<div class="msc wide" data-key="cs_usage_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_usage_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_deal|>
 |>
 <|part|
-<|{cs_usage_csm}|selector|lov={cs_usage_csm_list}|dropdown|filter|label=CSM|on_change=on_cs_usage_filter|>
+<div class="msc" data-key="cs_usage_csm"><div class="msc-cap">CSM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_usage_csm_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_csm|>
 |>
 <|part|
-<|{cs_usage_stage}|selector|lov={cs_usage_stage_list}|dropdown|filter|label=Deal Stage|on_change=on_cs_usage_filter|>
+<div class="msc" data-key="cs_usage_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_usage_stage_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_stage|>
 |>
 <|part|
-
+<div class="msc" data-key="cs_usage_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_usage_owner_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_owner|>
 |>
 |>
 

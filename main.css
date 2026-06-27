@@ -377,6 +377,122 @@ table.taipy-table thead tr th,
     align-items: start !important;
 }
 
+/* ── Custom multi-select dropdowns (filter bar) ─────────────────────────── */
+/* hidden JSON data holder read by the JS widget */
+.msc-data { display: none !important; }
+
+.msc { position: relative !important; width: 200px !important; }
+.msc.wide { width: 240px !important; }
+/* default (on white page cards, e.g. the Usage & Health filters) — dark text */
+.msc-cap {
+    color: #1a3a6b !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    margin: 0 0 2px 2px !important;
+    white-space: nowrap !important;
+}
+.msc-box {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    height: 38px !important;
+    padding: 0 10px !important;
+    background: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 4px !important;
+    cursor: pointer !important;
+    box-sizing: border-box !important;
+}
+.msc-box:hover { border-color: #1a7fc4 !important; }
+.msc-text {
+    color: #1a3a6b !important;
+    font-size: 13px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+.msc-arrow { color: #1a3a6b !important; font-size: 10px !important; margin-left: 8px !important; }
+
+/* on the dark navy filter bar — white text / translucent box (the CLOSED box only) */
+.filter-bar .msc-cap   { color: #ffffff !important; opacity: 0.92 !important; }
+.filter-bar .msc-box   { background: rgba(255,255,255,0.08) !important; border-color: rgba(255,255,255,0.45) !important; }
+.filter-bar .msc-box:hover { border-color: rgba(255,255,255,0.85) !important; }
+.filter-bar .msc-text  { color: #ffffff !important; }
+.filter-bar .msc-arrow { color: #ffffff !important; }
+/* the open PANEL floats on white — keep its text dark even inside the navy bar
+   (overrides .filter-bar input/label rules that would otherwise whiten it) */
+.filter-bar .msc-search { color: #1a3a6b !important; background: #ffffff !important; }
+.filter-bar .msc-search::placeholder { color: #94a3b8 !important; opacity: 1 !important; }
+.filter-bar .msc-optlabel { color: #1a3a6b !important; }
+
+.msc-panel {
+    display: none !important;
+    position: absolute !important;
+    top: calc(100% + 4px) !important;
+    left: 0 !important;
+    min-width: 100% !important;
+    width: max-content !important;
+    max-width: 360px !important;
+    max-height: 320px !important;
+    overflow-y: auto !important;
+    background: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 6px !important;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.18) !important;
+    z-index: 300 !important;
+    padding: 4px !important;
+}
+.msc.open .msc-panel { display: block !important; }
+
+.msc-search {
+    position: sticky !important;
+    top: 0 !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+    padding: 6px 8px !important;
+    margin-bottom: 4px !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 4px !important;
+    font-size: 13px !important;
+    color: #1a3a6b !important;
+    background: #ffffff !important;
+    outline: none !important;
+}
+.msc-search:focus { border-color: #1a7fc4 !important; }
+
+.msc-opt {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    padding: 6px 8px !important;
+    border-radius: 4px !important;
+    cursor: pointer !important;
+    white-space: nowrap !important;
+}
+.msc-opt.msc-hidden { display: none !important; }
+.msc-opt.msc-all { border-bottom: 1px solid #e2e8f0 !important; border-radius: 0 !important; margin-bottom: 2px !important; }
+.msc-opt:hover { background: #eff6ff !important; }
+.msc-cb {
+    position: relative !important;
+    width: 15px !important;
+    height: 15px !important;
+    border: 1.5px solid #94a3b8 !important;
+    border-radius: 3px !important;
+    flex: 0 0 auto !important;
+    box-sizing: border-box !important;
+}
+.msc-opt.sel .msc-cb { background: #1a7fc4 !important; border-color: #1a7fc4 !important; }
+.msc-opt.sel .msc-cb::after {
+    content: "" !important;
+    position: absolute !important;
+    left: 4px !important; top: 1px !important;
+    width: 4px !important; height: 8px !important;
+    border: solid #ffffff !important;
+    border-width: 0 2px 2px 0 !important;
+    transform: rotate(45deg) !important;
+}
+.msc-optlabel { color: #1a3a6b !important; font-size: 13px !important; }
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
     .kpi-value { font-size: 20px !important; }

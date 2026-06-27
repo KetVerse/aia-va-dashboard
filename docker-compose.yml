@@ -11,10 +11,12 @@ services:
       - .env
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      # use python (curl isn't in the image); allow time for the initial DB load
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080',timeout=5).status==200 else 1)"]
       interval: 60s
       timeout: 10s
       retries: 3
+      start_period: 180s
 
   # ── Microsoft (Entra ID) login gate ──────────────────────────────────────
   # Traefik terminates TLS for ops.aiaccountant.com and routes here. This
@@ -46,3 +48,9 @@ services:
 networks:
   default:
     name: taipy-dashboard_default
+    # Lower MTU: the host path to Neon can't carry full 1500-byte packets, and
+    # Docker's NAT doesn't relay the PMTUD "fragmentation needed" signal into the
+    # container, so large DB transfers black-hole -> "SSL connection closed
+    # unexpectedly". Capping the container MTU avoids oversized packets entirely.
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
