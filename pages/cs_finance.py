@@ -40,7 +40,7 @@ Ready for Renewal
 <|{cs_kpi_rfr}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-orange|
-Blocked
+Product Blocked
 
 <|{cs_kpi_blocked}|text|class_name=kpi-value|>
 |>
