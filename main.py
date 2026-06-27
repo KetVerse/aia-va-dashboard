@@ -1448,11 +1448,17 @@ def _cs_refresh(state):
 
     excl = ["Churned","CS Parked","Product Blocked","Integration Failed"]
     paid_active = paid_all[~paid_all["deal_stage"].isin(excl)].copy()
-    paid_active["next_renewal"] = paid_active.apply(_next_renewal, axis=1)
-    state.cs_kpi_overdue = paid_active[paid_active["next_renewal"]<today]["record_id"].nunique()
-    state.cs_kpi_due_7d  = paid_active[
-        (paid_active["next_renewal"]>=today-pd.Timedelta(days=7))
-        &(paid_active["next_renewal"]<=today+pd.Timedelta(days=7))]["record_id"].nunique()
+    if len(paid_active):
+        # .apply(axis=1) on an empty frame yields a float64 column, which breaks
+        # the < today comparison below — so only compute when there are rows.
+        paid_active["next_renewal"] = paid_active.apply(_next_renewal, axis=1)
+        state.cs_kpi_overdue = paid_active[paid_active["next_renewal"]<today]["record_id"].nunique()
+        state.cs_kpi_due_7d  = paid_active[
+            (paid_active["next_renewal"]>=today-pd.Timedelta(days=7))
+            &(paid_active["next_renewal"]<=today+pd.Timedelta(days=7))]["record_id"].nunique()
+    else:
+        state.cs_kpi_overdue = 0
+        state.cs_kpi_due_7d  = 0
 
     # #Integration Due (DAX): AIA Paid, paid in range, not activated/adopted,
     # and not in a terminal/done stage. (No integration_done_date requirement.)
@@ -1482,10 +1488,13 @@ def _cs_refresh(state):
     state.cs_kpi_blocked = paid_all[paid_all["deal_stage"]=="Product Blocked"]["record_id"].nunique()
     state.cs_kpi_rfr     = paid_all[paid_all["deal_stage"]=="Ready for Renewal"]["record_id"].nunique()
 
-    if "due_on" in _AIA_LI.columns:
-        active_li = _AIA_LI[_AIA_LI["due_on"]>=today]
+    # MRR respects the CS Owner / Deal Name filters: restrict line items to the
+    # filtered deals' record_ids (same record_id bridge the matrices use) before summing.
+    mrr_li = _AIA_LI[_AIA_LI["record_id"].isin(df["record_id"])] if (_co or _cd) else _AIA_LI
+    if "due_on" in mrr_li.columns:
+        active_li = mrr_li[mrr_li["due_on"]>=today]
     else:
-        active_li = _AIA_LI
+        active_li = mrr_li
     state.cs_kpi_mrr    = _fmt(int(active_li["unit_price"].sum()))
 
     int_customers = int_done[~int_done["deal_stage"].isin(["Churned","CS Parked"])].copy()
