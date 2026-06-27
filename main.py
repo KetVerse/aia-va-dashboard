@@ -1236,7 +1236,7 @@ def _cs_refresh(state):
         m = {"Annual":12,"Half-yearly":6,"Quarterly":3,"Bi-monthly":2,"Monthly":1}.get(row.get("billing_cycle",""))
         return base + relativedelta(months=m) if m else pd.NaT
 
-    excl = ["Churned","CS Parked","Blocked","Integration Failed"]
+    excl = ["Churned","CS Parked","Product Blocked","Integration Failed"]
     paid_active = paid_all[~paid_all["deal_stage"].isin(excl)].copy()
     paid_active["next_renewal"] = paid_active.apply(_next_renewal, axis=1)
     state.cs_kpi_overdue = paid_active[paid_active["next_renewal"]<today]["record_id"].nunique()
@@ -1246,7 +1246,7 @@ def _cs_refresh(state):
 
     # #Integration Due (DAX): AIA Paid, paid in range, not activated/adopted,
     # and not in a terminal/done stage. (No integration_done_date requirement.)
-    _excl_id = ["Churned","CS Parked","Blocked","Integration Failed","Integration Done"]
+    _excl_id = ["Churned","CS Parked","Product Blocked","Integration Failed","Integration Done"]
     intd = _rng(df, "payment_date", s, e)
     intd = intd[(intd["module_type"]=="AIA Paid")
                 & (intd["activation_date"].isna())
@@ -1269,7 +1269,7 @@ def _cs_refresh(state):
 
     renewed_sub          = _rng(df, "renewed_date", s, e)
     state.cs_kpi_renewed = renewed_sub[renewed_sub["module_type"]=="AIA Paid"]["record_id"].nunique()
-    state.cs_kpi_blocked = paid_all[paid_all["deal_stage"]=="Blocked"]["record_id"].nunique()
+    state.cs_kpi_product_blocked = paid_all[paid_all["deal_stage"]=="Product Blocked"]["record_id"].nunique()
     state.cs_kpi_rfr     = paid_all[paid_all["deal_stage"]=="Ready for Renewal"]["record_id"].nunique()
 
     if "due_on" in _AIA_LI.columns:
@@ -1348,7 +1348,7 @@ def _cs_refresh(state):
     _HEALTH_STAGES = ["Integration Done", "Ready for Renewal", "Renewal Done"]
     hdf_health = hdf[hdf["stage"].isin(_HEALTH_STAGES)] if len(hdf) else hdf
 
-    _excl_uc = ["Churned","CS Parked","Blocked","Integration Failed","Integration Done"]
+    _excl_uc = ["Churned","CS Parked","Product Blocked","Integration Failed","Integration Done"]
     t1_rows, t2_rows, t3_rows = [], [], []
     for csm in sorted(df["cs_owner"].dropna().unique()):
         c   = df[df["cs_owner"]==csm]
@@ -1366,7 +1366,7 @@ def _cs_refresh(state):
             "Int Due":   int(int_due),
             "Int Failed":int(int_failed),
             "Integrated":int(integrated),
-            "Blocked":   cp[cp["deal_stage"]=="Blocked"]["record_id"].nunique(),
+            "Product Blocked":   cp[cp["deal_stage"]=="Product Blocked"]["record_id"].nunique(),
             "Ready for Renewal": c[
                 (c["deal_stage"]=="Ready for Renewal") &
                 (c["billing_cycle"]=="Monthly" if "billing_cycle" in c.columns else False) &
@@ -1825,7 +1825,7 @@ cs_owner_list = ["All"] + sorted(_AIA["cs_owner"].dropna().unique().tolist())
 cs_deal_list  = ["All"] + sorted(_AIA["deal_name"].dropna().unique().tolist()[:200])
 cs_selected_owner="All"; cs_selected_deal="All"
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
-cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
+cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_product_blocked=0; cs_kpi_rfr=0
 cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
