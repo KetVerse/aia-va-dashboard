@@ -1479,7 +1479,7 @@ def _cs_refresh(state):
 
     renewed_sub          = _rng(df, "renewed_date", s, e)
     state.cs_kpi_renewed = renewed_sub[renewed_sub["module_type"]=="AIA Paid"]["record_id"].nunique()
-    state.cs_kpi_product_blocked = paid_all[paid_all["deal_stage"]=="Product Blocked"]["record_id"].nunique()
+    state.cs_kpi_blocked = paid_all[paid_all["deal_stage"]=="Product Blocked"]["record_id"].nunique()
     state.cs_kpi_rfr     = paid_all[paid_all["deal_stage"]=="Ready for Renewal"]["record_id"].nunique()
 
     if "due_on" in _AIA_LI.columns:
@@ -2050,7 +2050,7 @@ cs_owner_list = sorted(_AIA["cs_owner"].dropna().unique().tolist())
 cs_deal_list  = sorted(_AIA_LI["deal_name"].dropna().unique().tolist())  # from line items (matrix source)
 cs_selected_owner=[]; cs_selected_deal=[]
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
-cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_product_blocked=0; cs_kpi_rfr=0
+cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
 cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
