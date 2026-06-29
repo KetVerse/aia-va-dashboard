@@ -52,7 +52,7 @@ AiA Renewed
 <|part|class_name=kpi-card kpi-green|
 MRR
 
-<|{cs_kpi_mrr}|text|class_name=kpi-value|>
+<|{cs_kpi_mrr}|text|class_name=kpi-value|hover_text={cs_kpi_mrr_exact}|>
 |>
 |>
 

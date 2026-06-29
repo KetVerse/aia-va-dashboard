@@ -38,12 +38,12 @@ AIA Paid
 <|part|class_name=kpi-card kpi-green|
 Revenue Collected
 
-<|{aia_kpi_collected}|text|class_name=kpi-value|>
+<|{aia_kpi_collected}|text|class_name=kpi-value|hover_text={aia_kpi_collected_exact}|>
 |>
 <|part|class_name=kpi-card kpi-green|
 MRR
 
-<|{aia_kpi_mrr}|text|class_name=kpi-value|>
+<|{aia_kpi_mrr}|text|class_name=kpi-value|hover_text={aia_kpi_mrr_exact}|>
 |>
 |>
 

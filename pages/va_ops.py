@@ -58,12 +58,12 @@ Paid
 <|part|class_name=kpi-card kpi-green|
 Total Revenue
 
-<|{va_kpi_revenue}|text|class_name=kpi-value|>
+<|{va_kpi_revenue}|text|class_name=kpi-value|hover_text={va_kpi_revenue_exact}|>
 |>
 <|part|class_name=kpi-card kpi-green|
 MRR
 
-<|{va_kpi_mrr}|text|class_name=kpi-value|>
+<|{va_kpi_mrr}|text|class_name=kpi-value|hover_text={va_kpi_mrr_exact}|>
 |>
 <|part|class_name=kpi-card kpi-blue|
 EOM Estimate

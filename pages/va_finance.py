@@ -25,19 +25,19 @@ VA_FINANCE_PAGE = """
 
 <|layout|columns=1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
-Active Customers
+Total Customers
 
 <|{vaf_kpi_active}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-green|
 Total Revenue
 
-<|{vaf_kpi_revenue}|text|class_name=kpi-value|>
+<|{vaf_kpi_revenue}|text|class_name=kpi-value|hover_text={vaf_kpi_revenue_exact}|>
 |>
 <|part|class_name=kpi-card kpi-green|
 MRR
 
-<|{vaf_kpi_mrr}|text|class_name=kpi-value|>
+<|{vaf_kpi_mrr}|text|class_name=kpi-value|hover_text={vaf_kpi_mrr_exact}|>
 |>
 <|part|class_name=kpi-card kpi-orange|
 Due ±14 Days

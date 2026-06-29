@@ -507,7 +507,7 @@ def _usage_cohort():
     return pd.DataFrame(cnt_rows), pd.DataFrame(pct_rows)
 
 
-def _mrr_matrix(li, refund_map, mode, add_onetime=False):
+def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None):
     """Refunds-adjusted billing-to-MRR cohort matrix (replicates the DAX
     total_monthly_collection / #Active Paid Users). Each non-refunded line item
     is recognised across its active term (date_paid month .. +term, exclusive),
@@ -548,6 +548,11 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False):
 
     lo = min(li["cohort_p"].min(), li["billing_p"].min())
     hi = li["billing_p"].max()
+    # Extend columns through the current month so multi-month subscriptions show
+    # their full monthly split up to today — even when the latest payment in view
+    # is earlier (e.g. a single deal filtered to one past payment month).
+    if as_of is not None:
+        hi = max(hi, pd.Period(pd.Timestamp(as_of), freq="M"))
     full = pd.period_range(lo, hi, freq="M")
 
     if mode == "revenue":
@@ -578,6 +583,27 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False):
         extra.append({"Cohort": "One-time", **{c: int(otb[p]) for c, p in zip(cols, full)}})
     extra.append({"Cohort": "Total", **{c: int(piv[c].sum()) for c in cols}})
     return pd.concat([out, pd.DataFrame(extra)], ignore_index=True)
+
+def _matrix_current_mrr(rev_m, today, exclude_onetime=False):
+    """Current-month MRR = the revenue matrix's Total row under the current-month
+    column (normalised monthly recurring per _mrr_matrix; refunds excluded for the
+    feeds that pass a refund_map). With exclude_onetime, the One-time row's
+    current-month value is subtracted — one-time payments are never recurring.
+    Returns 0 when that column/row is absent."""
+    if rev_m is None or not len(rev_m):
+        return 0
+    col = today.strftime("%b %y")
+    if col not in rev_m.columns:
+        return 0
+    tot = rev_m.loc[rev_m["Cohort"] == "Total", col]
+    val = int(tot.iloc[0]) if len(tot) else 0
+    if exclude_onetime:
+        ot = rev_m.loc[rev_m["Cohort"] == "One-time", col]
+        if len(ot):
+            o = str(ot.iloc[0]).strip()
+            if o not in ("", "0"):
+                val -= int(float(o))
+    return val
 
 NEON_URL     = os.getenv("NEON_DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
@@ -1105,6 +1131,31 @@ def _fmtn(v):
     if v >= 1000:     return f"{v//1000}K"
     return str(v)
 
+def _fmt2(v):
+    """1-decimal KPI display, dropping the decimal for exact multiples
+    (₹80K and ₹3L when exact; ₹1.6L / ₹12.5K otherwise)."""
+    v = int(v)
+    if v >= 1_00_000:
+        return f"₹{v//1_00_000}L" if v % 1_00_000 == 0 else f"₹{v/1_00_000:.1f}L"
+    if v >= 1000:
+        return f"₹{v//1000}K" if v % 1000 == 0 else f"₹{v/1000:.1f}K"
+    return f"₹{v}"
+
+def _inr(v):
+    """Exact value, Indian-grouped: 303676 -> ₹3,03,676."""
+    v = int(round(v)); neg = v < 0; s = str(abs(v))
+    if len(s) <= 3:
+        body = s
+    else:
+        head, tail = s[:-3], s[-3:]
+        groups = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:]); head = head[:-2]
+        if head: groups.insert(0, head)
+        body = ",".join(groups) + "," + tail
+    return f"₹{'-' if neg else ''}{body}"
+
+
 def _streak(email, account_id, upl, syn, days=28):
     today = pd.Timestamp(date.today())
     dots = []
@@ -1177,14 +1228,10 @@ def _aia_ops_refresh(state):
     state.aia_kpi_parked      = _rng(df,"parked_date",s,e)["record_id"].nunique()
     state.aia_kpi_discards    = _rng(df,"discard_date",s,e)["record_id"].nunique()
     state.aia_kpi_closed_lost = _rng(df,"closed_lost_date",s,e)["record_id"].nunique()
-    state.aia_kpi_collected   = _fmt(int(pd_.groupby("record_id")["amount_paid"].max().sum()))
-    cycle_map = {"Annual":12,"Half-yearly":6,"Quarterly":3,"Bi-monthly":2,"Monthly":1}
-    if "asked_refund" in pd_.columns:
-        mrr_df = pd_[pd_["asked_refund"] != "Yes"].copy()
-    else:
-        mrr_df = pd_.copy()
-    mrr_df["_m"] = mrr_df["billing_cycle"].map(cycle_map)
-    state.aia_kpi_mrr = _fmt(int((mrr_df["amount_paid"]/mrr_df["_m"].fillna(1)).sum()))
+    _aia_rev = int(pd_.groupby("record_id")["amount_paid"].max().sum())
+    state.aia_kpi_collected = _fmt2(_aia_rev)
+    state.aia_kpi_collected_exact = f"{_inr(_aia_rev)} · Acquired amount (includes Refunds)"
+    # MRR (aia_kpi_mrr) is set below from the GM Performance Total row (acquired MRR).
 
     # Funnel
     coh   = _rng(df,"create_date",s,e)
@@ -1250,6 +1297,10 @@ def _aia_ops_refresh(state):
     if len(gm):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
+    # MRR KPI = Acquired MRR from the GM Performance Total row (includes refunds).
+    _gm_mrr = int(gm.iloc[-1]["MRR"]) if len(gm) else 0
+    state.aia_kpi_mrr = _fmt2(_gm_mrr)
+    state.aia_kpi_mrr_exact = f"{_inr(_gm_mrr)} · Acquired MRR (includes refunds)"
     state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI", "ATP"], fixed=True)
 
     # UTM cohort
@@ -1488,14 +1539,8 @@ def _cs_refresh(state):
     state.cs_kpi_blocked = paid_all[paid_all["deal_stage"]=="Product Blocked"]["record_id"].nunique()
     state.cs_kpi_rfr     = paid_all[paid_all["deal_stage"]=="Ready for Renewal"]["record_id"].nunique()
 
-    # MRR respects the CS Owner / Deal Name filters: restrict line items to the
-    # filtered deals' record_ids (same record_id bridge the matrices use) before summing.
-    mrr_li = _AIA_LI[_AIA_LI["record_id"].isin(df["record_id"])] if (_co or _cd) else _AIA_LI
-    if "due_on" in mrr_li.columns:
-        active_li = mrr_li[mrr_li["due_on"]>=today]
-    else:
-        active_li = mrr_li
-    state.cs_kpi_mrr    = _fmt(int(active_li["unit_price"].sum()))
+    # MRR is set further down from the Revenue Matrix's current-month Total
+    # (normalised ÷term, refunds excluded) so the card and the matrix agree.
 
     int_customers = int_done[~int_done["deal_stage"].isin(["Churned","CS Parked"])].copy()
     statuses = int_customers.apply(lambda r: _customer_status(r, _UPL, _SYN), axis=1)
@@ -1513,8 +1558,11 @@ def _cs_refresh(state):
     _li_cs = _AIA_LI
     if _co or _cd:
         _li_cs = _AIA_LI[_AIA_LI["record_id"].isin(df["record_id"])]
-    _rev_m = _mrr_matrix(_li_cs, _refund_map, "revenue")
-    _ret_m = _mrr_matrix(_li_cs, _refund_map, "retention")
+    _rev_m = _mrr_matrix(_li_cs, _refund_map, "revenue", as_of=today)
+    _ret_m = _mrr_matrix(_li_cs, _refund_map, "retention", as_of=today)
+    _cs_mrr = _matrix_current_mrr(_rev_m, today)
+    state.cs_kpi_mrr = _fmt2(_cs_mrr)
+    state.cs_kpi_mrr_exact = f"{_inr(_cs_mrr)} · (Refunds Excluded)"
     _rev_heat = {c: "green" for c in _rev_m.columns if c != "Cohort"} if len(_rev_m) else {}
     _ret_heat = {c: "green" for c in _ret_m.columns if c != "Cohort"} if len(_ret_m) else {}
     state.cs_revenue_matrix_json = (grid_payload_b64(_rev_m, total_id_col="Cohort",
@@ -1845,10 +1893,9 @@ def _va_ops_refresh(state):
     state.va_kpi_parked      = _rng(df,"parked_date",s,e)["record_id"].nunique()
     state.va_kpi_closed_lost = _rng(df,"closed_lost_date",s,e)["record_id"].nunique()
     rev = int(pd_["amount_paid"].sum()) + int(pd_["ot_amount_paid"].sum())
-    state.va_kpi_revenue     = _fmt(rev)
-    cycle_map = {"Annual":12,"Half-yearly":6,"Quarterly":3,"Bi-monthly":2,"Monthly":1}
-    mrr_df = pd_.copy(); mrr_df["_m"] = mrr_df["billing_cycle"].map(cycle_map)
-    state.va_kpi_mrr = _fmt(int((mrr_df["amount_paid"]/mrr_df["_m"].fillna(1)).sum()))
+    state.va_kpi_revenue     = _fmt2(rev)
+    state.va_kpi_revenue_exact = f"{_inr(rev)} · Acquired amount (includes Refunds)"
+    # MRR (va_kpi_mrr) is set below from the GM Performance Total row (acquired MRR).
     today = pd.Timestamp(date.today())
     eom = df[(df["eta_pay_date"].notna())
              &(df["eta_pay_date"]>=today.replace(day=1))
@@ -1898,6 +1945,10 @@ def _va_ops_refresh(state):
     if len(va_gm):
         tot = va_gm.select_dtypes("number").sum().to_dict(); tot["GM"]="Total"
         va_gm = pd.concat([va_gm, pd.DataFrame([tot])], ignore_index=True)
+    # MRR KPI = acquired MRR from the GM Performance Total row (excludes one-time, incl refunds).
+    _vgm_mrr = int(va_gm.iloc[-1]["MRR"]) if len(va_gm) else 0
+    state.va_kpi_mrr = _fmt2(_vgm_mrr)
+    state.va_kpi_mrr_exact = f"{_inr(_vgm_mrr)} · Acquired MRR (includes Refunds but excludes One-time amounts)"
     state.va_gm_json = grid_payload_b64(va_gm, "GM", bar_cols=["HI", "ATP"],
                                         fixed=True, autosize=True, first_col_w=250)
 
@@ -1951,11 +2002,16 @@ def _vaf_refresh(state):
         df = df[df["record_id"].isin(li["record_id"])]
 
     paid = df[df["payment_date"].notna()]
-    state.vaf_kpi_active  = paid[~paid["deal_stage"].isin(["Churned"])]["record_id"].nunique()
-    state.vaf_kpi_revenue = _fmt(int(paid["amount_paid"].sum()+paid["ot_amount_paid"].sum()))
+    # Total Customers — every paid customer, churned included.
+    state.vaf_kpi_active  = paid["record_id"].nunique()
+    # Total Revenue = sum of every line item's unit_price (the full billed value
+    # across recurring + one-time), respecting the Deal / Line Item filters.
+    _va_rev = int(li["unit_price"].sum())
+    state.vaf_kpi_revenue = _fmt2(_va_rev)
+    state.vaf_kpi_revenue_exact = f"{_inr(_va_rev)} · Total Contract value & not MRR"
     cycle_map = {"Annual":12,"Half-yearly":6,"Quarterly":3,"Bi-monthly":2,"Monthly":1}
-    mrr_df = paid.copy(); mrr_df["_m"] = mrr_df["billing_cycle"].map(cycle_map)
-    state.vaf_kpi_mrr = _fmt(int((mrr_df["amount_paid"]/mrr_df["_m"].fillna(1)).sum()))
+    # MRR is set further down from the Revenue Matrix's current-month Total
+    # (normalised ÷term) so the card and the matrix agree.
 
     # Build due_on map from line items — max due_on per record_id (matches PBI)
     va_due_map = {}
@@ -1976,8 +2032,11 @@ def _vaf_refresh(state):
         (paid2["next_renewal"]>=today-pd.Timedelta(days=14))
         &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))]["record_id"].nunique()
 
-    _vrev = _mrr_matrix(li, None, "revenue", add_onetime=True)   # VA: + One-time row
-    _vret = _mrr_matrix(li, None, "retention", add_onetime=True)
+    _vrev = _mrr_matrix(li, None, "revenue", add_onetime=True, as_of=today)   # VA: + One-time row
+    _vret = _mrr_matrix(li, None, "retention", add_onetime=True, as_of=today)
+    _va_mrr = _matrix_current_mrr(_vrev, today, exclude_onetime=True)
+    state.vaf_kpi_mrr = _fmt2(_va_mrr)
+    state.vaf_kpi_mrr_exact = f"{_inr(_va_mrr)} · Excludes One-time amount"
     _vrev_heat = {c: "green" for c in _vrev.columns if c != "Cohort"} if len(_vrev) else {}
     _vret_heat = {c: "green" for c in _vret.columns if c != "Cohort"} if len(_vret) else {}
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
@@ -2044,7 +2103,7 @@ aia_selected_owner = [];  aia_selected_campaign = []
 aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_hi=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
-aia_kpi_collected="₹0"; aia_kpi_mrr="₹0"
+aia_kpi_collected="₹0"; aia_kpi_collected_exact="₹0"; aia_kpi_mrr="₹0"; aia_kpi_mrr_exact="₹0"
 aia_funnel_fig = go.Figure()
 aia_trend_fig = go.Figure()
 aia_channel_pie_json = ""
@@ -2060,7 +2119,7 @@ cs_deal_list  = sorted(_AIA_LI["deal_name"].dropna().unique().tolist())  # from 
 cs_selected_owner=[]; cs_selected_deal=[]
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
 cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
-cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_active=0
+cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_mrr_exact="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
 cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
@@ -2088,7 +2147,7 @@ va_campaign_list = sorted(_VA["utm_campaign"].dropna().unique().tolist())
 va_selected_owner=[]; va_selected_campaign=[]
 va_kpi_leads=0; va_kpi_ds=0; va_kpi_dc=0; va_kpi_hi=0; va_kpi_paid=0
 va_kpi_discards=0; va_kpi_parked=0; va_kpi_closed_lost=0
-va_kpi_revenue="₹0"; va_kpi_mrr="₹0"; va_kpi_eom="0"
+va_kpi_revenue="₹0"; va_kpi_revenue_exact="₹0"; va_kpi_mrr="₹0"; va_kpi_mrr_exact="₹0"; va_kpi_eom="0"
 va_funnel_fig=go.Figure(); va_trend_df=pd.DataFrame(); va_channel_pie_json=""
 va_channel_filter="All"; va_filter_label=""; va_channel_click=""; va_channel_click_last=""
 va_gm_json=""; va_utm_json=""
@@ -2100,7 +2159,7 @@ vaf_deal_list = sorted(_VA_LI["deal_name"].dropna().unique().tolist())  # from l
 vaf_line_item_list = (sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
                       if "line_item_name" in _VA_LI.columns else [])
 vaf_selected_deal=[]; vaf_selected_line_item=[]
-vaf_kpi_active=0; vaf_kpi_revenue="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_due_14d=0
+vaf_kpi_active=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exact="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_mrr_exact="₹0"; vaf_kpi_due_14d=0
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
 

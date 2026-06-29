@@ -227,6 +227,13 @@ body {
     line-height: 1.1 !important;
 }
 
+/* KPI hover tooltips (MRR, Total Revenue) — larger, uniform font for value + note */
+.MuiTooltip-tooltip {
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.2px !important;
+}
+
 .kpi-blue   { background: #1a7fc4; }
 .kpi-green  { background: #16a34a; }
 .kpi-red    { background: #dc2626; }
