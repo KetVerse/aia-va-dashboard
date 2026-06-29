@@ -1,0 +1,12 @@
+# Headless renderer for the daily dashboard PDF snapshot.
+# Self-contained: installs Playwright + Chromium + PDF/Drive deps.
+# Build once on the VPS:  docker build -f Dockerfile.snapshot -t dashboard-snapshot .
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+        playwright pypdf google-api-python-client google-auth \
+ && playwright install --with-deps chromium
+
+WORKDIR /app
+COPY snapshot_pdf.py .
+ENTRYPOINT ["python", "snapshot_pdf.py"]

@@ -250,6 +250,21 @@ _MULTISELECT_SCRIPT = """
 </script>
 """
 
+# ── Snapshot mode ───────────────────────────────────────────────────────────
+# Loading any page with ?snapshot=1 flags the window so every grid iframe renders
+# at full content height (no internal scroll) — used by the daily PDF renderer to
+# capture all rows of every table. The grid iframes read window.parent.__SNAPSHOT__
+# (same origin) and force their autosize path; see grid_server.py.
+_SNAPSHOT_SCRIPT = """
+<script id="snapshot-mode">
+(function () {
+  if (!/[?&]snapshot=1/.test(location.search)) return;
+  window.__SNAPSHOT__ = true;
+  document.documentElement.setAttribute('data-snapshot', '1');
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
@@ -258,7 +273,8 @@ def _inject_zoom_lock(resp):
             if "</body>" in html and 'id="zoom-lock"' not in html:
                 resp.set_data(html.replace(
                     "</body>",
-                    _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT + "</body>"))
+                    _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT
+                    + _SNAPSHOT_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass

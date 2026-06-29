@@ -549,7 +549,9 @@ function render(){
   document.getElementById("searchbar").style.display =
       (DATA.searchIdx && DATA.searchIdx.length) ? "block" : "none";
   header(); body(); foot();
-  if(DATA.autosize){
+  var FORCE_FULL=false;
+  try{ FORCE_FULL = !!(window.parent && window.parent.__SNAPSHOT__); }catch(e){}
+  if(DATA.autosize || FORCE_FULL){
     try{
       document.querySelector(".wrap").style.maxHeight="none";
       if(window.frameElement){
@@ -558,6 +560,12 @@ function render(){
         const sbh=(sb && sb.style.display!=="none") ? sb.offsetHeight : 0;
         const h=tbl.offsetHeight + sbh + 8;
         window.frameElement.style.height=h+"px";
+        if(FORCE_FULL){
+          // snapshot: also widen the frame to the full table so nothing is
+          // cut off horizontally (no internal scroll in the PDF capture).
+          var w=tbl.offsetWidth+4;
+          if(w>window.frameElement.clientWidth) window.frameElement.style.width=w+"px";
+        }
       }
     }catch(e){}
   }
