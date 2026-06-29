@@ -14,6 +14,16 @@ set -euo pipefail
 cd /opt/taipy-dashboard
 
 mkdir -p snapshots
+
+# Wait until the dashboard web server is actually listening. It reloads on deploy
+# and spends ~30-60s loading data before the server comes up; the renderer would
+# otherwise hit ERR_CONNECTION_REFUSED. (Host maps 127.0.0.1:8080 -> aia-dashboard.)
+echo "[run_snapshot] waiting for dashboard on :8080 ..."
+for i in $(seq 1 60); do
+  if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then exec 3<&- 3>&-; echo "[run_snapshot] dashboard ready"; break; fi
+  sleep 3
+done
+
 TS=$(TZ=Asia/Kolkata date +%Y%m%d_%H%M)
 OUT="/out/dashboard_${TS}_IST.pdf"
 
