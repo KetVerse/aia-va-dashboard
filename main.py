@@ -1715,11 +1715,12 @@ def _cs_refresh(state):
     _coh_heat = {f"W{o}": "green" for o in range(12)}
     state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
                                   blank_zeros=True, no_sort=True, fixed=True,
-                                  sortable=False, center_all=True, heat_cols=_coh_heat)
+                                  sortable=False, center_all=True, heat_cols=_coh_heat,
+                                  autosize=True)   # expand iframe to fit all rows, no scroll
                                   if len(cnt_df) else grid_payload_b64(pd.DataFrame()))
     state.cs_cohort_pct_json   = (grid_payload_b64(pct_df, total_id_col="Integration Week",
                                   no_sort=True, fixed=True, sortable=False, center_all=True,
-                                  heat_cols=_coh_heat)
+                                  heat_cols=_coh_heat, autosize=True)
                                   if len(pct_df) else grid_payload_b64(pd.DataFrame()))
 
     # Usage & Health table — every record with a non-blank payment_date (PBI rule:
