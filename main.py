@@ -464,7 +464,7 @@ def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=Non
 
 
 def _usage_cohort():
-    """Customer Usage Cohort (last 10 integration weeks). Rows = integration-week
+    """Customer Usage Cohort (last 12 integration weeks). Rows = integration-week
     Monday; columns = Integrated (cohort size) + W0..W9 (active accounts that had
     any upload/sync activity in that week-offset window). Returns (counts_df,
     pct_df), each with a pinned Total row. Replicates the DAX cohort measures."""
@@ -476,11 +476,11 @@ def _usage_cohort():
         return pd.DataFrame(), pd.DataFrame()
     iw = base["integration_done_date"].dt.normalize()
     base["iw"] = iw - pd.to_timedelta(iw.dt.weekday, unit="D")     # Monday
-    weeks = sorted([w for w in base["iw"].dropna().unique()])[-10:]  # last 10 weeks
+    weeks = sorted([w for w in base["iw"].dropna().unique()])[-12:]  # last 12 weeks
     if not weeks:
         return pd.DataFrame(), pd.DataFrame()
     today = pd.Timestamp(date.today())
-    OFFS = list(range(10))
+    OFFS = list(range(12))
 
     cnt_rows, pct_rows = [], []
     tot_int = 0
@@ -1708,11 +1708,11 @@ def _cs_refresh(state):
         _with_total(t3_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
         blank_zeros=True, bar_cols=["Red Flags Yesterday"], bar_color="#f1a0a0", autosize=True)
 
-    # Customer Usage Cohort (last 10 integration weeks) — counts + % tables.
+    # Customer Usage Cohort (last 12 integration weeks) — counts + % tables.
     # Both use fixed column widths so they line up as a comparison; % values
     # (strings) are centre-aligned.
     cnt_df, pct_df = _usage_cohort()
-    _coh_heat = {f"W{o}": "green" for o in range(10)}
+    _coh_heat = {f"W{o}": "green" for o in range(12)}
     state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
                                   blank_zeros=True, no_sort=True, fixed=True,
                                   sortable=False, center_all=True, heat_cols=_coh_heat)

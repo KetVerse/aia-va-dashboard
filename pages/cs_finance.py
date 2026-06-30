@@ -125,7 +125,7 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Customer Usage Cohort (Last 10 Weeks)**
+**Customer Usage Cohort (Last 12 Weeks)**
 
 <|part|class_name=gridholder gridholder-cs_cohort_count|
 <|{cs_cohort_count_json}|text|mode=raw|>
