@@ -133,7 +133,7 @@ _MULTISELECT_SCRIPT = """
 <script id="ms-dropdowns">
 (function () {
   var CTR = 0;
-  function lbl(sel){ return sel.length===0 ? "All" : (sel.length===1 ? sel[0] : "Multiple Selections"); }
+  function lbl(sel){ return sel.length===0 ? "All" : (sel.length===1 ? sel[0] : "Multiple Selections ["+sel.length+"]"); }
   function bridge(key, sel){
     try{
       var host = document.querySelector(".msbridge");
@@ -1101,7 +1101,7 @@ def _sel(v):
 # the widget a JSON blob ({lov, sel, label}) per filter via a hidden text holder.
 def _ms_label(sel):
     n = len(sel)
-    return "All" if n == 0 else (sel[0] if n == 1 else "Multiple Selections")
+    return "All" if n == 0 else (sel[0] if n == 1 else f"Multiple Selections [{n}]")
 
 def _ms_json(lov, sel):
     # base64 so option text containing HTML-special chars (deal names like
