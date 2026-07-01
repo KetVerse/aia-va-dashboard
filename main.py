@@ -1254,8 +1254,10 @@ def _aia_ops_refresh(state):
     leads = coh["record_id"].nunique()
     ds_n  = coh[coh["ds_date"].notna()&(coh["ds_date"]>=s)&(coh["ds_date"]<=e)]["record_id"].nunique()
     dc_n  = coh[coh["dc_date"].notna()&(coh["dc_date"]>=s)&(coh["dc_date"]<=e)]["record_id"].nunique()
-    hi2_mask = (coh["eta_pay_date"].notna()&(coh["eta_pay_date"]>=s)&(coh["eta_pay_date"]<=e)
-                &(coh["deal_stage"]=="High Intent")&coh["payment_date"].isna()&coh["parked_date"].isna())
+    # Funnel HI: any cohort lead with an eta_pay_date in range counts (regardless
+    # of current stage / paid / parked). This affects ONLY the funnel — the HI KPI
+    # card and the GM/UTM tables keep their own definitions.
+    hi2_mask = (coh["eta_pay_date"].notna()&(coh["eta_pay_date"]>=s)&(coh["eta_pay_date"]<=e))
     hi2   = coh[hi2_mask]["record_id"].nunique()
     paid2 = coh[coh["payment_date"].notna()&(coh["payment_date"]>=s)&(coh["payment_date"]<=e)]["record_id"].nunique()
     p = lambda n: f"{n/leads*100:.0f}%" if leads else "0%"
