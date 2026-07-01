@@ -2298,19 +2298,53 @@ _MS_DISPATCH = {
 
 def _sync_ms(state):
     """Push each filter's {lov, sel, label} JSON to its hidden holder so the JS
-    checkbox dropdowns reflect the current (possibly server-changed) selection."""
+    checkbox dropdowns reflect the current selection. Some option lists are
+    DEPENDENT (cascading): they narrow based on a related filter's selection —
+      CS Deal Name  <- CS Owner
+      Usage Deal/CSM/Stage/Owner  <- each other (cross-filter)
+      VA Deal Name  <- Recurring Type"""
     state.aia_owner_ms      = _ms_json(aia_owner_list,    state.aia_selected_owner)
     state.aia_campaign_ms   = _ms_json(aia_campaign_list, state.aia_selected_campaign)
     state.va_owner_ms       = _ms_json(va_owner_list,     state.va_selected_owner)
     state.va_campaign_ms    = _ms_json(va_campaign_list,  state.va_selected_campaign)
     state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
-    state.cs_deal_ms        = _ms_json(cs_deal_list,      state.cs_selected_deal)
     state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
-    state.cs_usage_deal_ms  = _ms_json(state.cs_usage_deal_list,  state.cs_usage_deal)
-    state.cs_usage_csm_ms   = _ms_json(state.cs_usage_csm_list,   state.cs_usage_csm)
-    state.cs_usage_stage_ms = _ms_json(state.cs_usage_stage_list, state.cs_usage_stage)
-    state.cs_usage_owner_ms = _ms_json(state.cs_usage_owner_list, state.cs_usage_owner)
-    state.vaf_deal_ms       = _ms_json(vaf_deal_list,      state.vaf_selected_deal)
+
+    # CS Deal Name options depend on the selected CS Owner(s)
+    _co = _sel(state.cs_selected_owner)
+    if _co:
+        _rids = _AIA[_AIA["cs_owner"].isin(_co)]["record_id"]
+        cs_deal_lov = sorted(_AIA_LI[_AIA_LI["record_id"].isin(_rids)]["deal_name"].dropna().unique().tolist())
+    else:
+        cs_deal_lov = cs_deal_list
+    state.cs_deal_ms        = _ms_json(cs_deal_lov, state.cs_selected_deal)
+
+    # Customer Usage & Health: Deal Name / CSM / Stage / Deal Owner cross-filter
+    _ua = state.cs_usage_all
+    def _ulov(target):
+        d = _ua
+        if d is None or len(d) == 0:
+            return []
+        for col, sv in (("Deal Name", state.cs_usage_deal), ("CSM", state.cs_usage_csm),
+                        ("Stage", state.cs_usage_stage), ("Deal Owner", state.cs_usage_owner)):
+            if col == target:
+                continue
+            s = _sel(sv)
+            if s:
+                d = d[d[col].isin(s)]
+        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
+    state.cs_usage_deal_ms  = _ms_json(_ulov("Deal Name"),  state.cs_usage_deal)
+    state.cs_usage_csm_ms   = _ms_json(_ulov("CSM"),        state.cs_usage_csm)
+    state.cs_usage_stage_ms = _ms_json(_ulov("Stage"),      state.cs_usage_stage)
+    state.cs_usage_owner_ms = _ms_json(_ulov("Deal Owner"), state.cs_usage_owner)
+
+    # VA Deal Name options depend on the selected Recurring Type(s)
+    _vrt = _sel(state.vaf_selected_rectype)
+    if _vrt and "recurring_type" in _VA_LI.columns:
+        va_deal_lov = sorted(_VA_LI[_VA_LI["recurring_type"].isin(_vrt)]["deal_name"].dropna().unique().tolist())
+    else:
+        va_deal_lov = vaf_deal_list
+    state.vaf_deal_ms       = _ms_json(va_deal_lov, state.vaf_selected_deal)
     state.vaf_rectype_ms    = _ms_json(vaf_rectype_list,   state.vaf_selected_rectype)
     state.vaf_line_item_ms  = _ms_json(vaf_line_item_list, state.vaf_selected_line_item)
 
