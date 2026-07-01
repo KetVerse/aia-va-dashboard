@@ -4,7 +4,7 @@ VA_FINANCE_PAGE = """
 <|part|class_name=topbar|
 <|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
-<|layout|columns=1 1|gap=12px|
+<|layout|columns=1 1 1|gap=12px|
 <|part|
 <div class="msc wide" data-key="vaf_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{vaf_deal_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_deal|>
@@ -12,6 +12,10 @@ VA_FINANCE_PAGE = """
 <|part|
 <div class="msc wide" data-key="vaf_line_item"><div class="msc-cap">Line Item Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{vaf_line_item_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_line_item|>
+|>
+<|part|
+<div class="msc" data-key="vaf_rectype"><div class="msc-cap">Recurring Type</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_rectype_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_rectype|>
 |>
 |>
 |>

@@ -4,7 +4,7 @@ CS_FINANCE_PAGE = """
 <|part|class_name=topbar|
 <|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
-<|layout|columns=1 1|gap=12px|
+<|layout|columns=1 1 1|gap=12px|
 <|part|
 <div class="msc" data-key="cs_owner"><div class="msc-cap">CS Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_owner_ms}|text|mode=raw|class_name=msc-data msc-data-cs_owner|>
@@ -12,6 +12,10 @@ CS_FINANCE_PAGE = """
 <|part|
 <div class="msc wide" data-key="cs_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_deal|>
+|>
+<|part|
+<div class="msc" data-key="cs_rectype"><div class="msc-cap">Recurring Type</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_rectype_ms}|text|mode=raw|class_name=msc-data msc-data-cs_rectype|>
 |>
 |>
 |>

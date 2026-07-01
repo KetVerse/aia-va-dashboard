@@ -1574,6 +1574,9 @@ def _cs_refresh(state):
     _li_cs = _AIA_LI
     if _co or _cd:
         _li_cs = _AIA_LI[_AIA_LI["record_id"].isin(df["record_id"])]
+    _crt = _sel(state.cs_selected_rectype)   # Recurring Type filter (line-item level)
+    if _crt and "recurring_type" in _li_cs.columns:
+        _li_cs = _li_cs[_li_cs["recurring_type"].isin(_crt)]
     _rev_m = _mrr_matrix(_li_cs, _refund_map, "revenue", as_of=today)
     _ret_m = _mrr_matrix(_li_cs, _refund_map, "retention", as_of=today)
     _cs_mrr = _matrix_current_mrr(_rev_m, today)
@@ -2017,6 +2020,9 @@ def _vaf_refresh(state):
     if _vli and "line_item_name" in li.columns:
         li = li[li["line_item_name"].isin(_vli)]
         df = df[df["record_id"].isin(li["record_id"])]
+    _vrt = _sel(state.vaf_selected_rectype)   # Recurring Type filter (line-item level)
+    if _vrt and "recurring_type" in li.columns:
+        li = li[li["recurring_type"].isin(_vrt)]
 
     paid = df[df["payment_date"].notna()]
     # Total Customers — every paid customer, churned included.
@@ -2133,7 +2139,8 @@ aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.Data
 cs_start_date = date(2020,1,1);  cs_end_date = _today   # no date filter on CS page (all-time)
 cs_owner_list = sorted(_AIA["cs_owner"].dropna().unique().tolist())
 cs_deal_list  = sorted(_AIA_LI["deal_name"].dropna().unique().tolist())  # from line items (matrix source)
-cs_selected_owner=[]; cs_selected_deal=[]
+cs_rectype_list = sorted(_AIA_LI["recurring_type"].dropna().unique().tolist()) if "recurring_type" in _AIA_LI.columns else []
+cs_selected_owner=[]; cs_selected_deal=[]; cs_selected_rectype=[]
 cs_kpi_paid_all=0; cs_kpi_overdue=0; cs_kpi_due_7d=0; cs_kpi_int_due=0
 cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
 cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_mrr_exact="₹0"; cs_kpi_active=0
@@ -2173,9 +2180,10 @@ va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFra
 # Page 5
 vaf_start_date = date(2020,1,1); vaf_end_date = _today   # no date filter (all-time)
 vaf_deal_list = sorted(_VA_LI["deal_name"].dropna().unique().tolist())  # from line items (matrix source)
+vaf_rectype_list = sorted(_VA_LI["recurring_type"].dropna().unique().tolist()) if "recurring_type" in _VA_LI.columns else []
 vaf_line_item_list = (sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
                       if "line_item_name" in _VA_LI.columns else [])
-vaf_selected_deal=[]; vaf_selected_line_item=[]
+vaf_selected_deal=[]; vaf_selected_line_item=[]; vaf_selected_rectype=[]
 vaf_kpi_active=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exact="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_mrr_exact="₹0"; vaf_kpi_due_14d=0
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
@@ -2189,11 +2197,13 @@ va_owner_ms       = _ms_json(va_owner_list,     [])
 va_campaign_ms    = _ms_json(va_campaign_list,  [])
 cs_owner_ms       = _ms_json(cs_owner_list,     [])
 cs_deal_ms        = _ms_json(cs_deal_list,      [])
+cs_rectype_ms     = _ms_json(cs_rectype_list,   [])
 cs_usage_deal_ms  = _ms_json([], [])
 cs_usage_csm_ms   = _ms_json([], [])
 cs_usage_stage_ms = _ms_json([], [])
 cs_usage_owner_ms = _ms_json([], [])
 vaf_deal_ms       = _ms_json(vaf_deal_list,      [])
+vaf_rectype_ms    = _ms_json(vaf_rectype_list,   [])
 vaf_line_item_ms  = _ms_json(vaf_line_item_list, [])
 
 # ── Chart configs ──────────────────────────────────────────────────
@@ -2276,12 +2286,14 @@ _MS_DISPATCH = {
     "va_campaign":    ("va_selected_campaign",   "va"),
     "cs_owner":       ("cs_selected_owner",      "cs"),
     "cs_deal":        ("cs_selected_deal",       "cs"),
+    "cs_rectype":     ("cs_selected_rectype",    "cs"),
     "cs_usage_deal":  ("cs_usage_deal",          "usage"),
     "cs_usage_csm":   ("cs_usage_csm",           "usage"),
     "cs_usage_stage": ("cs_usage_stage",         "usage"),
     "cs_usage_owner": ("cs_usage_owner",         "usage"),
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
+    "vaf_rectype":    ("vaf_selected_rectype",   "vaf"),
 }
 
 def _sync_ms(state):
@@ -2293,11 +2305,13 @@ def _sync_ms(state):
     state.va_campaign_ms    = _ms_json(va_campaign_list,  state.va_selected_campaign)
     state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
     state.cs_deal_ms        = _ms_json(cs_deal_list,      state.cs_selected_deal)
+    state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
     state.cs_usage_deal_ms  = _ms_json(state.cs_usage_deal_list,  state.cs_usage_deal)
     state.cs_usage_csm_ms   = _ms_json(state.cs_usage_csm_list,   state.cs_usage_csm)
     state.cs_usage_stage_ms = _ms_json(state.cs_usage_stage_list, state.cs_usage_stage)
     state.cs_usage_owner_ms = _ms_json(state.cs_usage_owner_list, state.cs_usage_owner)
     state.vaf_deal_ms       = _ms_json(vaf_deal_list,      state.vaf_selected_deal)
+    state.vaf_rectype_ms    = _ms_json(vaf_rectype_list,   state.vaf_selected_rectype)
     state.vaf_line_item_ms  = _ms_json(vaf_line_item_list, state.vaf_selected_line_item)
 
 def on_ms_change(state):
@@ -2405,12 +2419,12 @@ def on_reset_filters(state, *_):
     state.va_selected_owner  = []; state.va_selected_campaign = []
     state.va_channel_filter  = "All"; state.va_filter_label  = ""
     # CS Finance
-    state.cs_selected_owner  = []; state.cs_selected_deal = []
+    state.cs_selected_owner  = []; state.cs_selected_deal = []; state.cs_selected_rectype = []
     state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []
     # Marketing
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
     # VA Finance
-    state.vaf_selected_deal  = []; state.vaf_selected_line_item = []
+    state.vaf_selected_deal  = []; state.vaf_selected_line_item = []; state.vaf_selected_rectype = []
     _refresh_all(state)
 
 def on_manual_refresh(state, *_):
