@@ -52,3 +52,7 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Data exports (generated spreadsheets — never commit)
+exports/
+*.xlsx
