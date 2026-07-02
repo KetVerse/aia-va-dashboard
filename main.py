@@ -274,18 +274,29 @@ _SNAPSHOT_SCRIPT = """
 _COPYBTN_SCRIPT = """
 <script id="grid-copy-btns">
 (function(){
-  function build(f){
-    var win, doc;
-    try{ win=f.contentWindow; doc=f.contentDocument; }catch(e){ return null; }
-    if(!win || !doc || !win.DATA || !win.DATA.columns || !win.DATA.columns.length) return null;
-    var D=win.DATA, hidden=D.hidden||[];
-    var cols=D.columns.filter(function(c,i){ return !hidden[i]; });
-    var lines=[cols.join("\\t")];
-    doc.querySelectorAll("#b tr").forEach(function(tr){
-      lines.push(Array.prototype.map.call(tr.children,function(td){ return (td.textContent||"").trim(); }).join("\\t"));
+  // Read the rendered grid straight from the iframe DOM (same-origin). The
+  // thead/tbody/tfoot only contain VISIBLE columns, so header/rows/total stay
+  // aligned; we strip the sort-arrow (.arr) and priority (.pri) markers from
+  // header cells. This avoids depending on the iframe's JS internals.
+  function cells(tr, sel){
+    return Array.prototype.map.call(tr.querySelectorAll(sel), function(c){
+      var t=c.cloneNode(true);
+      var junk=t.querySelectorAll(".arr, .pri");
+      for(var i=0;i<junk.length;i++) junk[i].remove();
+      return (t.textContent||"").replace(/\\s+/g," ").trim();
     });
+  }
+  function build(f){
+    var doc;
+    try{ doc=f.contentDocument; }catch(e){ return null; }
+    if(!doc) return null;
+    var head=doc.querySelector("#h tr");
+    var brows=doc.querySelectorAll("#b tr");
+    if(!head || !brows.length) return null;
+    var lines=[cells(head,"th").join("\\t")];
+    for(var i=0;i<brows.length;i++) lines.push(cells(brows[i],"td").join("\\t"));
     var ft=doc.querySelector("#f tr");
-    if(ft) lines.push(Array.prototype.map.call(ft.children,function(td){ return (td.textContent||"").trim(); }).join("\\t"));
+    if(ft) lines.push(cells(ft,"td").join("\\t"));
     return lines.join("\\n");
   }
   function fb(text,done){
