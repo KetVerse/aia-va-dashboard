@@ -1929,13 +1929,15 @@ def _va_ops_refresh(state):
     leads = coh["record_id"].nunique()
     ds2  = coh[coh["ds_date"].notna()&(coh["ds_date"]>=s)&(coh["ds_date"]<=e)]["record_id"].nunique()
     dc2  = coh[coh["dc_date"].notna()&(coh["dc_date"]>=s)&(coh["dc_date"]<=e)]["record_id"].nunique()
-    hi2  = coh[coh["eta_pay_date"].notna()&(coh["eta_pay_date"]>=s)&(coh["eta_pay_date"]<=e)&(coh["deal_stage"]=="High Intent")]["record_id"].nunique()
+    # Funnel HI: any cohort lead with an eta_pay_date in range (same rule as AIA);
+    # funnel-only — the "Agreed" KPI card keeps its own High-Intent-stage definition.
+    hi2  = coh[coh["eta_pay_date"].notna()&(coh["eta_pay_date"]>=s)&(coh["eta_pay_date"]<=e)]["record_id"].nunique()
     paid2= coh[coh["payment_date"].notna()&(coh["payment_date"]>=s)&(coh["payment_date"]<=e)]["record_id"].nunique()
     p = lambda n: f"{n/leads*100:.0f}%" if leads else "0%"
     _vlabels = [f"<b>{leads}</b>", f"<b>{ds2} ({p(ds2)})</b>", f"<b>{dc2} ({p(dc2)})</b>",
                 f"<b>{hi2} ({p(hi2)})</b>", f"<b>{paid2} ({p(paid2)})</b>"]
     state.va_funnel_fig = _make_funnel(
-        ["Leads", "DS", "DC", "Agreed", "Paid"],
+        ["Leads", "DS", "DC", "HI", "Paid"],
         [leads, ds2, dc2, hi2, paid2], _vlabels)
 
     e_cap = min(e, pd.Timestamp(date.today()))     # cap trend at today, like AIA Ops
