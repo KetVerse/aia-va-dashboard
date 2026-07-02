@@ -46,9 +46,9 @@ DC
 <|{va_kpi_dc}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-blue|
-Agreed
+HI (ATP)
 
-<|{va_kpi_hi}|text|class_name=kpi-value|>
+<|{va_kpi_hi}|text|class_name=kpi-value|hover_text=Active HI deals with payment ETA in the selected period.|>
 |>
 <|part|class_name=kpi-card kpi-blue|
 Paid
@@ -74,7 +74,7 @@ EOM Estimate
 
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
-**Marketing Funnel (Cohort)**
+**Marketing Funnel (Cohort)** <|ⓘ|text|hover_text=All leads that entered HI stage in the selected cohort, regardless of current stage.|class_name=info-ico|>
 
 <|chart|figure={va_funnel_fig}|plot_config={chart_config}|>
 |>

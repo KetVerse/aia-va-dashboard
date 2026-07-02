@@ -64,9 +64,9 @@ DC
 <|{aia_kpi_dc}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-blue|
-High Intent
+HI (ATP)
 
-<|{aia_kpi_hi}|text|class_name=kpi-value|>
+<|{aia_kpi_hi}|text|class_name=kpi-value|hover_text=Active HI deals with payment ETA in the selected period.|>
 |>
 <|part|class_name=kpi-card kpi-grey|
 GST Paid
@@ -82,7 +82,7 @@ Refunds
 
 <|layout|columns=1 2|gap=16px|
 <|part|class_name=chart-card|
-**Marketing Funnel (Cohort)**
+**Marketing Funnel (Cohort)** <|ⓘ|text|hover_text=All leads that entered HI stage in the selected cohort, regardless of current stage.|class_name=info-ico|>
 
 <|chart|figure={aia_funnel_fig}|plot_config={chart_config}|>
 |>

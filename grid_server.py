@@ -28,7 +28,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      bar_color="#c5e07a", sortable=True, center_all=False,
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
-                     heat_by_row=False, link_cols=None, date_cols=None):
+                     heat_by_row=False, link_cols=None, date_cols=None, header_tips=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -103,6 +103,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
     hidden = [bool(cols[i] in hidden_cols) for i in range(len(cols))]
     date_set = set(date_cols or [])    # cols of "dd-MMM-yy" strings -> sort chronologically
     date_flag = [bool(cols[i] in date_set) for i in range(len(cols))]
+    _htips = header_tips or {}         # {column: hover title on the header cell}
+    header_tip_list = [str(_htips.get(cols[i], "")) for i in range(len(cols))]
 
     payload = {"columns": cols, "numeric": numeric, "center": center,
                "rows": rows, "total": total, "bars": bars, "fixed": bool(fixed),
@@ -111,7 +113,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "statusCol": status_flag, "heat": heat, "autosize": bool(autosize),
                "firstW": first_col_w, "rowHeat": row_heat_cols or {},
                "heatByRow": bool(heat_by_row), "linkCols": link_map,
-               "hidden": hidden, "dateCols": date_flag}
+               "hidden": hidden, "dateCols": date_flag, "headerTips": header_tip_list}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -276,6 +278,9 @@ _GRID_HTML = r"""<!DOCTYPE html>
              height:18px; background:#c5e07a; border-radius:3px; z-index:0; }
   .bar-val{ position:relative; z-index:1; padding:0 4px; }
   .streak{ white-space:nowrap; }
+  /* invisible on screen, but included when you drag-select & copy the row */
+  .streak-copy{ position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+        overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   .dot{ display:inline-block; width:11px; height:11px; border-radius:50%;
         margin:0 1px; vertical-align:middle; cursor:default; }
   .dot.on{ background:#16a34a; }
@@ -331,7 +336,9 @@ function header(){
            if(SORT.length>1) pri='<span class="pri">'+(SORT.indexOf(s)+1)+'</span>'; }
     let c2 = DATA.center[i] ? "" : "left";
     if(!sortable) c2 += " nosort";
-    tr+='<th class="'+c2.trim()+'" data-i="'+i+'">'+c+arr+pri+'</th>';
+    const tips=DATA.headerTips||[];
+    const tip = tips[i] ? ' title="'+String(tips[i]).replace(/"/g,"&quot;")+'"' : '';
+    tr+='<th class="'+c2.trim()+'" data-i="'+i+'"'+tip+'>'+c+arr+pri+'</th>';
   });
   h.innerHTML=tr+"</tr>";
   if(sortable) h.querySelectorAll("th").forEach(th=>th.onclick=e=>onSort(+th.dataset.i, e.shiftKey));
@@ -411,14 +418,16 @@ function streakHtml(s){
   // A custom DOM tooltip (see the streaktip IIFE) reads the data-* attributes —
   // we don't use the native title= so the tooltip survives PrintScreen / Win+Shift+S.
   const days=(s||"").split(";");
-  let h='<span class="streak">';
+  let h='<span class="streak">', copytxt='';
   for(let i=0;i<days.length;i++){
     const p=(days[i]||"").split(",");
     const on=p[0]==="1";
+    copytxt += on ? "●" : "○";   // filled / hollow circle for copy-paste
     h+='<span class="dot '+(on?"on":"off")+'" data-i="'+i+'" data-on="'+(on?1:0)
       +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)+'"></span>';
   }
-  return h+'</span>';
+  // hidden but copyable string of the streak (dots are CSS-only and don't copy)
+  return h+'<span class="streak-copy">'+copytxt+'</span></span>';
 }
 // ── Per-day custom tooltip for the streak dots ──────────────────────────────
 // A DOM tooltip (not native title=) so it survives PrintScreen / Win+Shift+S.

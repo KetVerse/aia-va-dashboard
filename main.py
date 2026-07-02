@@ -1264,7 +1264,7 @@ def _aia_ops_refresh(state):
     _labels = [f"<b>{leads}</b>", f"<b>{ds_n} ({p(ds_n)})</b>", f"<b>{dc_n} ({p(dc_n)})</b>",
                f"<b>{hi2} ({p(hi2)})</b>", f"<b>{paid2} ({p(paid2)})</b>"]
     state.aia_funnel_fig = _make_funnel(
-        ["Leads", "DS", "DC", "High Intent", "Paid"],
+        ["Leads", "DS", "DC", "HI", "Paid"],
         [leads, ds_n, dc_n, hi2, paid2], _labels)
 
     # DC vs Qualified trend — bars (DC) + line (Qualified), capped at today
@@ -1302,7 +1302,7 @@ def _aia_ops_refresh(state):
             "GM":         owner,
             "Leads":      l,
             "DC":         _rng(o,"dc_date",s,e)["record_id"].nunique(),
-            "HI":         _rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
+            "HI (ATP)":   _rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
             "AIA Paid":   pd2[pd2["module_type"]=="AIA Paid"]["record_id"].nunique(),
             "GST Paid":   pd2[pd2["module_type"]=="GST Paid"]["record_id"].nunique(),
             "Active PS60":_rng(o,"dc_date",s,e).query("prospect_score>=60 and deal_stage in ['Demo Conducted','High Intent']")["record_id"].nunique(),
@@ -1319,7 +1319,8 @@ def _aia_ops_refresh(state):
     _gm_mrr = int(gm.iloc[-1]["MRR"]) if len(gm) else 0
     state.aia_kpi_mrr = _fmt2(_gm_mrr)
     state.aia_kpi_mrr_exact = f"{_inr(_gm_mrr)} · Acquired MRR (includes refunds)"
-    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI", "ATP"], fixed=True)
+    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI (ATP)", "ATP"], fixed=True,
+        header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected period"})
 
     # UTM cohort
     rows2 = []
@@ -1341,7 +1342,7 @@ def _aia_ops_refresh(state):
             "UTM Source": src,
             "Leads": l2,
             "DC":    c[c["dc_date"].notna()&(c["dc_date"]>=s)&(c["dc_date"]<=e)]["record_id"].nunique(),
-            "HI":    c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
+            "HI (ATP)": c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
             "AIA Paid": pd3[pd3["module_type"]=="AIA Paid"]["record_id"].nunique(),
             "GST Paid": pd3[pd3["module_type"]=="GST Paid"]["record_id"].nunique(),
             "Active PS60": aps,
@@ -1354,7 +1355,8 @@ def _aia_ops_refresh(state):
     if len(utm):
         tot2 = utm.select_dtypes("number").sum().to_dict(); tot2["UTM Source"] = "Total"
         utm = pd.concat([utm, pd.DataFrame([tot2])], ignore_index=True)
-    state.aia_utm_json = grid_payload_b64(utm, "UTM Source", bar_cols=["HI", "ATP"], fixed=True)
+    state.aia_utm_json = grid_payload_b64(utm, "UTM Source", bar_cols=["HI (ATP)", "ATP"], fixed=True,
+        header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected cohort"})
 
     # Reason tables
     def _reason(date_col, label, rcol):
@@ -1960,7 +1962,7 @@ def _va_ops_refresh(state):
         pd2 = _rng(o,"payment_date",s,e)
         rows.append({"GM":owner,"Leads":l,
             "DC":_rng(o,"dc_date",s,e)["record_id"].nunique(),
-            "HI":_rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
+            "HI (ATP)":_rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
             "Paid":pd2["record_id"].nunique(),
             "Revenue":int(pd2["amount_paid"].sum()+pd2["ot_amount_paid"].sum()),
             "MRR":_va_mrr(pd2["record_id"]),
@@ -1973,8 +1975,9 @@ def _va_ops_refresh(state):
     _vgm_mrr = int(va_gm.iloc[-1]["MRR"]) if len(va_gm) else 0
     state.va_kpi_mrr = _fmt2(_vgm_mrr)
     state.va_kpi_mrr_exact = f"{_inr(_vgm_mrr)} · Acquired MRR (includes Refunds but excludes One-time amounts)"
-    state.va_gm_json = grid_payload_b64(va_gm, "GM", bar_cols=["HI", "ATP"],
-                                        fixed=True, autosize=True, first_col_w=250)
+    state.va_gm_json = grid_payload_b64(va_gm, "GM", bar_cols=["HI (ATP)", "ATP"],
+                                        fixed=True, autosize=True, first_col_w=250,
+                                        header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected period"})
 
     rows2 = []
     _utm_src = coh["utm_source_cohort"].fillna("(Blank)")
@@ -1985,7 +1988,7 @@ def _va_ops_refresh(state):
         coh_paid = c[c["payment_date"].notna()&(c["payment_date"]>=s)&(c["payment_date"]<=e)]
         rows2.append({"UTM":src,"Leads":l2,
             "DC":c[c["dc_date"].notna()&(c["dc_date"]>=s)&(c["dc_date"]<=e)]["record_id"].nunique(),
-            "HI":c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
+            "HI (ATP)":c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
             "Paid":coh_paid["record_id"].nunique(),
             "Revenue":int(coh_paid["amount_paid"].sum()+coh_paid.get("ot_amount_paid", pd.Series(0, index=coh_paid.index)).sum()),
             "MRR":_va_mrr(coh_paid["record_id"]),
@@ -1994,8 +1997,9 @@ def _va_ops_refresh(state):
     if len(va_utm):
         tot2 = va_utm.select_dtypes("number").sum().to_dict(); tot2["UTM"]="Total"
         va_utm = pd.concat([va_utm, pd.DataFrame([tot2])], ignore_index=True)
-    state.va_utm_json = grid_payload_b64(va_utm, "UTM", bar_cols=["HI", "ATP"],
-                                         fixed=True, autosize=True, first_col_w=250)
+    state.va_utm_json = grid_payload_b64(va_utm, "UTM", bar_cols=["HI (ATP)", "ATP"],
+                                         fixed=True, autosize=True, first_col_w=250,
+                                         header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected cohort"})
 
     def _rv(col,label,rcol):
         sub = _rng(df,col,s,e)
@@ -2228,6 +2232,8 @@ aia_funnel_layout = {
     "plot_bgcolor": "rgba(0,0,0,0)",
     "font": {"family": "Inter,sans-serif", "size": 13},
     "showlegend": False,
+    # keep every value label the same size (no per-bar auto-shrink, so HI matches the rest)
+    "uniformtext": {"minsize": 16, "mode": "show"},
     "yaxis": {"side": "left", "automargin": True, "title": "",
               "tickfont": {"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"}},
 }

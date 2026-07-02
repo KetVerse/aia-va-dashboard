@@ -500,6 +500,16 @@ table.taipy-table thead tr th,
 }
 .msc-optlabel { color: #1a3a6b !important; font-size: 13px !important; }
 
+/* inline ⓘ info icon next to a chart title (MUI tooltip supplied via hover_text) */
+.info-ico, .info-ico * {
+    display: inline !important;
+    color: #1a7fc4 !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    cursor: help !important;
+    vertical-align: middle !important;
+}
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
     .kpi-value { font-size: 20px !important; }
