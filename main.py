@@ -265,6 +265,71 @@ _SNAPSHOT_SCRIPT = """
 </script>
 """
 
+# Adds a small "⧉" copy button to the top-right of every grid chart-card (the
+# white title area, above the table — so it never overlaps the sticky header).
+# The button appears only on card hover. On click it reads the grid iframe
+# (same-origin) — header + all shown rows + the Total row — and copies it as
+# tab-separated text so it pastes cleanly into Excel/Sheets. One script covers
+# every grid; pies (src=/pie/) are skipped.
+_COPYBTN_SCRIPT = """
+<script id="grid-copy-btns">
+(function(){
+  function build(f){
+    var win, doc;
+    try{ win=f.contentWindow; doc=f.contentDocument; }catch(e){ return null; }
+    if(!win || !doc || !win.DATA || !win.DATA.columns || !win.DATA.columns.length) return null;
+    var D=win.DATA, hidden=D.hidden||[];
+    var cols=D.columns.filter(function(c,i){ return !hidden[i]; });
+    var lines=[cols.join("\\t")];
+    doc.querySelectorAll("#b tr").forEach(function(tr){
+      lines.push(Array.prototype.map.call(tr.children,function(td){ return (td.textContent||"").trim(); }).join("\\t"));
+    });
+    var ft=doc.querySelector("#f tr");
+    if(ft) lines.push(Array.prototype.map.call(ft.children,function(td){ return (td.textContent||"").trim(); }).join("\\t"));
+    return lines.join("\\n");
+  }
+  function fb(text,done){
+    var ta=document.createElement("textarea"); ta.value=text;
+    ta.style.position="fixed"; ta.style.left="-9999px"; document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try{ document.execCommand("copy"); }catch(e){}
+    ta.remove(); if(done) done();
+  }
+  function copyText(text,btn){
+    var done=function(){ if(btn){ btn.classList.add("copied");
+      setTimeout(function(){ btn.classList.remove("copied"); },1200); } };
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(done).catch(function(){ fb(text,done); });
+    } else { fb(text,done); }
+  }
+  function attach(){
+    var frames=document.querySelectorAll("iframe.grid-frame");
+    for(var i=0;i<frames.length;i++){
+      var f=frames[i];
+      if(f.__copyBtn) continue;
+      if((f.getAttribute("src")||"").indexOf("/grid/")<0) continue;  // grids only, not pies
+      var card=f.closest ? f.closest(".chart-card") : null;
+      if(!card) continue;
+      if(getComputedStyle(card).position==="static") card.style.position="relative";
+      var b=document.createElement("button");
+      b.textContent="\\u29C9";  // U+29C9 ⧉
+      b.title="Copy table (header, all rows & Total) — paste into Excel/Sheets";
+      b.className="grid-copy-btn";
+      (function(frame,btn){
+        btn.addEventListener("click", function(){ var t=build(frame); if(t) copyText(t,btn); });
+      })(f,b);
+      card.appendChild(b);
+      f.__copyBtn=b;
+    }
+  }
+  try{ new MutationObserver(function(){ attach(); }).observe(document.documentElement,{childList:true,subtree:true}); }catch(e){}
+  if(document.readyState!=="loading") attach();
+  else document.addEventListener("DOMContentLoaded", attach);
+  setInterval(attach, 1500);
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
@@ -274,7 +339,7 @@ def _inject_zoom_lock(resp):
                 resp.set_data(html.replace(
                     "</body>",
                     _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT
-                    + _SNAPSHOT_SCRIPT + "</body>"))
+                    + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass

@@ -249,6 +249,34 @@ body {
     box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
 
+/* "⧉" copy button injected into grid chart-cards (see _COPYBTN_SCRIPT).
+   Sits in the white title area (top-right); shows only on card hover. */
+.chart-card .grid-copy-btn {
+    position: absolute;
+    top: 11px;
+    right: 14px;
+    z-index: 6;
+    cursor: pointer;
+    font: 600 15px 'Inter', -apple-system, 'Segoe UI', sans-serif;
+    line-height: 1;
+    color: #1a3a6b;
+    background: #eef3f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 3px 9px;
+    opacity: 0;
+    transition: opacity .15s ease;
+}
+.chart-card:hover .grid-copy-btn { opacity: .7; }
+.chart-card .grid-copy-btn:hover { opacity: 1; background: #e2e8f0; }
+.chart-card .grid-copy-btn.copied {
+    opacity: 1;
+    background: #16a34a;
+    color: #fff;
+    border-color: #16a34a;
+}
+.chart-card .grid-copy-btn.copied::after { content: " ✓"; }
+
 .chart-card > p strong,
 .chart-card > div > p strong {
     font-size: 12px !important;
