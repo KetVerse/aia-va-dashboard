@@ -243,11 +243,15 @@ _GRID_HTML = r"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   :root{ --hdr:#1a3a6b; --tot:#dde8f4; --totb:#b0c8e8; --txt:#334155; --tottxt:#1a3a6b; }
   *{ box-sizing:border-box; }
-  html,body{ height:100%; margin:0; padding:0; font-family:'Inter',-apple-system,'Segoe UI',sans-serif; }
+  /* overflow:hidden on the iframe document kills any iframe-level scrollbar;
+     .wrap (below) is the ONLY scroll region. */
+  html,body{ height:100%; margin:0; padding:0; overflow:hidden;
+             font-family:'Inter',-apple-system,'Segoe UI',sans-serif; }
   body{ display:flex; flex-direction:column; }
-  /* .wrap is the ONLY scroll region: it flexes to fill the iframe so the iframe
-     itself never gets a second scrollbar and the sticky header stays pinned. */
-  .wrap{ width:100%; overflow:auto; flex:1 1 auto; min-height:0; }
+  /* flex:1 1 0 makes .wrap fill the iframe purely from available space (not its
+     content height), so it scrolls internally and the iframe itself never gets
+     a second scrollbar; the sticky header/total stay pinned. */
+  .wrap{ width:100%; overflow:auto; flex:1 1 0; min-height:0; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   table.fixed{ table-layout:fixed; }
   table.fixed thead th:first-child,
