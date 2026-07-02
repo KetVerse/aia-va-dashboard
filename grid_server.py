@@ -301,9 +301,15 @@ _GRID_HTML = r"""<!DOCTYPE html>
     text-align:center;
   }
   tfoot td.left{ text-align:left; }
+  #copybtn{ position:fixed; top:3px; right:14px; z-index:20; cursor:pointer;
+    font:600 11px 'Inter',sans-serif; color:#1a3a6b; background:#eef3f9;
+    border:1px solid #cbd5e1; border-radius:5px; padding:3px 9px; opacity:.8; }
+  #copybtn:hover{ opacity:1; background:#e2e8f0; }
+  #copybtn.copied{ background:#16a34a; color:#fff; border-color:#16a34a; opacity:1; }
   .empty{ padding:24px; color:#94a3b8; font-size:13px; text-align:center; }
 </style></head>
 <body>
+  <button id="copybtn" onclick="copyTable()" title="Copy table (header, all rows & total) — paste into Excel/Sheets">⧉ Copy</button>
   <div id="searchbar"><input id="search" placeholder="Search…" oninput="body()"></div>
   <div class="wrap"><table id="g">
     <thead id="h"></thead><tbody id="b"></tbody><tfoot id="f"></tfoot>
@@ -464,6 +470,34 @@ function streakHtml(s){
     if(dot){ clearTimeout(hideT); hideT=setTimeout(hide, 600); }
   });
 })();
+function copyTable(){
+  // Copy header + all shown rows + Total as TSV (reads the rendered cells, so it
+  // reflects the current sort/filter, skips hidden cols, and includes the streak
+  // as its ●/○ string and links as their text).
+  if(!DATA || !DATA.columns || !DATA.columns.length) return;
+  const hidden=DATA.hidden||[];
+  const cols=DATA.columns.filter((c,i)=>!hidden[i]);
+  const lines=[cols.join("\t")];
+  document.querySelectorAll("#b tr").forEach(tr=>{
+    lines.push(Array.from(tr.children).map(td=>(td.textContent||"").trim()).join("\t"));
+  });
+  const ft=document.querySelector("#f tr");
+  if(ft) lines.push(Array.from(ft.children).map(td=>(td.textContent||"").trim()).join("\t"));
+  const tsv=lines.join("\n");
+  const done=()=>{ const b=document.getElementById("copybtn");
+    if(b){ b.classList.add("copied"); b.textContent="✓ Copied";
+      setTimeout(()=>{ b.classList.remove("copied"); b.textContent="⧉ Copy"; },1200); } };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(tsv).then(done).catch(()=>fallbackCopy(tsv,done));
+  } else { fallbackCopy(tsv,done); }
+}
+function fallbackCopy(text,done){
+  const ta=document.createElement("textarea"); ta.value=text;
+  ta.style.position="fixed"; ta.style.left="-9999px"; document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  try{ document.execCommand("copy"); }catch(e){}
+  ta.remove(); if(done) done();
+}
 function body(){
   const b=document.getElementById("b"), num=DATA.numeric;
   const bars=DATA.bars||[], strk=DATA.streak||[];
@@ -550,8 +584,9 @@ function foot(){
 }
 function render(){
   const tbl=document.getElementById("g"), em=document.getElementById("empty");
-  if(!DATA || !DATA.columns.length){ tbl.style.display="none"; em.style.display="block"; return; }
-  tbl.style.display=""; em.style.display="none";
+  const cb=document.getElementById("copybtn");
+  if(!DATA || !DATA.columns.length){ tbl.style.display="none"; em.style.display="block"; if(cb) cb.style.display="none"; return; }
+  tbl.style.display=""; em.style.display="none"; if(cb) cb.style.display="";
   tbl.className = DATA.fixed ? "fixed" : "";
   if(DATA.firstW) tbl.style.setProperty("--firstw", DATA.firstW+"px");
   else tbl.style.removeProperty("--firstw");
