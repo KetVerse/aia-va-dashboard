@@ -129,7 +129,44 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Customer Usage Cohort (Last 12 Weeks)**
+**Customer Activity Cohort**
+
+<|layout|columns=1 1 1 1|gap=12px|
+<|part|
+<div class="msc" data-key="cs_activity_event"><div class="msc-cap">Event Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_activity_event_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_event|>
+|>
+<|part|
+<div class="msc wide" data-key="cs_activity_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_activity_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_deal|>
+|>
+<|part|
+<div class="msc" data-key="cs_activity_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_activity_stage_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_stage|>
+|>
+<|part|
+<div class="msc" data-key="cs_activity_csm"><div class="msc-cap">CSM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_activity_csm_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_csm|>
+|>
+|>
+
+<|part|class_name=gridholder gridholder-cs_activity_count|
+<|{cs_activity_count_json}|text|mode=raw|>
+|>
+<iframe src="/grid/cs_activity_count" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**Customer Activity Cohort %**
+
+<|part|class_name=gridholder gridholder-cs_activity_pct|
+<|{cs_activity_pct_json}|text|mode=raw|>
+|>
+<iframe src="/grid/cs_activity_pct" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**Customer Usage Cohort (Accounting Sync & Uploads only)**
 
 <|part|class_name=gridholder gridholder-cs_cohort_count|
 <|{cs_cohort_count_json}|text|mode=raw|>

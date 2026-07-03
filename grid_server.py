@@ -421,7 +421,7 @@ function dateLabel(offset){
   return d.getDate()+" "+_MON[d.getMonth()]+" "+d.getFullYear();
 }
 function streakHtml(s){
-  // s = 28 ';'-joined tokens "on,bill,syncs,items", index 0 = today .. 27 = today-27d.
+  // s = 28 ';'-joined tokens "on,bill,syncs,items,views", index 0 = today .. 27 = today-27d.
   // A custom DOM tooltip (see the streaktip IIFE) reads the data-* attributes —
   // we don't use the native title= so the tooltip survives PrintScreen / Win+Shift+S.
   const days=(s||"").split(";");
@@ -431,14 +431,15 @@ function streakHtml(s){
     const on=p[0]==="1";
     copytxt += on ? "●" : "○";   // filled / hollow circle for copy-paste
     h+='<span class="dot '+(on?"on":"off")+'" data-i="'+i+'" data-on="'+(on?1:0)
-      +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)+'"></span>';
+      +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)
+      +'" data-views="'+(p[4]||0)+'"></span>';
   }
   // hidden but copyable string of the streak (dots are CSS-only and don't copy)
   return h+'<span class="streak-copy">'+copytxt+'</span></span>';
 }
 // ── Per-day custom tooltip for the streak dots ──────────────────────────────
 // A DOM tooltip (not native title=) so it survives PrintScreen / Win+Shift+S.
-// Active day -> Date + Bill Uploads + Accounting Syncs + Items Synced.
+// Active day -> Date + Bill Uploads + Accounting Syncs + Items Synced + Dashboard Viewed.
 // Inactive day -> Date only. Stays ~0.6s after the mouse leaves a dot.
 (function(){
   var tip=null, hideT=null;
@@ -451,7 +452,8 @@ function streakHtml(s){
     if(dot.getAttribute("data-on")==="1"){
       html+="<br>Uploads: "+dot.getAttribute("data-up")
            +"<br>Accounting Syncs: "+dot.getAttribute("data-syncs")
-           +"<br>Items Synced: "+dot.getAttribute("data-items");
+           +"<br>Items Synced: "+dot.getAttribute("data-items")
+           +"<br>Dashboard Viewed: "+dot.getAttribute("data-views");
     }
     t.innerHTML=html;
     t.style.display="block";

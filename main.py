@@ -447,17 +447,21 @@ def _make_trend(labels, dc, qual):
 def _usage_28(email):
     """Usage in the last 28 days for a customer's account. Returns
     (active_days_count, streak). `streak` encodes 28 days as ';'-joined tokens
-    "on,uploads,syncs,items" (index 0 = today .. 27 = today-27d): on=1 when there was
-    any upload OR sync that day; uploads = sum of total_uploads (all upload types,
-    NOT syncs); syncs = number of sync events; items = sum of items_count for that
-    day. The grid renders dots + a per-day tooltip from this."""
+    "on,uploads,syncs,items,views" (index 0 = today .. 27 = today-27d): on=1 when
+    there was any upload OR sync that day; uploads = sum of total_uploads (all
+    upload types, NOT syncs); syncs = number of sync events; items = sum of
+    items_count for that day; views = count of "Dashboard Viewed" events that day
+    (from the new aia_session_events tracking — display-only, does NOT affect
+    `on`/`active`, matching Customer Activity Cohort's account-id bridge but
+    otherwise independent of Upload/Sync). The grid renders dots + a per-day
+    tooltip from this."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
-    blank = ";".join(["0,0,0,0"] * 28)
+    blank = ";".join(["0,0,0,0,0"] * 28)
     if ac is None:
         return 0, blank
     start = today - pd.Timedelta(days=27)
-    active = set(); uploads = {}; syncs = {}; items = {}
+    active = set(); uploads = {}; syncs = {}; items = {}; views = {}
     if "date" in _UPL.columns:
         u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)].copy()
         if len(u) and "total_uploads" in u.columns:
@@ -472,11 +476,18 @@ def _usage_28(email):
                 active |= set(sy[sy["items_count"].fillna(0) > 0]["_d"])
                 items = sy.groupby("_d")["items_count"].sum().to_dict()
             syncs = sy.groupby("_d").size().to_dict()
+    if len(_DVIEW_EVENTS):
+        dv = _DVIEW_EVENTS[(_DVIEW_EVENTS["account_id"] == ac)
+                           & (_DVIEW_EVENTS["event_time"] >= start)
+                           & (_DVIEW_EVENTS["event_time"] < today + pd.Timedelta(days=1))]
+        if len(dv):
+            views = dv.groupby(dv["event_time"].dt.normalize()).size().to_dict()
     toks = []
     for i in range(28):
         d = today - pd.Timedelta(days=i)
-        toks.append("%d,%d,%d,%d" % (1 if d in active else 0, int(uploads.get(d, 0) or 0),
-                                     int(syncs.get(d, 0) or 0), int(items.get(d, 0) or 0)))
+        toks.append("%d,%d,%d,%d,%d" % (1 if d in active else 0, int(uploads.get(d, 0) or 0),
+                                        int(syncs.get(d, 0) or 0), int(items.get(d, 0) or 0),
+                                        int(views.get(d, 0) or 0)))
     return len(active), ";".join(toks)
 
 
@@ -539,15 +550,60 @@ def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=Non
     return pd.DataFrame(rows)
 
 
-def _usage_cohort():
+def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_filter=None):
     """Customer Usage Cohort (last 12 integration weeks). Rows = integration-week
     Monday; columns = Integrated (cohort size) + W0..W9 (active accounts that had
     any upload/sync activity in that week-offset window). Returns (counts_df,
-    pct_df), each with a pinned Total row. Replicates the DAX cohort measures."""
+    pct_df), each with a pinned Total row. Replicates the DAX cohort measures.
+
+    event_filter (Customer Activity Cohort mode — used by the new event-driven
+    charts; leave as None for the original Usage Cohort behavior above).
+    "Upload" and "Accounting Sync" are always sourced from the old, unbounded
+    _UPL/_SYN tables (reliable multi-month history) rather than the 90-day-bounded
+    new event tables — those two event names are effectively aliases for the
+    original Usage Cohort signal. Every other event name comes from the new
+    aia_*_events tables, which is genuinely new signal with no older equivalent.
+        None       -> legacy path, membership checked against _ACTIVE_WEEKS
+                      (Upload+Sync summary tables). Unchanged behavior.
+        []          -> "All Events": _ACTIVE_WEEKS (old Upload+Sync, unbounded)
+                      UNION the 12 other tracked events from the new tables
+                      (90-day bounded) — a strict superset of the old Usage
+                      Cohort, since nothing tracked there is dropped.
+        [names...] -> "Upload"/"Accounting Sync" resolve to _ACTIVE_WEEKS_UPL /
+                      _ACTIVE_WEEKS_SYN; any other names resolve to
+                      _ACTIVE_WEEKS_EV filtered to those names. Unioned together.
+
+    deal_filter / stage_filter / csm_filter: optional lists restricting the
+    cohort base by Deal Name / Deal Stage / CSM (cs_owner) before computing
+    W0..W11 — used by the Customer Activity Cohort's filter row. None/[] means
+    no restriction (matches every prior call site, including the legacy one
+    above)."""
+    _OLD_SOURCED = {"Upload": _ACTIVE_WEEKS_UPL, "Accounting Sync": _ACTIVE_WEEKS_SYN}
+    if event_filter is None:
+        weeks_set = _ACTIVE_WEEKS
+    elif event_filter:
+        _evs = set(event_filter)
+        weeks_set = set()
+        for _name, _old_set in _OLD_SOURCED.items():
+            if _name in _evs:
+                weeks_set |= _old_set
+        _new_evs = _evs - set(_OLD_SOURCED)
+        if _new_evs:
+            weeks_set |= {(a, w) for (a, w, ev) in _ACTIVE_WEEKS_EV if ev in _new_evs}
+    else:
+        weeks_set = _ACTIVE_WEEKS | {(a, w) for (a, w, ev) in _ACTIVE_WEEKS_EV
+                                     if ev not in _OLD_SOURCED}
+
     base = _AIA[(_AIA["integration_done_date"].notna())
                 & (_AIA["login_email_id"].notna())
                 & (_AIA["login_email_id"].astype(str).str.strip() != "")
                 & (_AIA["module_type"] == "AIA Paid")].copy()
+    if deal_filter:
+        base = base[base["deal_name"].isin(deal_filter)]
+    if stage_filter:
+        base = base[base["deal_stage"].isin(stage_filter)]
+    if csm_filter:
+        base = base[base["cs_owner"].isin(csm_filter)]
     if len(base) == 0:
         return pd.DataFrame(), pd.DataFrame()
     iw = base["integration_done_date"].dt.normalize()
@@ -581,7 +637,7 @@ def _usage_cohort():
             if cws > today:
                 crow[col] = ""; prow[col] = ""
                 continue
-            active = sum(1 for a in accts if (a, cws) in _ACTIVE_WEEKS)
+            active = sum(1 for a in accts if (a, cws) in weeks_set)
             crow[col] = active
             pct = round(active / size * 100) if size else 0
             prow[col] = (f"{pct}%" if pct else "")   # blank when 0%
@@ -704,21 +760,27 @@ SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
 # DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════
 
-def _q(url, sql, _tries=5):
+def _q(url, sql, _tries=5, statement_timeout_ms=None):
     """Run a query, return a DataFrame. The container's NAT path to Neon is slow
     and occasionally drops a transfer ("SSL connection closed unexpectedly"), so:
     enable TCP keepalives (keeps the NAT conntrack entry alive during long pulls),
     retry a few times on transient drops, and ALWAYS close the connection
     (psycopg2's `with` only ends the transaction — it never closes the socket,
-    which otherwise leaks a connection per query)."""
+    which otherwise leaks a connection per query).
+    statement_timeout_ms: optional per-query server-side timeout (unset by
+    default — no behavior change for existing callers). Used for the new
+    activity-event queries so a missing index / unexpectedly large scan fails
+    fast instead of loading the DB, given this Supabase project's prior
+    Disk IO Budget incident."""
     last = None
     for i in range(_tries):
         conn = None
         try:
-            conn = psycopg2.connect(
-                url, connect_timeout=20,
-                keepalives=1, keepalives_idle=15,
-                keepalives_interval=5, keepalives_count=8)
+            kwargs = dict(connect_timeout=20, keepalives=1, keepalives_idle=15,
+                          keepalives_interval=5, keepalives_count=8)
+            if statement_timeout_ms:
+                kwargs["options"] = f"-c statement_timeout={int(statement_timeout_ms)}"
+            conn = psycopg2.connect(url, **kwargs)
             return pd.read_sql_query(sql, conn)
         except Exception as ex:
             last = ex
@@ -732,6 +794,50 @@ def _q(url, sql, _tries=5):
                     pass
     raise last
 
+# ── Customer Activity Cohort — 5 event tables (Supabase project qmaphtslnvvifkzmbrvh) ──
+# Each entry: table name -> columns to select. Column lists are deliberately
+# minimal and MUST match the covering index's INCLUDE list exactly (event_time,
+# account_id, event_name[, items_count]) so Postgres can answer via an
+# index-only scan — no `email`, no `raw` jsonb, no SELECT *. This project had a
+# Disk IO Budget outage from an unbounded/malformed query; every query here is
+# bounded to a rolling 90-day window (event_time >= now() - interval '90 days')
+# and account_id IS NOT NULL. See OPS notes for the required indexes:
+#   CREATE INDEX idx_session_events_cohort         ON aia_session_events        (event_time) INCLUDE (account_id, event_name);
+#   CREATE INDEX idx_upload_events_cohort          ON aia_upload_events         (event_time) INCLUDE (account_id, event_name);
+#   CREATE INDEX idx_sync_events_cohort            ON aia_sync_events           (event_time) INCLUDE (account_id, event_name, items_count);
+#   CREATE INDEX idx_transaction_events_cohort     ON aia_transaction_events    (event_time) INCLUDE (account_id, event_name, items_count);
+#   CREATE INDEX idx_vendor_invoice_events_cohort  ON aia_vendor_invoice_events (event_time) INCLUDE (account_id, event_name);
+_EVENT_TABLES = {
+    "session":        ("aia_session_events",        ["account_id", "event_name", "event_time"]),
+    "upload":         ("aia_upload_events",          ["account_id", "event_name", "event_time"]),
+    "sync":           ("aia_sync_events",            ["account_id", "event_name", "event_time", "items_count"]),
+    "transaction":    ("aia_transaction_events",     ["account_id", "event_name", "event_time", "items_count"]),
+    "vendor_invoice": ("aia_vendor_invoice_events",  ["account_id", "event_name", "event_time"]),
+}
+
+def _load_activity_events():
+    """Bounded 90-day pulls from the 5 Customer Activity Cohort event tables.
+    Each table is queried and error-handled INDEPENDENTLY (own try/except) so a
+    problem with any one of them (e.g. a missing items_count column) can't blank
+    out the rest of the dashboard — these are additive, not on the critical load
+    path that _load_all()'s outer try/except guards. statement_timeout_ms bails
+    fast if a query runs long (e.g. an index is missing)."""
+    out = {}
+    for key, (table, cols) in _EVENT_TABLES.items():
+        try:
+            collist = ", ".join(cols)
+            out[key] = _q(SUPABASE_URL,
+                f"SELECT {collist} FROM public.{table} "
+                f"WHERE event_time >= now() - interval '90 days' AND account_id IS NOT NULL",
+                statement_timeout_ms=10000)
+        except Exception as ex:
+            print(f"[WARN] activity event table {table} failed: {ex} -- using empty frame")
+            out[key] = pd.DataFrame(columns=cols)
+    return out
+
+def _empty_activity_events():
+    return {key: pd.DataFrame(columns=cols) for key, (_t, cols) in _EVENT_TABLES.items()}
+
 def _load_all():
     try:
         aia = _q(NEON_URL, "SELECT * FROM public.aia_live WHERE is_deleted IS NULL")
@@ -741,8 +847,10 @@ def _load_all():
         mkt = _q(SUPABASE_URL, "SELECT * FROM public.marketing_spends ORDER BY day ASC")
         upl = _q(SUPABASE_URL, "SELECT * FROM public.user_daily_upload_summary ORDER BY date ASC")
         syn = _q(SUPABASE_URL, "SELECT * FROM public.accounting_sync_mixpanel")
-        print(f"[OK] AIA:{len(aia)} VA:{len(va)} LI:{len(li)} INC:{len(inc)} MKT:{len(mkt)} UPL:{len(upl)} SYN:{len(syn)}")
-        return aia, va, li, inc, mkt, upl, syn
+        act = _load_activity_events()
+        print(f"[OK] AIA:{len(aia)} VA:{len(va)} LI:{len(li)} INC:{len(inc)} MKT:{len(mkt)} UPL:{len(upl)} SYN:{len(syn)} "
+              f"ACT:{sum(len(d) for d in act.values())}")
+        return aia, va, li, inc, mkt, upl, syn, act
     except Exception as ex:
         print(f"[WARN] DB error: {ex} -- using empty frames")
         cols_aia = ["record_id","deal_name","deal_stage","deal_owner","deal_source","create_date",
@@ -767,10 +875,10 @@ def _load_all():
         return (pd.DataFrame(columns=cols_aia), pd.DataFrame(columns=cols_va),
                 pd.DataFrame(columns=cols_li),  pd.DataFrame(columns=cols_inc),
                 pd.DataFrame(columns=cols_mkt), pd.DataFrame(columns=cols_upl),
-                pd.DataFrame(columns=cols_syn))
+                pd.DataFrame(columns=cols_syn), _empty_activity_events())
 
 print("Loading data...")
-_RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN = _load_all()
+_RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
 
 # Timestamp of the last successful data load, shown in each page header (IST).
 _LAST_SYNC = datetime.now(_IST)
@@ -912,6 +1020,33 @@ if "event_date" in _SYN.columns:
     _SYN["event_date"] = pd.to_datetime(_SYN["event_date"], errors="coerce")
     _SYN = _nums(_SYN, ["items_count"])
 
+def _prep_activity_events(act_dict):
+    """Combine the 5 event-table pulls (each already column-limited to match its
+    covering index — no `email`, pulling it would force a heap fetch and defeat
+    the index-only scan) into one long frame: [account_id, event_name,
+    event_time, items_count]. event_time normalised to tz-naive (UTC)."""
+    frames = []
+    for df in act_dict.values():
+        if df is None or len(df) == 0:
+            continue
+        d = df.copy()
+        if not {"account_id", "event_name", "event_time"}.issubset(d.columns):
+            continue
+        d["event_time"] = pd.to_datetime(d["event_time"], errors="coerce", utc=True).dt.tz_convert(None)
+        if "items_count" not in d.columns:
+            d["items_count"] = np.nan
+        frames.append(d[["account_id", "event_name", "event_time", "items_count"]])
+    if not frames:
+        return pd.DataFrame(columns=["account_id", "event_name", "event_time", "items_count"])
+    out = pd.concat(frames, ignore_index=True)
+    out["items_count"] = pd.to_numeric(out["items_count"], errors="coerce")
+    return out
+
+_ACT_EVENTS = _prep_activity_events(_RAW_ACT)
+# Pre-filtered once so _usage_28 (called once per paid customer) doesn't re-scan
+# every event_name on every call — only account_id/date filtering happens per call.
+_DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
+
 def _clean_email(v):
     """Normalise an email for lookup: lower-case, trim, and strip any Unicode
     'other/control' characters (e.g. a stray U+2060 word-joiner that some CRM
@@ -926,10 +1061,13 @@ def _clean_email(v):
 # upload OR sync activity. Used to build the Customer Usage Cohort table fast.
 def _build_activity_lookups():
     email_acct = {}
-    active_weeks = set()
-    for src, dcol in [(_UPL, "date"), (_SYN, "event_date")]:
+
+    def _weekset(src, dcol):
+        """(account_id, week-Monday) pairs with activity in `src`, plus
+        email->account_id enrichment (first-wins) into the shared email_acct."""
+        s = set()
         if "account_id" not in src.columns or dcol not in src.columns:
-            continue
+            return s
         t = src[["account_id", dcol]].dropna(subset=["account_id", dcol]).copy()
         if "email" in src.columns:
             for em, ac in src[["email", "account_id"]].dropna().itertuples(index=False):
@@ -940,10 +1078,33 @@ def _build_activity_lookups():
         mon = d - pd.to_timedelta(d.dt.weekday, unit="D")
         for ac, mm in zip(t["account_id"], mon):
             if pd.notna(mm):
-                active_weeks.add((ac, mm))
-    return email_acct, active_weeks
+                s.add((ac, mm))
+        return s
 
-_EMAIL_ACCT, _ACTIVE_WEEKS = _build_activity_lookups()
+    # Kept separate (not just combined) so the Customer Activity Cohort can source
+    # "Upload" and "Accounting Sync" specifically from these unbounded, long-running
+    # tables instead of the 90-day-bounded new event tables — those two old tables
+    # already have reliable multi-month history; the new tables add signal only for
+    # event types that were never tracked before.
+    active_weeks_upl = _weekset(_UPL, "date")
+    active_weeks_syn = _weekset(_SYN, "event_date")
+    active_weeks = active_weeks_upl | active_weeks_syn   # legacy combined set (Customer Usage Cohort, unchanged)
+
+    # Event-aware weekly activity for the Customer Activity Cohort charts, built
+    # from the 5 aia_*_events tables (independent of the Upload/Sync summary
+    # tables above). Keeps event_name so the Event Name dropdown can filter.
+    active_weeks_ev = set()   # {(account_id, week_monday, event_name)}
+    if len(_ACT_EVENTS):
+        d = _ACT_EVENTS.dropna(subset=["account_id", "event_time", "event_name"])
+        dn = d["event_time"].dt.normalize()
+        mon = dn - pd.to_timedelta(dn.dt.weekday, unit="D")
+        for ac, mm, ev in zip(d["account_id"], mon, d["event_name"]):
+            if pd.notna(mm):
+                active_weeks_ev.add((ac, mm, ev))
+
+    return email_acct, active_weeks, active_weeks_upl, active_weeks_syn, active_weeks_ev
+
+_EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
 
 def _build_acct_dates():
     """account_id -> set of normalised dates that had any upload/sync row.
@@ -993,10 +1154,10 @@ def _reload_data():
     """Re-pull everything from the databases and rebuild the in-memory frames /
     lookups. Used by the scheduled auto-refresh so the dashboard shows fresh
     data without a restart."""
-    global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN
-    global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACCT_DATES, _BILLING_END, _LAST_SYNC
-    _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN = _load_all()
+    global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
+    global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC
+    _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -1015,7 +1176,9 @@ def _reload_data():
     if "event_date" in _SYN.columns:
         _SYN["event_date"] = pd.to_datetime(_SYN["event_date"], errors="coerce")
         _SYN = _nums(_SYN, ["items_count"])
-    _EMAIL_ACCT, _ACTIVE_WEEKS = _build_activity_lookups()
+    _ACT_EVENTS = _prep_activity_events(_RAW_ACT)
+    _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
+    _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
     _BILLING_END = _build_billing_end()
     _LAST_SYNC = datetime.now(_IST)
@@ -1791,11 +1954,18 @@ def _cs_refresh(state):
         _with_total(t3_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
         blank_zeros=True, bar_cols=["Red Flags Yesterday"], bar_color="#f1a0a0", autosize=True)
 
+    # Deal Name / Deal Stage / CSM filters — shared by both cohort tables below
+    # (the filter row lives on the Customer Activity Cohort card, but applies
+    # equally to Customer Usage Cohort since they cover the same population).
+    _act_deal  = _sel(state.cs_activity_deal)
+    _act_stage = _sel(state.cs_activity_stage)
+    _act_csm   = _sel(state.cs_activity_csm)
+    _coh_heat = {f"W{o}": "green" for o in range(12)}
+
     # Customer Usage Cohort (last 12 integration weeks) — counts + % tables.
     # Both use fixed column widths so they line up as a comparison; % values
     # (strings) are centre-aligned.
-    cnt_df, pct_df = _usage_cohort()
-    _coh_heat = {f"W{o}": "green" for o in range(12)}
+    cnt_df, pct_df = _usage_cohort(deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
     state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
                                   blank_zeros=True, no_sort=True, fixed=True,
                                   sortable=False, center_all=True, heat_cols=_coh_heat,
@@ -1805,6 +1975,22 @@ def _cs_refresh(state):
                                   no_sort=True, fixed=True, sortable=False, center_all=True,
                                   heat_cols=_coh_heat, autosize=True)
                                   if len(pct_df) else grid_payload_b64(pd.DataFrame()))
+
+    # Customer Activity Cohort — same shape as Customer Usage Cohort above, but
+    # sourced from the 5 aia_*_events tables (14 tracked event names) via the
+    # Event Name filter, instead of the Upload/Sync summary tables.
+    _act_ev = _sel(state.cs_activity_event)
+    act_cnt_df, act_pct_df = _usage_cohort(event_filter=_act_ev, deal_filter=_act_deal,
+                                           stage_filter=_act_stage, csm_filter=_act_csm)
+    state.cs_activity_count_json = (grid_payload_b64(act_cnt_df, total_id_col="Integration Week",
+                                    blank_zeros=True, no_sort=True, fixed=True,
+                                    sortable=False, center_all=True, heat_cols=_coh_heat,
+                                    autosize=True)
+                                    if len(act_cnt_df) else grid_payload_b64(pd.DataFrame()))
+    state.cs_activity_pct_json   = (grid_payload_b64(act_pct_df, total_id_col="Integration Week",
+                                    no_sort=True, fixed=True, sortable=False, center_all=True,
+                                    heat_cols=_coh_heat, autosize=True)
+                                    if len(act_pct_df) else grid_payload_b64(pd.DataFrame()))
 
     # Usage & Health table — every record with a non-blank payment_date (PBI rule:
     # no integration / module-type / email filter). Paid-but-not-yet-integrated and
@@ -2234,6 +2420,22 @@ cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
 cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]
 cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]; cs_usage_owner_list=[]
 cs_renewal_window_json=""
+# Customer Activity Cohort (14 tracked events across the 5 aia_*_events tables)
+cs_activity_event_list = [
+    "Login", "Dashboard Viewed", "Upload", "Delete", "Accounting Sync",
+    "Transaction Status", "Transaction Ledger Updated", "Transaction Type Updated",
+    "Entity Created", "Invoice Created", "Invoice Bulk Edited",
+    "Vendor Mismatch Resolved", "Recon Processed", "Mapping Completed",
+]
+cs_activity_event = []   # [] = All Events
+cs_activity_count_json = ""; cs_activity_pct_json = ""
+# Deal Name / Deal Stage / CSM filters, scoped to the cohort's own base population
+# (integrated AIA Paid records) so every option can actually match a row.
+_act_base_mask = (_AIA["integration_done_date"].notna()) & (_AIA["module_type"] == "AIA Paid")
+cs_activity_deal_list  = sorted(_AIA[_act_base_mask]["deal_name"].dropna().unique().tolist())
+cs_activity_stage_list = sorted(_AIA[_act_base_mask]["deal_stage"].dropna().unique().tolist())
+cs_activity_csm_list   = sorted(_AIA[_act_base_mask]["cs_owner"].dropna().unique().tolist())
+cs_activity_deal = []; cs_activity_stage = []; cs_activity_csm = []
 
 # Page 3
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)
@@ -2286,6 +2488,10 @@ cs_usage_deal_ms  = _ms_json([], [])
 cs_usage_csm_ms   = _ms_json([], [])
 cs_usage_stage_ms = _ms_json([], [])
 cs_usage_owner_ms = _ms_json([], [])
+cs_activity_event_ms = _ms_json(cs_activity_event_list, [])
+cs_activity_deal_ms  = _ms_json(cs_activity_deal_list,  [])
+cs_activity_stage_ms = _ms_json(cs_activity_stage_list, [])
+cs_activity_csm_ms   = _ms_json(cs_activity_csm_list,   [])
 vaf_deal_ms       = _ms_json(vaf_deal_list,      [])
 vaf_rectype_ms    = _ms_json(vaf_rectype_list,   [])
 vaf_line_item_ms  = _ms_json(vaf_line_item_list, [])
@@ -2377,6 +2583,10 @@ _MS_DISPATCH = {
     "cs_usage_csm":   ("cs_usage_csm",           "usage"),
     "cs_usage_stage": ("cs_usage_stage",         "usage"),
     "cs_usage_owner": ("cs_usage_owner",         "usage"),
+    "cs_activity_event": ("cs_activity_event",   "cs"),
+    "cs_activity_deal":  ("cs_activity_deal",    "cs"),
+    "cs_activity_stage": ("cs_activity_stage",   "cs"),
+    "cs_activity_csm":   ("cs_activity_csm",     "cs"),
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
     "vaf_rectype":    ("vaf_selected_rectype",   "vaf"),
@@ -2395,6 +2605,10 @@ def _sync_ms(state):
     state.va_campaign_ms    = _ms_json(va_campaign_list,  state.va_selected_campaign)
     state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
     state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
+    state.cs_activity_event_ms = _ms_json(cs_activity_event_list, state.cs_activity_event)
+    state.cs_activity_deal_ms  = _ms_json(cs_activity_deal_list,  state.cs_activity_deal)
+    state.cs_activity_stage_ms = _ms_json(cs_activity_stage_list, state.cs_activity_stage)
+    state.cs_activity_csm_ms   = _ms_json(cs_activity_csm_list,   state.cs_activity_csm)
 
     # CS Deal Name options depend on the selected CS Owner(s)
     _co = _sel(state.cs_selected_owner)
