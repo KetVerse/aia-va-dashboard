@@ -222,7 +222,15 @@ _MULTISELECT_SCRIPT = """
       e.stopPropagation();
       var open = msc.classList.contains("open");
       document.querySelectorAll(".msc.open").forEach(function(o){ if(o!==msc) o.classList.remove("open"); });
-      msc.classList.toggle("open", !open);
+      var willOpen = !open;
+      msc.classList.toggle("open", willOpen);
+      if(willOpen){
+        // focus the search box immediately so typing works without an extra
+        // click into it — deferred a tick so the panel is visible first
+        // (focusing a still-hidden element is a silent no-op in some browsers).
+        var s = msc.querySelector(".msc-search");
+        if(s) setTimeout(function(){ s.focus(); }, 0);
+      }
     });
     // clicks inside the panel (search box, option rows) must not close it
     var panel = msc.querySelector(".msc-panel");

@@ -439,22 +439,30 @@ function streakHtml(s){
 }
 // ── Per-day custom tooltip for the streak dots ──────────────────────────────
 // A DOM tooltip (not native title=) so it survives PrintScreen / Win+Shift+S.
-// Active day -> Date + Bill Uploads + Accounting Syncs + Items Synced + Dashboard Viewed.
-// Inactive day -> Date only. Stays ~0.6s after the mouse leaves a dot.
+// Active day -> Date + whichever of Uploads/Accounting Syncs/Items Synced is
+// nonzero (each line is dropped entirely when its count is 0, same rule as
+// Dashboard Viewed below).
+// Dashboard Viewed shows whenever count>0, on ACTIVE OR INACTIVE days — it never
+// affects the on/off (active) state of the bubble, but its count is real signal
+// even on days with no upload/sync, so it isn't gated behind "on" like the rest.
+// Inactive day with 0 views -> Date only. Stays ~0.6s after mouse leaves a dot.
 (function(){
   var tip=null, hideT=null;
   function el(){ if(!tip) tip=document.getElementById("streaktip"); return tip; }
+  function metricLine(label, val){
+    return (val && val!=="0") ? ("<br>"+label+": "+val) : "";
+  }
   function show(dot){
     var t=el(); if(!t) return;
     clearTimeout(hideT);
     var i=+dot.getAttribute("data-i");
     var html=dateLabel(i)+(i===0?" (today)":"");
     if(dot.getAttribute("data-on")==="1"){
-      html+="<br>Uploads: "+dot.getAttribute("data-up")
-           +"<br>Accounting Syncs: "+dot.getAttribute("data-syncs")
-           +"<br>Items Synced: "+dot.getAttribute("data-items")
-           +"<br>Dashboard Viewed: "+dot.getAttribute("data-views");
+      html+=metricLine("Uploads", dot.getAttribute("data-up"))
+           +metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))
+           +metricLine("Items Synced", dot.getAttribute("data-items"));
     }
+    html+=metricLine("Dashboard Viewed", dot.getAttribute("data-views"));
     t.innerHTML=html;
     t.style.display="block";
     var r=dot.getBoundingClientRect(), tr=t.getBoundingClientRect();
