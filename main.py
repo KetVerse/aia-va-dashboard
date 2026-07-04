@@ -1739,6 +1739,47 @@ def _apply_usage_filter(state):
         heat_cols={"Usage Active Days (28d)": "green"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
+def _build_cohort_tables(state):
+    """Rebuild ONLY the four cohort tables — Customer Usage Cohort and Customer
+    Activity Cohort (counts + %). They share the Event Name / Deal Name / Deal
+    Stage / CSM filter row and are independent of the rest of the CS Finance
+    page, so filter changes route here instead of the full (slow) _cs_refresh."""
+    _act_deal  = _sel(state.cs_activity_deal)
+    _act_stage = _sel(state.cs_activity_stage)
+    _act_csm   = _sel(state.cs_activity_csm)
+    _coh_heat = {f"W{o}": "green" for o in range(12)}
+
+    # Customer Usage Cohort (last 12 integration weeks) — counts + % tables.
+    # Both use fixed column widths so they line up as a comparison; % values
+    # (strings) are centre-aligned.
+    cnt_df, pct_df = _usage_cohort(deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
+    state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
+                                  blank_zeros=True, no_sort=True, fixed=True,
+                                  sortable=False, center_all=True, heat_cols=_coh_heat,
+                                  autosize=True)   # expand iframe to fit all rows, no scroll
+                                  if len(cnt_df) else grid_payload_b64(pd.DataFrame()))
+    state.cs_cohort_pct_json   = (grid_payload_b64(pct_df, total_id_col="Integration Week",
+                                  no_sort=True, fixed=True, sortable=False, center_all=True,
+                                  heat_cols=_coh_heat, autosize=True)
+                                  if len(pct_df) else grid_payload_b64(pd.DataFrame()))
+
+    # Customer Activity Cohort — same shape as Customer Usage Cohort above, but
+    # sourced from the 5 aia_*_events tables (14 tracked event names) via the
+    # Event Name filter, instead of the Upload/Sync summary tables.
+    _act_ev = _sel(state.cs_activity_event)
+    act_cnt_df, act_pct_df = _usage_cohort(event_filter=_act_ev, deal_filter=_act_deal,
+                                           stage_filter=_act_stage, csm_filter=_act_csm)
+    state.cs_activity_count_json = (grid_payload_b64(act_cnt_df, total_id_col="Integration Week",
+                                    blank_zeros=True, no_sort=True, fixed=True,
+                                    sortable=False, center_all=True, heat_cols=_coh_heat,
+                                    autosize=True)
+                                    if len(act_cnt_df) else grid_payload_b64(pd.DataFrame()))
+    state.cs_activity_pct_json   = (grid_payload_b64(act_pct_df, total_id_col="Integration Week",
+                                    no_sort=True, fixed=True, sortable=False, center_all=True,
+                                    heat_cols=_coh_heat, autosize=True)
+                                    if len(act_pct_df) else grid_payload_b64(pd.DataFrame()))
+
+
 def _cs_refresh(state):
     s = pd.Timestamp(state.cs_start_date)
     e = pd.Timestamp(state.cs_end_date)
@@ -1962,43 +2003,9 @@ def _cs_refresh(state):
         _with_total(t3_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
         blank_zeros=True, bar_cols=["Red Flags Yesterday"], bar_color="#f1a0a0", autosize=True)
 
-    # Deal Name / Deal Stage / CSM filters — shared by both cohort tables below
-    # (the filter row lives on the Customer Activity Cohort card, but applies
-    # equally to Customer Usage Cohort since they cover the same population).
-    _act_deal  = _sel(state.cs_activity_deal)
-    _act_stage = _sel(state.cs_activity_stage)
-    _act_csm   = _sel(state.cs_activity_csm)
-    _coh_heat = {f"W{o}": "green" for o in range(12)}
-
-    # Customer Usage Cohort (last 12 integration weeks) — counts + % tables.
-    # Both use fixed column widths so they line up as a comparison; % values
-    # (strings) are centre-aligned.
-    cnt_df, pct_df = _usage_cohort(deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
-    state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
-                                  blank_zeros=True, no_sort=True, fixed=True,
-                                  sortable=False, center_all=True, heat_cols=_coh_heat,
-                                  autosize=True)   # expand iframe to fit all rows, no scroll
-                                  if len(cnt_df) else grid_payload_b64(pd.DataFrame()))
-    state.cs_cohort_pct_json   = (grid_payload_b64(pct_df, total_id_col="Integration Week",
-                                  no_sort=True, fixed=True, sortable=False, center_all=True,
-                                  heat_cols=_coh_heat, autosize=True)
-                                  if len(pct_df) else grid_payload_b64(pd.DataFrame()))
-
-    # Customer Activity Cohort — same shape as Customer Usage Cohort above, but
-    # sourced from the 5 aia_*_events tables (14 tracked event names) via the
-    # Event Name filter, instead of the Upload/Sync summary tables.
-    _act_ev = _sel(state.cs_activity_event)
-    act_cnt_df, act_pct_df = _usage_cohort(event_filter=_act_ev, deal_filter=_act_deal,
-                                           stage_filter=_act_stage, csm_filter=_act_csm)
-    state.cs_activity_count_json = (grid_payload_b64(act_cnt_df, total_id_col="Integration Week",
-                                    blank_zeros=True, no_sort=True, fixed=True,
-                                    sortable=False, center_all=True, heat_cols=_coh_heat,
-                                    autosize=True)
-                                    if len(act_cnt_df) else grid_payload_b64(pd.DataFrame()))
-    state.cs_activity_pct_json   = (grid_payload_b64(act_pct_df, total_id_col="Integration Week",
-                                    no_sort=True, fixed=True, sortable=False, center_all=True,
-                                    heat_cols=_coh_heat, autosize=True)
-                                    if len(act_pct_df) else grid_payload_b64(pd.DataFrame()))
+    # Cohort tables (Usage + Activity) share the Event/Deal/Stage/CSM filter row
+    # and are independent of the rest of this page — build them on their own.
+    _build_cohort_tables(state)
 
     # Usage & Health table — every record with a non-blank payment_date (PBI rule:
     # no integration / module-type / email filter). Paid-but-not-yet-integrated and
@@ -2591,10 +2598,10 @@ _MS_DISPATCH = {
     "cs_usage_csm":   ("cs_usage_csm",           "usage"),
     "cs_usage_stage": ("cs_usage_stage",         "usage"),
     "cs_usage_owner": ("cs_usage_owner",         "usage"),
-    "cs_activity_event": ("cs_activity_event",   "cs"),
-    "cs_activity_deal":  ("cs_activity_deal",    "cs"),
-    "cs_activity_stage": ("cs_activity_stage",   "cs"),
-    "cs_activity_csm":   ("cs_activity_csm",     "cs"),
+    "cs_activity_event": ("cs_activity_event",   "activity"),
+    "cs_activity_deal":  ("cs_activity_deal",    "activity"),
+    "cs_activity_stage": ("cs_activity_stage",   "activity"),
+    "cs_activity_csm":   ("cs_activity_csm",     "activity"),
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
     "vaf_rectype":    ("vaf_selected_rectype",   "vaf"),
@@ -2613,10 +2620,24 @@ def _sync_ms(state):
     state.va_campaign_ms    = _ms_json(va_campaign_list,  state.va_selected_campaign)
     state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
     state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
+    # Customer Activity Cohort: Deal Name / Deal Stage / CSM cross-filter each
+    # other (Event Name is independent of deals, so it keeps the full list).
+    _ab = _AIA[_act_base_mask]
+    def _alov(target):
+        d = _ab
+        for col, sv in (("deal_name", state.cs_activity_deal),
+                        ("deal_stage", state.cs_activity_stage),
+                        ("cs_owner", state.cs_activity_csm)):
+            if col == target:
+                continue
+            s = _sel(sv)
+            if s:
+                d = d[d[col].isin(s)]
+        return sorted(d[target].dropna().unique().tolist())
     state.cs_activity_event_ms = _ms_json(cs_activity_event_list, state.cs_activity_event)
-    state.cs_activity_deal_ms  = _ms_json(cs_activity_deal_list,  state.cs_activity_deal)
-    state.cs_activity_stage_ms = _ms_json(cs_activity_stage_list, state.cs_activity_stage)
-    state.cs_activity_csm_ms   = _ms_json(cs_activity_csm_list,   state.cs_activity_csm)
+    state.cs_activity_deal_ms  = _ms_json(_alov("deal_name"),  state.cs_activity_deal)
+    state.cs_activity_stage_ms = _ms_json(_alov("deal_stage"), state.cs_activity_stage)
+    state.cs_activity_csm_ms   = _ms_json(_alov("cs_owner"),   state.cs_activity_csm)
 
     # CS Deal Name options depend on the selected CS Owner(s)
     _co = _sel(state.cs_selected_owner)
@@ -2679,6 +2700,7 @@ def on_ms_change(state):
     elif scope == "va":    on_va_filter_change(state)
     elif scope == "cs":    _cs_refresh(state)
     elif scope == "usage": _apply_usage_filter(state)
+    elif scope == "activity": _build_cohort_tables(state)
     elif scope == "vaf":   _vaf_refresh(state)
     _sync_ms(state)
 
