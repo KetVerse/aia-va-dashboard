@@ -6,10 +6,11 @@
 # One-time setup on the VPS:
 #   cd /opt/taipy-dashboard
 #   git pull && docker compose up -d --build           # ship snapshot mode to the live app
-#   docker build -f Dockerfile.snapshot -t dashboard-snapshot .
 #   mkdir -p snapshots
 #   # Google Drive (reuses the report.py setup): place service-account JSON at
 #   #   /opt/taipy-dashboard/gdrive-key.json  and add to .env:  GDRIVE_FOLDER_ID=<folder id>
+# The dashboard-snapshot renderer image is (re)built automatically below if it's
+# ever missing (e.g. after a docker prune) — no manual `docker build` step needed.
 set -euo pipefail
 cd /opt/taipy-dashboard
 
@@ -29,6 +30,15 @@ OUT="/out/dashboard_${TS}_IST.pdf"
 
 # GDRIVE_FOLDER_ID from .env (blank → script just skips the upload, PDF still saved)
 GDRIVE_FOLDER_ID="$(grep -E '^GDRIVE_FOLDER_ID=' .env 2>/dev/null | cut -d= -f2- || true)"
+
+# Self-healing: the renderer image isn't in any registry (built locally only), so
+# a docker prune / VPS restart can silently delete it — without this check, `docker
+# run` below would then try to PULL "dashboard-snapshot" from Docker Hub and fail
+# with "pull access denied ... repository does not exist".
+if ! docker image inspect dashboard-snapshot >/dev/null 2>&1; then
+  echo "[run_snapshot] dashboard-snapshot image missing, rebuilding..."
+  docker build -f Dockerfile.snapshot -t dashboard-snapshot .
+fi
 
 KEY_MOUNT=()
 if [ -f /opt/taipy-dashboard/gdrive-key.json ]; then
