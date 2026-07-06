@@ -846,6 +846,33 @@ def _load_activity_events():
 def _empty_activity_events():
     return {key: pd.DataFrame(columns=cols) for key, (_t, cols) in _EVENT_TABLES.items()}
 
+
+def _load_event_email_map():
+    """email -> account_id harvested from the event tables (which carry BOTH an
+    email and an account_id). Fills the gap for accounts that only ever logged in
+    / viewed the dashboard and never uploaded or synced: those never got an
+    email->account link from _UPL/_SYN, so their Login / Dashboard-Viewed activity
+    could not be attributed in the Customer Activity Cohort. A cheap DISTINCT pull
+    (90-day bounded) keeps startup fast; failures per-table are non-fatal."""
+    m = {}
+    for _key, (table, _cols) in _EVENT_TABLES.items():
+        try:
+            df = _q(SUPABASE_URL,
+                f"SELECT DISTINCT account_id, email FROM public.{table} "
+                f"WHERE event_time >= now() - interval '90 days' "
+                f"AND account_id IS NOT NULL AND email IS NOT NULL",
+                statement_timeout_ms=10000)
+        except Exception as ex:
+            print(f"[WARN] event email map {table} failed: {ex}")
+            continue
+        if df is None or not len(df) or not {"account_id", "email"}.issubset(df.columns):
+            continue
+        for ac, em in df[["account_id", "email"]].itertuples(index=False):
+            em = _clean_email(em)
+            if em and em not in m:      # first-wins
+                m[em] = ac
+    return m
+
 def _load_all():
     try:
         aia = _q(NEON_URL, "SELECT * FROM public.aia_live WHERE is_deleted IS NULL")
@@ -1098,6 +1125,16 @@ def _build_activity_lookups():
     active_weeks_syn = _weekset(_SYN, "event_date")
     active_weeks = active_weeks_upl | active_weeks_syn   # legacy combined set (Customer Usage Cohort, unchanged)
 
+    # Gap-fill the email->account map for accounts that only ever logged in /
+    # viewed the dashboard (no _UPL/_SYN row above), so their event activity is
+    # attributable in the Customer Activity Cohort. First-wins keeps the
+    # authoritative _UPL/_SYN mapping wherever both exist. This does NOT change
+    # the legacy Usage Cohort: its membership still requires an (acct, week) in
+    # active_weeks (upload/sync only), which these accounts don't have.
+    for em, ac in _EVENT_EMAIL_MAP.items():
+        if em not in email_acct:
+            email_acct[em] = ac
+
     # Event-aware weekly activity for the Customer Activity Cohort charts, built
     # from the 5 aia_*_events tables (independent of the Upload/Sync summary
     # tables above). Keeps event_name so the Event Name dropdown can filter.
@@ -1112,6 +1149,9 @@ def _build_activity_lookups():
 
     return email_acct, active_weeks, active_weeks_upl, active_weeks_syn, active_weeks_ev
 
+# email -> account_id link from the event tables, so login-only accounts (no
+# _UPL/_SYN history) are still attributable in the Customer Activity Cohort.
+_EVENT_EMAIL_MAP = _load_event_email_map()
 _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
 
 def _build_acct_dates():
@@ -1164,7 +1204,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _EVENT_EMAIL_MAP
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
@@ -1186,6 +1226,7 @@ def _reload_data():
         _SYN = _nums(_SYN, ["items_count"])
     _ACT_EVENTS = _prep_activity_events(_RAW_ACT)
     _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
+    _EVENT_EMAIL_MAP = _load_event_email_map()
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
     _BILLING_END = _build_billing_end()
