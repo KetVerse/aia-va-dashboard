@@ -157,30 +157,12 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Customer Activity Cohort %**
-
-<|part|class_name=gridholder gridholder-cs_activity_pct|
-<|{cs_activity_pct_json}|text|mode=raw|>
-|>
-<iframe src="/grid/cs_activity_pct" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
-|>
-
-<|part|class_name=chart-card|
 **Customer Usage Cohort (Accounting Sync & Uploads only)**
 
 <|part|class_name=gridholder gridholder-cs_cohort_count|
 <|{cs_cohort_count_json}|text|mode=raw|>
 |>
 <iframe src="/grid/cs_cohort_count" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
-|>
-
-<|part|class_name=chart-card|
-**Customer Usage Cohort %**
-
-<|part|class_name=gridholder gridholder-cs_cohort_pct|
-<|{cs_cohort_pct_json}|text|mode=raw|>
-|>
-<iframe src="/grid/cs_cohort_pct" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|

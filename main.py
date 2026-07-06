@@ -633,9 +633,17 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
         sub  = base[base["iw"] == wk]
         size = sub["record_id"].nunique()
         tot_int += size
-        accts = {_EMAIL_ACCT.get(_clean_email(em)) for em in
-                 sub["login_email_id"].dropna().unique()}
-        accts.discard(None)
+        # One resolved account per DEAL (record_id), so the active numerator is
+        # counted in the same unit as `size` (distinct deals). Two deals sharing a
+        # login email map to one account_id; counting the de-duped account set
+        # would count that once in the numerator but twice in Integrated (e.g. the
+        # 08 Jun week capping at 90% when every deal actually logged in). Unresolved
+        # emails -> None, which never matches weeks_set (stays inactive).
+        deal_accts = {}
+        for rid, em in sub[["record_id", "login_email_id"]].itertuples(index=False):
+            if rid not in deal_accts:
+                deal_accts[rid] = _EMAIL_ACCT.get(_clean_email(em))
+        deal_accts = list(deal_accts.values())   # one per deal (account_id may repeat)
         label = wk.strftime("%d %b")
         crow = {"Integration Week": label, "Integrated": size}
         prow = {"Integration Week": label, "Integrated": size}
@@ -645,7 +653,7 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
             if cws > today:
                 crow[col] = ""; prow[col] = ""
                 continue
-            active = sum(1 for a in accts if (a, cws) in weeks_set)
+            active = sum(1 for a in deal_accts if a and (a, cws) in weeks_set)
             crow[col] = active
             pct = round(active / size * 100) if size else 0
             prow[col] = (f"{pct}%" if pct else "")   # blank when 0%
@@ -816,7 +824,10 @@ def _q(url, sql, _tries=5, statement_timeout_ms=None):
 #   CREATE INDEX idx_transaction_events_cohort     ON aia_transaction_events    (event_time) INCLUDE (account_id, event_name, items_count);
 #   CREATE INDEX idx_vendor_invoice_events_cohort  ON aia_vendor_invoice_events (event_time) INCLUDE (account_id, event_name);
 _EVENT_TABLES = {
-    "session":        ("aia_session_events",        ["account_id", "event_name", "event_time"]),
+    # session events include Login rows whose account_id is NULL in the source
+    # (pre-auth) — we also pull `email` here so the account_id can be backfilled
+    # from aia_accounts; the tiny heap fetch is worth recovering ~all logins.
+    "session":        ("aia_session_events",        ["account_id", "event_name", "event_time", "email"]),
     "upload":         ("aia_upload_events",          ["account_id", "event_name", "event_time"]),
     "sync":           ("aia_sync_events",            ["account_id", "event_name", "event_time", "items_count"]),
     "transaction":    ("aia_transaction_events",     ["account_id", "event_name", "event_time", "items_count"]),
@@ -834,9 +845,13 @@ def _load_activity_events():
     for key, (table, cols) in _EVENT_TABLES.items():
         try:
             collist = ", ".join(cols)
+            # session Login events carry a NULL account_id but a valid email;
+            # keep them so _prep_activity_events can backfill the account_id.
+            acct_where = ("(account_id IS NOT NULL OR email IS NOT NULL)"
+                          if key == "session" else "account_id IS NOT NULL")
             out[key] = _q(SUPABASE_URL,
                 f"SELECT {collist} FROM public.{table} "
-                f"WHERE event_time >= now() - interval '90 days' AND account_id IS NOT NULL",
+                f"WHERE event_time >= now() - interval '90 days' AND {acct_where}",
                 statement_timeout_ms=10000)
         except Exception as ex:
             print(f"[WARN] activity event table {table} failed: {ex} -- using empty frame")
@@ -847,29 +862,30 @@ def _empty_activity_events():
     return {key: pd.DataFrame(columns=cols) for key, (_t, cols) in _EVENT_TABLES.items()}
 
 
-def _load_event_email_map():
-    """email -> account_id harvested from the event tables (which carry BOTH an
-    email and an account_id). Fills the gap for accounts that only ever logged in
-    / viewed the dashboard and never uploaded or synced: those never got an
-    email->account link from _UPL/_SYN, so their Login / Dashboard-Viewed activity
-    could not be attributed in the Customer Activity Cohort. A cheap DISTINCT pull
-    (90-day bounded) keeps startup fast; failures per-table are non-fatal."""
+def _load_acct_by_email():
+    """email -> account_id from the authoritative aia_accounts table (which links
+    every account to its hubspot_login_email and its app account_email). Two jobs:
+      1. backfill the account_id on session Login events that arrive NULL, and
+      2. resolve base-row login_email -> account for accounts that never uploaded
+         / synced (so _UPL/_SYN never linked them).
+    hubspot_login_email wins over account_email (it matches _AIA.login_email_id)."""
     m = {}
-    for _key, (table, _cols) in _EVENT_TABLES.items():
-        try:
-            df = _q(SUPABASE_URL,
-                f"SELECT DISTINCT account_id, email FROM public.{table} "
-                f"WHERE event_time >= now() - interval '90 days' "
-                f"AND account_id IS NOT NULL AND email IS NOT NULL",
-                statement_timeout_ms=10000)
-        except Exception as ex:
-            print(f"[WARN] event email map {table} failed: {ex}")
+    try:
+        df = _q(SUPABASE_URL,
+            "SELECT account_id, hubspot_login_email, account_email FROM public.aia_accounts",
+            statement_timeout_ms=15000)
+    except Exception as ex:
+        print(f"[WARN] aia_accounts email map failed: {ex}")
+        return m
+    if df is None or not len(df):
+        return m
+    # hubspot_login_email first (first-wins), then account_email as fallback
+    for col in ("hubspot_login_email", "account_email"):
+        if col not in df.columns:
             continue
-        if df is None or not len(df) or not {"account_id", "email"}.issubset(df.columns):
-            continue
-        for ac, em in df[["account_id", "email"]].itertuples(index=False):
+        for ac, em in df[["account_id", col]].dropna().itertuples(index=False):
             em = _clean_email(em)
-            if em and em not in m:      # first-wins
+            if em and em not in m:
                 m[em] = ac
     return m
 
@@ -1056,10 +1072,12 @@ if "event_date" in _SYN.columns:
     _SYN = _nums(_SYN, ["items_count"])
 
 def _prep_activity_events(act_dict):
-    """Combine the 5 event-table pulls (each already column-limited to match its
-    covering index — no `email`, pulling it would force a heap fetch and defeat
-    the index-only scan) into one long frame: [account_id, event_name,
-    event_time, items_count]. event_time normalised to tz-naive (UTC)."""
+    """Combine the 5 event-table pulls into one long frame: [account_id,
+    event_name, event_time, items_count]. event_time normalised to tz-naive (UTC).
+    Session Login rows arrive with a NULL account_id but a valid email — backfill
+    their account_id from aia_accounts (_ACCT_BY_EMAIL) so those logins are
+    attributable in the Customer Activity Cohort; any row still unresolved after
+    backfill is dropped."""
     frames = []
     for df in act_dict.values():
         if df is None or len(df) == 0:
@@ -1070,17 +1088,19 @@ def _prep_activity_events(act_dict):
         d["event_time"] = pd.to_datetime(d["event_time"], errors="coerce", utc=True).dt.tz_convert(None)
         if "items_count" not in d.columns:
             d["items_count"] = np.nan
+        # backfill NULL account_id from the row's email (session Login events)
+        if "email" in d.columns:
+            need = d["account_id"].isna()
+            if need.any():
+                d.loc[need, "account_id"] = d.loc[need, "email"].map(
+                    lambda e: _ACCT_BY_EMAIL.get(_clean_email(e)))
         frames.append(d[["account_id", "event_name", "event_time", "items_count"]])
     if not frames:
         return pd.DataFrame(columns=["account_id", "event_name", "event_time", "items_count"])
     out = pd.concat(frames, ignore_index=True)
+    out = out.dropna(subset=["account_id"])   # drop rows we still couldn't resolve
     out["items_count"] = pd.to_numeric(out["items_count"], errors="coerce")
     return out
-
-_ACT_EVENTS = _prep_activity_events(_RAW_ACT)
-# Pre-filtered once so _usage_28 (called once per paid customer) doesn't re-scan
-# every event_name on every call — only account_id/date filtering happens per call.
-_DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
 
 def _clean_email(v):
     """Normalise an email for lookup: lower-case, trim, and strip any Unicode
@@ -1090,6 +1110,14 @@ def _clean_email(v):
         return ""
     s = "".join(c for c in str(v) if unicodedata.category(c)[0] != "C")
     return s.lower().strip()
+
+# Authoritative email -> account_id (aia_accounts), built BEFORE the event prep so
+# session Login rows that arrive with a NULL account_id can be backfilled by email.
+_ACCT_BY_EMAIL = _load_acct_by_email()
+_ACT_EVENTS = _prep_activity_events(_RAW_ACT)
+# Pre-filtered once so _usage_28 (called once per paid customer) doesn't re-scan
+# every event_name on every call — only account_id/date filtering happens per call.
+_DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
 
 # ── Usage-cohort lookups (precomputed once) ─────────────────────────────────
 # email -> account_id, and the set of (account_id, week-Monday) that had any
@@ -1131,7 +1159,7 @@ def _build_activity_lookups():
     # authoritative _UPL/_SYN mapping wherever both exist. This does NOT change
     # the legacy Usage Cohort: its membership still requires an (acct, week) in
     # active_weeks (upload/sync only), which these accounts don't have.
-    for em, ac in _EVENT_EMAIL_MAP.items():
+    for em, ac in _ACCT_BY_EMAIL.items():
         if em not in email_acct:
             email_acct[em] = ac
 
@@ -1149,9 +1177,6 @@ def _build_activity_lookups():
 
     return email_acct, active_weeks, active_weeks_upl, active_weeks_syn, active_weeks_ev
 
-# email -> account_id link from the event tables, so login-only accounts (no
-# _UPL/_SYN history) are still attributable in the Customer Activity Cohort.
-_EVENT_EMAIL_MAP = _load_event_email_map()
 _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
 
 def _build_acct_dates():
@@ -1204,7 +1229,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _EVENT_EMAIL_MAP
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
@@ -1224,9 +1249,9 @@ def _reload_data():
     if "event_date" in _SYN.columns:
         _SYN["event_date"] = pd.to_datetime(_SYN["event_date"], errors="coerce")
         _SYN = _nums(_SYN, ["items_count"])
+    _ACCT_BY_EMAIL = _load_acct_by_email()   # rebuild before prep (backfill dep)
     _ACT_EVENTS = _prep_activity_events(_RAW_ACT)
     _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
-    _EVENT_EMAIL_MAP = _load_event_email_map()
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
     _BILLING_END = _build_billing_end()
@@ -1780,45 +1805,60 @@ def _apply_usage_filter(state):
         heat_cols={"Usage Active Days (28d)": "green"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
+def _merge_cohort_pct_count(cnt_df, pct_df):
+    """Combine the count + % cohort frames into ONE table where each week-offset
+    cell shows the count as the main figure with the % in brackets, e.g.
+    '16 (94%)'. 'Integration Week' / 'Integrated' pass through unchanged; blank
+    (future) and zero-activity cells stay blank. The grid's numOf() parses the
+    leading count so the green heatmap shades by count."""
+    if not len(cnt_df) or not len(pct_df):
+        return cnt_df
+    wcols = [c for c in cnt_df.columns if c not in ("Integration Week", "Integrated")]
+    def _cell(cnt, pctv):
+        if cnt is None or cnt == "":
+            return ""                       # offset past today
+        try:
+            c = int(cnt)
+        except (TypeError, ValueError):
+            return ""
+        if c == 0:
+            return ""                       # no activity that week
+        p = pctv if (isinstance(pctv, str) and pctv) else "0%"
+        return f"{c} ({p})"
+    m = cnt_df.copy()
+    for c in wcols:
+        m[c] = [_cell(cv, pv) for cv, pv in zip(cnt_df[c], pct_df[c])]
+    return m
+
+
 def _build_cohort_tables(state):
-    """Rebuild ONLY the four cohort tables — Customer Usage Cohort and Customer
-    Activity Cohort (counts + %). They share the Event Name / Deal Name / Deal
-    Stage / CSM filter row and are independent of the rest of the CS Finance
-    page, so filter changes route here instead of the full (slow) _cs_refresh."""
+    """Rebuild ONLY the two cohort tables — Customer Usage Cohort and Customer
+    Activity Cohort. Each merges its count + % into one '% (count)' table. They
+    share the Event Name / Deal Name / Deal Stage / CSM filter row and are
+    independent of the rest of the CS Finance page, so filter changes route here
+    instead of the full (slow) _cs_refresh."""
     _act_deal  = _sel(state.cs_activity_deal)
     _act_stage = _sel(state.cs_activity_stage)
     _act_csm   = _sel(state.cs_activity_csm)
     _coh_heat = {f"W{o}": "green" for o in range(12)}
 
-    # Customer Usage Cohort (last 12 integration weeks) — counts + % tables.
-    # Both use fixed column widths so they line up as a comparison; % values
-    # (strings) are centre-aligned.
-    cnt_df, pct_df = _usage_cohort(deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
-    state.cs_cohort_count_json = (grid_payload_b64(cnt_df, total_id_col="Integration Week",
-                                  blank_zeros=True, no_sort=True, fixed=True,
-                                  sortable=False, center_all=True, heat_cols=_coh_heat,
-                                  autosize=True)   # expand iframe to fit all rows, no scroll
-                                  if len(cnt_df) else grid_payload_b64(pd.DataFrame()))
-    state.cs_cohort_pct_json   = (grid_payload_b64(pct_df, total_id_col="Integration Week",
-                                  no_sort=True, fixed=True, sortable=False, center_all=True,
-                                  heat_cols=_coh_heat, autosize=True)
-                                  if len(pct_df) else grid_payload_b64(pd.DataFrame()))
+    def _merged_json(cnt_df, pct_df):
+        m = _merge_cohort_pct_count(cnt_df, pct_df)
+        return (grid_payload_b64(m, total_id_col="Integration Week",
+                                 no_sort=True, fixed=True, sortable=False,
+                                 center_all=True, heat_cols=_coh_heat, autosize=True)
+                if len(m) else grid_payload_b64(pd.DataFrame()))
 
-    # Customer Activity Cohort — same shape as Customer Usage Cohort above, but
-    # sourced from the 5 aia_*_events tables (14 tracked event names) via the
-    # Event Name filter, instead of the Upload/Sync summary tables.
+    # Customer Usage Cohort (Accounting Sync & Uploads only) — merged % (count).
+    cnt_df, pct_df = _usage_cohort(deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
+    state.cs_cohort_count_json = _merged_json(cnt_df, pct_df)
+
+    # Customer Activity Cohort — same shape, sourced from the aia_*_events tables
+    # via the Event Name filter. Merged % (count).
     _act_ev = _sel(state.cs_activity_event)
     act_cnt_df, act_pct_df = _usage_cohort(event_filter=_act_ev, deal_filter=_act_deal,
                                            stage_filter=_act_stage, csm_filter=_act_csm)
-    state.cs_activity_count_json = (grid_payload_b64(act_cnt_df, total_id_col="Integration Week",
-                                    blank_zeros=True, no_sort=True, fixed=True,
-                                    sortable=False, center_all=True, heat_cols=_coh_heat,
-                                    autosize=True)
-                                    if len(act_cnt_df) else grid_payload_b64(pd.DataFrame()))
-    state.cs_activity_pct_json   = (grid_payload_b64(act_pct_df, total_id_col="Integration Week",
-                                    no_sort=True, fixed=True, sortable=False, center_all=True,
-                                    heat_cols=_coh_heat, autosize=True)
-                                    if len(act_pct_df) else grid_payload_b64(pd.DataFrame()))
+    state.cs_activity_count_json = _merged_json(act_cnt_df, act_pct_df)
 
 
 def _cs_refresh(state):
