@@ -2866,6 +2866,7 @@ def on_reset_filters(state, *_):
     # CS Finance
     state.cs_selected_owner  = []; state.cs_selected_deal = []; state.cs_selected_rectype = []
     state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []
+    state.cs_activity_event = []; state.cs_activity_deal = []; state.cs_activity_stage = []; state.cs_activity_csm = []
     # Marketing
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
     # VA Finance
