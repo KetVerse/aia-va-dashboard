@@ -52,4 +52,18 @@ docker run --rm \
   "${KEY_MOUNT[@]}" \
   dashboard-snapshot http://aia-dashboard:8080 "${OUT}"
 
+# Export each PDF page as a JPEG next to the PDF (<name>_page-1.jpg .. _page-5.jpg).
+# Best-effort ONLY: it must never break the PDF -> Drive flow or the LOCAL_PDF stdout
+# line the n8n workflow parses, so every step here is guarded with `|| ...` and the
+# script's exit code is unchanged. poppler-utils is self-installed if missing.
+PDF="/opt/taipy-dashboard/snapshots/dashboard_${TS}_IST.pdf"
+if ! command -v pdftoppm >/dev/null 2>&1; then
+  echo "[run_snapshot] installing poppler-utils for page-image export ..."
+  { apt-get update -qq && apt-get install -y -qq poppler-utils; } || echo "[run_snapshot] poppler-utils install failed (skipping page images)" >&2
+fi
+if command -v pdftoppm >/dev/null 2>&1; then
+  pdftoppm -jpeg -jpegopt quality=82 -r 96 "$PDF" "${PDF%.pdf}_page" \
+    || echo "[run_snapshot] page-image export failed (PDF still produced)" >&2
+fi
+
 echo "LOCAL_PDF=/opt/taipy-dashboard/snapshots/dashboard_${TS}_IST.pdf"
