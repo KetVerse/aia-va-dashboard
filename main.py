@@ -674,7 +674,8 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
 def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None):
     """Refunds-adjusted billing-to-MRR cohort matrix (replicates the DAX
     total_monthly_collection / #Active Paid Users). Each non-refunded line item
-    is recognised across its active term (date_paid month .. +term, exclusive),
+    is recognised across its active term (billing_start_date month .. +term,
+    exclusive; falls back to date_paid when billing_start_date is missing),
     attributed to its cohort row.
       mode="revenue"   -> cell = sum(unit_price / term); Fresh Renewals = sum(unit_price)
       mode="retention" -> cell = distinct active record_ids; Fresh Renewals = distinct record_ids
@@ -687,8 +688,17 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None):
     li = li.dropna(subset=["date_paid", "cohort_month"]).copy()
     if len(li) == 0:
         return pd.DataFrame()
-    li["billing_p"] = li["date_paid"].dt.to_period("M")
-    li["cohort_p"]  = li["cohort_month"].dt.to_period("M")
+    # Recognition is anchored to the month the payment is FOR (billing_start_date),
+    # not when the cash arrived (date_paid): a late / back-dated payment must still
+    # be attributed to its intended billing month. Fall back to date_paid when
+    # billing_start_date is missing. (The Fresh Renewals / One-time rows below stay
+    # keyed on date_paid — the cash-received view — by design.)
+    if "billing_start_date" in li.columns:
+        _bstart = li["billing_start_date"].where(li["billing_start_date"].notna(), li["date_paid"])
+    else:
+        _bstart = li["date_paid"]
+    li["start_p"]  = _bstart.dt.to_period("M")
+    li["cohort_p"] = li["cohort_month"].dt.to_period("M")
     if refund_map is not None:
         ref = li["record_id"].map(refund_map).astype("string").str.strip().str.lower()
         li = li[(ref != "yes").fillna(True)]
@@ -705,13 +715,13 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None):
     recs = []
     for r in li.itertuples(index=False):
         for k in range(int(r.term_n)):
-            recs.append((str(r.cohort_p), r.billing_p + k, r.record_id, r.monthly))
+            recs.append((str(r.cohort_p), r.start_p + k, r.record_id, r.monthly))
     sp = pd.DataFrame(recs, columns=["Cohort", "bp", "rid", "amt"])
     if len(sp) == 0:
         return pd.DataFrame()
 
-    lo = min(li["cohort_p"].min(), li["billing_p"].min())
-    hi = li["billing_p"].max()
+    lo = min(li["cohort_p"].min(), li["start_p"].min())
+    hi = li["start_p"].max()
     # Extend columns through the current month so multi-month subscriptions show
     # their full monthly split up to today — even when the latest payment in view
     # is earlier (e.g. a single deal filtered to one past payment month).
@@ -2462,17 +2472,15 @@ def _vaf_refresh(state):
         state.vaf_revenue_trend_df = pd.DataFrame()
 
     rw = paid2[(paid2["next_renewal"]>=today-pd.Timedelta(days=14))
-               &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))].sort_values("next_renewal")
-    svc_map = {}
-    if "line_item_name" in li.columns:
-        svc_map = (li.dropna(subset=["line_item_name"])
-                     .groupby("record_id")["line_item_name"]
-                     .apply(lambda x: ", ".join(sorted(set(x.astype(str))))).to_dict())
+               &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))]
+    if "deal_stage" in rw.columns:                     # drop Churned deals from the window
+        rw = rw[rw["deal_stage"] != "Churned"]
+    rw = rw.sort_values("next_renewal")
     rwd = pd.DataFrame({
         "Due On":    rw["next_renewal"].dt.strftime("%d-%b-%y"),
         "Deal Name": rw.get("deal_name", ""),
         "record_id": rw["record_id"].values,
-        "VA Service Name": rw["record_id"].map(svc_map).fillna(""),
+        "GM":        rw.get("deal_owner", ""),          # GM = deal owner
         "POC Number": rw["poc_number"] if "poc_number" in rw.columns else pd.Series("", index=rw.index),
         "POC Email": rw.get("poc_email", ""),
         "Stage":     rw.get("deal_stage", ""),
@@ -2546,6 +2554,26 @@ cs_activity_deal_list  = sorted(_AIA[_act_base_mask]["deal_name"].dropna().uniqu
 cs_activity_stage_list = sorted(_AIA[_act_base_mask]["deal_stage"].dropna().unique().tolist())
 cs_activity_csm_list   = sorted(_AIA[_act_base_mask]["cs_owner"].dropna().unique().tolist())
 cs_activity_deal = []; cs_activity_stage = []; cs_activity_csm = []
+
+# ── Matrix explainer tooltips (ⓘ next to each matrix heading) ────────────────
+# Multi-line bullet text lives in vars (the inline control syntax can't hold line
+# breaks); .MuiTooltip-tooltip has white-space: pre-line so the \n render as lines.
+cs_rev_tip = ("Revenue Matrix (₹)\n"
+              "• Cohort Spread: Based on MRR\n"
+              "• Fresh Renewals: Monthly cash collected\n"
+              "• Total: Sum of cohort MRR")
+cs_ret_tip = ("Customer Retention Matrix\n"
+              "• Cohort Spread: Based on recurring customers by term\n"
+              "• Fresh Renewals: Customers who paid that month\n"
+              "• Total: Sum of recurring customers")
+vaf_rev_tip = ("Revenue Matrix (₹)\n"
+               "• Cohort Spread: Based on MRR + one-time revenue\n"
+               "• Fresh Renewals: Monthly cash collected\n"
+               "• Total: Sum of MRR + one-time revenue (excludes Fresh Renewals)")
+vaf_ret_tip = ("Customer Retention Matrix\n"
+               "• Cohort Spread: Based on recurring + one-time customers\n"
+               "• Fresh Renewals: Customers who paid that month (includes one-time)\n"
+               "• Total: Sum of recurring + one-time customers")
 
 # Page 3
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)

@@ -227,11 +227,16 @@ body {
     line-height: 1.1 !important;
 }
 
-/* KPI hover tooltips (MRR, Total Revenue) — larger, uniform font for value + note */
+/* KPI hover tooltips (MRR, Total Revenue) — larger, uniform font for value + note.
+   white-space:pre-line so multi-line matrix explainer tooltips keep their \n line
+   breaks (single-line KPI tooltips are unaffected). */
 .MuiTooltip-tooltip {
     font-size: 14px !important;
     font-weight: 600 !important;
     letter-spacing: 0.2px !important;
+    white-space: pre-line !important;
+    max-width: 340px !important;
+    text-align: left !important;
 }
 
 .kpi-blue   { background: #1a7fc4; }

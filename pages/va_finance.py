@@ -56,7 +56,7 @@ Due ±14 Days
 |>
 
 <|part|class_name=chart-card|
-**Revenue Matrix (₹)**
+**Revenue Matrix (₹)** <|ⓘ|text|hover_text={vaf_rev_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-vaf_revenue|
 <|{vaf_revenue_matrix_json}|text|mode=raw|>
@@ -65,7 +65,7 @@ Due ±14 Days
 |>
 
 <|part|class_name=chart-card|
-**Customer Retention Matrix**
+**Customer Retention Matrix** <|ⓘ|text|hover_text={vaf_ret_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-vaf_retention|
 <|{vaf_retention_matrix_json}|text|mode=raw|>

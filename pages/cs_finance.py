@@ -84,7 +84,7 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Revenue Matrix (₹)**
+**Revenue Matrix (₹)** <|ⓘ|text|hover_text={cs_rev_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-cs_revenue|
 <|{cs_revenue_matrix_json}|text|mode=raw|>
@@ -93,7 +93,7 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Customer Retention Matrix**
+**Customer Retention Matrix** <|ⓘ|text|hover_text={cs_ret_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-cs_retention|
 <|{cs_retention_matrix_json}|text|mode=raw|>
