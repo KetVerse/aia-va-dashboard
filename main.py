@@ -2091,7 +2091,11 @@ def _cs_refresh(state):
     # Usage & Health table — every record with a non-blank payment_date (PBI rule:
     # no integration / module-type / email filter). Paid-but-not-yet-integrated and
     # GST-Paid records show too, with blank Int Date and 0 usage.
-    usage_base = df[df["payment_date"].notna()]
+    # Built from the FULL _AIA (NOT the top-filtered `df`): this section is
+    # self-contained with its own Deal Name / CSM / Deal Stage / Deal Owner
+    # filters, so the top-nav CS Owner / Deal Name filters must not scope it (or
+    # a stale top selection leaves the usage dropdowns limited to that deal).
+    usage_base = _AIA[_AIA["payment_date"].notna()]
     usage_rows = []
     for _, row in usage_base.iterrows():
         email  = _clean_email(row.get("login_email_id",""))
@@ -2393,6 +2397,10 @@ def _vaf_refresh(state):
     paid = df[df["payment_date"].notna()]
     # Total Customers — every paid customer, churned included.
     state.vaf_kpi_active  = paid["record_id"].nunique()
+    # Refunds — deals asked_refund=Yes; filter-aware (respects Deal Name / Line
+    # Item filters via df), same as the CS Finance Refunds card.
+    state.vaf_kpi_refunds = (df[df["asked_refund"] == "Yes"]["record_id"].nunique()
+                             if "asked_refund" in df.columns else 0)
     # Total Revenue = sum of every line item's unit_price (the full billed value
     # across recurring + one-time), respecting the Deal / Line Item filters.
     _va_rev = int(li["unit_price"].sum())
@@ -2421,11 +2429,17 @@ def _vaf_refresh(state):
         (paid2["next_renewal"]>=today-pd.Timedelta(days=14))
         &(paid2["next_renewal"]<=today+pd.Timedelta(days=14))]["record_id"].nunique()
 
-    _vrev = _mrr_matrix(li, None, "revenue", add_onetime=True, as_of=today)   # VA: + One-time row
-    _vret = _mrr_matrix(li, None, "retention", add_onetime=True, as_of=today)
+    # Refunds-adjusted (same as CS): drop every line item whose deal is
+    # asked_refund=Yes, so its revenue leaves every cell and it isn't retained.
+    _v_refund_map = None
+    if "asked_refund" in _VA.columns:
+        _v_refund_map = (_VA.dropna(subset=["record_id"]).drop_duplicates("record_id")
+                            .set_index("record_id")["asked_refund"])
+    _vrev = _mrr_matrix(li, _v_refund_map, "revenue", add_onetime=True, as_of=today)   # VA: + One-time row
+    _vret = _mrr_matrix(li, _v_refund_map, "retention", add_onetime=True, as_of=today)
     _va_mrr = _matrix_current_mrr(_vrev, today, exclude_onetime=True)
     state.vaf_kpi_mrr = _fmt2(_va_mrr)
-    state.vaf_kpi_mrr_exact = f"{_inr(_va_mrr)} · Excludes One-time amount"
+    state.vaf_kpi_mrr_exact = f"{_inr(_va_mrr)} · Excludes One-time amount & Refunds"
     _vrev_heat = {c: "green" for c in _vrev.columns if c != "Cohort"} if len(_vrev) else {}
     _vret_heat = {c: "green" for c in _vret.columns if c != "Cohort"} if len(_vret) else {}
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
@@ -2566,7 +2580,7 @@ vaf_rectype_list = sorted(_VA_LI["recurring_type"].dropna().unique().tolist()) i
 vaf_line_item_list = (sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
                       if "line_item_name" in _VA_LI.columns else [])
 vaf_selected_deal=[]; vaf_selected_line_item=[]; vaf_selected_rectype=[]
-vaf_kpi_active=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exact="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_mrr_exact="₹0"; vaf_kpi_due_14d=0
+vaf_kpi_active=0; vaf_kpi_refunds=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exact="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_mrr_exact="₹0"; vaf_kpi_due_14d=0
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
 

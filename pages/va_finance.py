@@ -27,11 +27,16 @@ VA_FINANCE_PAGE = """
 <|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
-<|layout|columns=1 1 1 1|gap=8px|
+<|layout|columns=1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Total Customers
 
 <|{vaf_kpi_active}|text|class_name=kpi-value|>
+|>
+<|part|class_name=kpi-card kpi-red|
+Refunds
+
+<|{vaf_kpi_refunds}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-green|
 Total Revenue
