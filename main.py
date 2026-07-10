@@ -251,9 +251,19 @@ _MULTISELECT_SCRIPT = """
   });
   var pending = false;
   function schedule(){ if(pending) return; pending = true; setTimeout(function(){ pending = false; scan(); }, 40); }
-  try{ new MutationObserver(schedule).observe(document.body, {childList:true, subtree:true}); }catch(e){}
+  // characterData:true is essential — the *_ms option holders start EMPTY and are
+  // filled a moment later by on_init/_sync_ms (server push). Taipy often applies
+  // that as an in-place text (characterData) update, which a childList-only
+  // observer misses, leaving the dropdown stuck on "All" with no values.
+  try{ new MutationObserver(schedule).observe(document.body, {childList:true, subtree:true, characterData:true}); }catch(e){}
   if(document.readyState !== "loading") scan();
   else document.addEventListener("DOMContentLoaded", scan);
+  // Safety net against the load-time race: re-read the holders every second and
+  // render as soon as they populate. scan() is a no-op unless a holder's data
+  // actually changed and it skips any panel the user has open, so this is cheap
+  // and non-disruptive. This is what makes the filters list reliably without a
+  // rebuild + hard-refresh dance.
+  setInterval(scan, 1000);
 })();
 </script>
 """
