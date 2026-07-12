@@ -2755,7 +2755,13 @@ def _sync_ms(state):
     state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
     # Customer Activity Cohort: Deal Name / Deal Stage / CSM cross-filter each
     # other (Event Name is independent of deals, so it keeps the full list).
-    _ab = _AIA[_act_base_mask]
+    # Recompute the base mask against the CURRENT _AIA — the module-level
+    # _act_base_mask is tied to the original _AIA's index, but _reload_data()
+    # (the 30-min auto-refresh) reassigns _AIA to a new DataFrame without
+    # rebuilding that mask. The stale mask is then unalignable -> _sync_ms
+    # crashed here, so every filter set after this point (the whole Customer
+    # Usage & Health row) silently stopped populating until the next full rebuild.
+    _ab = _AIA[(_AIA["integration_done_date"].notna()) & (_AIA["module_type"] == "AIA Paid")]
     def _alov(target):
         d = _ab
         for col, sv in (("deal_name", state.cs_activity_deal),
