@@ -28,7 +28,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      bar_color="#c5e07a", sortable=True, center_all=False,
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
-                     heat_by_row=False, link_cols=None, date_cols=None, header_tips=None):
+                     heat_by_row=False, link_cols=None, date_cols=None, header_tips=None,
+                     max_height=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -113,7 +114,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "statusCol": status_flag, "heat": heat, "autosize": bool(autosize),
                "firstW": first_col_w, "rowHeat": row_heat_cols or {},
                "heatByRow": bool(heat_by_row), "linkCols": link_map,
-               "hidden": hidden, "dateCols": date_flag, "headerTips": header_tip_list}
+               "hidden": hidden, "dateCols": date_flag, "headerTips": header_tip_list,
+               "maxHeight": max_height}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -301,6 +303,8 @@ _GRID_HTML = r"""<!DOCTYPE html>
   .st-active{ color:#16a34a; font-weight:700; }
   .st-risk{ color:#ea580c; font-weight:700; }
   .st-inactive{ color:#dc2626; font-weight:700; }
+  .st-churned{ color:#94a3b8; font-weight:700; }
+  .st-black{ color:#0f172a; font-weight:700; }
   tfoot td{
     position:sticky; bottom:0; z-index:2;
     background:var(--tot); color:var(--tottxt); font-weight:700;
@@ -541,7 +545,11 @@ function body(){
         html+='<td class="streakcell">'+streakHtml(v)+'</td>';
       } else if(stat[i]){
         const sv=String(v);
-        const c = sv==="Active"?"st-active":(sv==="Risk of Churn"?"st-risk":(sv==="Inactive"?"st-inactive":""));
+        const SMAP={"Active":"st-active","Collected":"st-active",
+                    "Risk of Churn":"st-risk","Overdue":"st-risk",
+                    "Inactive":"st-inactive","Pending":"st-inactive",
+                    "Upcoming":"st-black","Churned":"st-churned"};
+        const c=SMAP[sv]||"";
         html+='<td class="'+cls(i)+'"><span class="'+c+'">'+fmt(v,num[i])+'</span></td>';
       } else if(bars[i] && typeof v==="number" && v>0 && maxes[i]>0){
         const w=Math.max(3, Math.round(v/maxes[i]*100));
@@ -579,12 +587,16 @@ function render(){
   try{ FORCE_FULL = !!(window.parent && window.parent.__SNAPSHOT__); }catch(e){}
   if(DATA.autosize || FORCE_FULL){
     try{
-      document.querySelector(".wrap").style.maxHeight="none";
       if(window.frameElement){
         // measure the ACTUAL content (table + search bar), not the iframe viewport
         const sb=document.getElementById("searchbar");
         const sbh=(sb && sb.style.display!=="none") ? sb.offsetHeight : 0;
-        const h=tbl.offsetHeight + sbh + 8;
+        const contentH=tbl.offsetHeight + sbh + 8;
+        // maxHeight caps the frame: shrink to content when short, but cap + scroll
+        // internally when tall. Snapshot (FORCE_FULL) ignores the cap = full expand.
+        const cap=(!FORCE_FULL && DATA.maxHeight) ? DATA.maxHeight : Infinity;
+        const h=Math.min(contentH, cap);
+        document.querySelector(".wrap").style.maxHeight=(contentH<=cap)?"none":"";
         window.frameElement.style.height=h+"px";
         if(FORCE_FULL){
           // snapshot: also widen the frame to the full table so nothing is

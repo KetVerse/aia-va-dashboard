@@ -74,6 +74,38 @@ Due ±14 Days
 |>
 
 <|part|class_name=chart-card|
+**Accounts Receivable Tracker**
+
+<|layout|columns=1 1 1 1 1|gap=12px|
+<|part|
+<div class="msc wide" data-key="vaf_ar_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_ar_deal_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_ar_deal|>
+|>
+<|part|
+<div class="msc" data-key="vaf_ar_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_ar_stage_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_ar_stage|>
+|>
+<|part|
+<div class="msc" data-key="vaf_ar_am"><div class="msc-cap">AM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_ar_am_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_ar_am|>
+|>
+<|part|
+<div class="msc" data-key="vaf_ar_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_ar_owner_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_ar_owner|>
+|>
+<|part|
+<div class="msc" data-key="vaf_ar_status"><div class="msc-cap">Status</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_ar_status_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_ar_status|>
+|>
+|>
+
+<|part|class_name=gridholder gridholder-vaf_ar|
+<|{vaf_ar_json}|text|mode=raw|>
+|>
+<iframe src="/grid/vaf_ar" class="grid-frame" style="width:100%;height:560px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
 **Renewal Window (Today ± 14 Days)**
 
 <|part|class_name=gridholder gridholder-vaf_renewal|

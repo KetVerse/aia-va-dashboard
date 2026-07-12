@@ -133,20 +133,20 @@ Integration Due
 
 <|layout|columns=1 1 1 1|gap=12px|
 <|part|
-<div class="msc" data-key="cs_activity_event"><div class="msc-cap">Event Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
-<|{cs_activity_event_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_event|>
-|>
-<|part|
 <div class="msc wide" data-key="cs_activity_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_activity_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_deal|>
+|>
+<|part|
+<div class="msc" data-key="cs_activity_csm"><div class="msc-cap">CSM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_activity_csm_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_csm|>
 |>
 <|part|
 <div class="msc" data-key="cs_activity_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_activity_stage_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_stage|>
 |>
 <|part|
-<div class="msc" data-key="cs_activity_csm"><div class="msc-cap">CSM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
-<|{cs_activity_csm_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_csm|>
+<div class="msc" data-key="cs_activity_event"><div class="msc-cap">Event Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_activity_event_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_event|>
 |>
 |>
 

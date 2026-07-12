@@ -2396,6 +2396,140 @@ def _va_ops_refresh(state):
 # PAGE 5 — VA FINANCE
 # ═══════════════════════════════════════════════════════════════════
 
+# ── Accounts Receivable Tracker ─────────────────────────────────────
+# One row per VA deal that has recurring (New/Renewal) line items. Each paid
+# line item covers `span` months from its billing_start_date; a deal is judged
+# purely on whether it's currently up to date with its most-recent coverage.
+_AR_FREQ_SPAN = {"bi_monthly": 2, "quarterly": 3, "per_six_months": 6, "annually": 12}
+
+def _ar_span(freq, term):
+    """Coverage span (months) of one line item: monthly → its `term`
+    (so a 2-month monthly line covers 2), every other cadence a fixed block."""
+    if freq == "monthly":
+        t = int(term) if (pd.notna(term) and term) else 1
+        return max(1, t)
+    return _AR_FREQ_SPAN.get(freq, max(1, int(term) if (pd.notna(term) and term) else 1))
+
+def _ar_build_base():
+    """Full AR table across every VA deal with recurring line items.
+    Status logic (non-churned):
+      • overdue period = a due period (start ≤ today) with no covering line item
+      • Overdue  → the ONLY uncovered-due period is the current/most-recent one
+                   (clean record that just lapsed)
+      • Pending  → any older gap, or 2+ uncovered periods (accumulated dues)
+      • Upcoming → fully paid up, next coverage ends within 14 days
+      • Collected→ fully paid up, next coverage ends > 14 days out
+    Dues/Outstanding: Overdue/Pending = uncovered periods × (span, unit_price);
+    Upcoming = the one upcoming period; Collected/Churned = blank."""
+    today = pd.Timestamp(date.today())
+    li, va = _VA_LI, _VA
+    if li is None or len(li) == 0 or "recurring_type" not in li.columns:
+        return pd.DataFrame()
+    rec = li[li["recurring_type"].isin(["New", "Renewal"])].copy()
+    rec = rec.dropna(subset=["record_id", "billing_start_date"])
+    if len(rec) == 0:
+        return pd.DataFrame()
+    vacols = ["record_id", "deal_name", "am_owner", "deal_owner", "deal_stage", "payment_date"]
+    vshow = (va[[c for c in vacols if c in va.columns]]
+             .drop_duplicates("record_id").set_index("record_id"))
+    rows = []
+    for rid, g in rec.groupby("record_id"):
+        g = g.sort_values("billing_start_date")
+        starts = list(g["billing_start_date"])
+        spans  = [_ar_span(r.billing_frequency, r.term) for r in g.itertuples()]
+        prices = list(g["unit_price"])
+        covered, cov_end = set(), None
+        for st, sp in zip(starts, spans):
+            for k in range(sp):
+                covered.add((st + relativedelta(months=k)).to_period("M"))
+            end = st + relativedelta(months=sp)
+            cov_end = end if (cov_end is None or end > cov_end) else cov_end
+        first_billing = starts[0]
+        latest_span   = spans[-1]
+        latest_price  = prices[-1] if prices else 0
+
+        def _v(col):
+            if rid in vshow.index and col in vshow.columns:
+                x = vshow.loc[rid, col]
+                return x if (isinstance(x, str) or pd.notna(x)) else ""
+            return ""
+        deal_name = _v("deal_name") or (g["deal_name"].iloc[0] if "deal_name" in g.columns else "")
+        stage = _v("deal_stage")
+        pay1  = vshow.loc[rid, "payment_date"] if (rid in vshow.index and "payment_date" in vshow.columns) else pd.NaT
+        churned = isinstance(stage, str) and "churn" in stage.lower()
+
+        # walk the deal's expected periods (cadence = latest line's span)
+        due_periods, overdue = [], []
+        k = 0
+        while k <= 600:
+            pstart = first_billing + relativedelta(months=latest_span * k)
+            if pstart > today:
+                break
+            due_periods.append(pstart)
+            if pstart.to_period("M") not in covered:
+                overdue.append(pstart)
+            k += 1
+
+        if churned:
+            status, dues, outstanding, next_due = "Churned", np.nan, np.nan, pd.NaT
+        elif overdue:
+            n = len(overdue)
+            dues, outstanding, next_due = n * latest_span, n * latest_price, cov_end
+            last_due = due_periods[-1] if due_periods else None
+            status = "Overdue" if (n == 1 and overdue[0] == last_due) else "Pending"
+        elif cov_end is not None and cov_end <= today + pd.Timedelta(days=14):
+            status, dues, outstanding, next_due = "Upcoming", latest_span, latest_price, cov_end
+        else:
+            status, dues, outstanding, next_due = "Collected", np.nan, np.nan, cov_end
+
+        rows.append({
+            "record_id": rid, "Deal Name": deal_name, "AM": _v("am_owner"),
+            "Deal Owner": _v("deal_owner"), "Deal Stage": stage,
+            "1st Payment Date": pay1, "Pending Dues (Months)": dues,
+            "Outstanding Amount": outstanding, "Due Status": status,
+            "Next Due Date": next_due,
+        })
+    return pd.DataFrame(rows)
+
+_AR_STATUS_RANK = {"Pending": 0, "Overdue": 1, "Upcoming": 2, "Collected": 3, "Churned": 4}
+
+def _ar_refresh(state):
+    base = _ar_build_base()
+    state.vaf_ar_all = base
+    d = base
+    if len(d):
+        for col, sv in (("Deal Name", state.vaf_ar_deal), ("Deal Stage", state.vaf_ar_stage),
+                        ("AM", state.vaf_ar_am), ("Deal Owner", state.vaf_ar_owner),
+                        ("Due Status", state.vaf_ar_status)):
+            s = _sel(sv)
+            if s and col in d.columns:
+                d = d[d[col].isin(s)]
+    if len(d):
+        d = d.assign(_r=d["Due Status"].map(_AR_STATUS_RANK).fillna(9),
+                     _o=d["Outstanding Amount"].fillna(-1))
+        d = d.sort_values(["_r", "_o"], ascending=[True, False]).drop(columns=["_r", "_o"])
+        _dt = lambda x: x.strftime("%d-%b-%y") if pd.notna(x) else ""
+        disp = pd.DataFrame({
+            "Deal Name": d["Deal Name"].values,
+            "record_id": d["record_id"].values,
+            "AM": d["AM"].values,
+            "Deal Owner": d["Deal Owner"].values,
+            "Deal Stage": d["Deal Stage"].values,
+            "1st Payment Date": d["1st Payment Date"].apply(_dt).values,
+            "Pending Dues (Months)": d["Pending Dues (Months)"].values,
+            "Outstanding Amount": d["Outstanding Amount"].values,
+            "Due Status": d["Due Status"].values,
+            "Next Due Date": d["Next Due Date"].apply(_dt).values,
+        })
+        state.vaf_ar_json = grid_payload_b64(
+            disp, no_sort=True, autosize=True, max_height=560,
+            center_cols=["1st Payment Date", "Pending Dues (Months)", "Outstanding Amount",
+                         "Due Status", "Next Due Date"],
+            status_cols=["Due Status"], date_cols=["1st Payment Date", "Next Due Date"],
+            link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
+    else:
+        state.vaf_ar_json = grid_payload_b64(pd.DataFrame())
+
 def _vaf_refresh(state):
     today = pd.Timestamp(date.today())
     df = _VA.copy()
@@ -2621,6 +2755,10 @@ vaf_selected_deal=[]; vaf_selected_line_item=[]; vaf_selected_rectype=[]
 vaf_kpi_active=0; vaf_kpi_refunds=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exact="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_mrr_exact="₹0"; vaf_kpi_due_14d=0
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
+# Accounts Receivable Tracker — its own 5 cross-filtering dropdowns, independent
+# of the page's top filter bar (mirrors the CS Usage & Health table pattern).
+vaf_ar_all=pd.DataFrame(); vaf_ar_json=""
+vaf_ar_deal=[]; vaf_ar_stage=[]; vaf_ar_am=[]; vaf_ar_owner=[]; vaf_ar_status=[]
 
 # Custom multi-select dropdowns — one shared JS→Python bridge + a JSON holder
 # ({lov, sel, label}) per filter that the JS checkbox dropdown renders from.
@@ -2643,6 +2781,11 @@ cs_activity_csm_ms   = _ms_json(cs_activity_csm_list,   [])
 vaf_deal_ms       = _ms_json(vaf_deal_list,      [])
 vaf_rectype_ms    = _ms_json(vaf_rectype_list,   [])
 vaf_line_item_ms  = _ms_json(vaf_line_item_list, [])
+vaf_ar_deal_ms    = _ms_json([], [])
+vaf_ar_stage_ms   = _ms_json([], [])
+vaf_ar_am_ms      = _ms_json([], [])
+vaf_ar_owner_ms   = _ms_json([], [])
+vaf_ar_status_ms  = _ms_json([], [])
 
 # ── Chart configs ──────────────────────────────────────────────────
 chart_config = {
@@ -2738,6 +2881,11 @@ _MS_DISPATCH = {
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
     "vaf_rectype":    ("vaf_selected_rectype",   "vaf"),
+    "vaf_ar_deal":    ("vaf_ar_deal",            "ar"),
+    "vaf_ar_stage":   ("vaf_ar_stage",           "ar"),
+    "vaf_ar_am":      ("vaf_ar_am",              "ar"),
+    "vaf_ar_owner":   ("vaf_ar_owner",           "ar"),
+    "vaf_ar_status":  ("vaf_ar_status",          "ar"),
 }
 
 def _sync_ms(state):
@@ -2816,6 +2964,28 @@ def _sync_ms(state):
     state.vaf_rectype_ms    = _ms_json(vaf_rectype_list,   state.vaf_selected_rectype)
     state.vaf_line_item_ms  = _ms_json(vaf_line_item_list, state.vaf_selected_line_item)
 
+    # Accounts Receivable Tracker: Deal Name / Deal Stage / AM / Deal Owner /
+    # Due Status cross-filter each other (options narrow to the current selection).
+    _ar = state.vaf_ar_all
+    def _arlov(target):
+        d = _ar
+        if d is None or len(d) == 0:
+            return []
+        for col, sv in (("Deal Name", state.vaf_ar_deal), ("Deal Stage", state.vaf_ar_stage),
+                        ("AM", state.vaf_ar_am), ("Deal Owner", state.vaf_ar_owner),
+                        ("Due Status", state.vaf_ar_status)):
+            if col == target:
+                continue
+            s = _sel(sv)
+            if s:
+                d = d[d[col].isin(s)]
+        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
+    state.vaf_ar_deal_ms   = _ms_json(_arlov("Deal Name"),  state.vaf_ar_deal)
+    state.vaf_ar_stage_ms  = _ms_json(_arlov("Deal Stage"), state.vaf_ar_stage)
+    state.vaf_ar_am_ms     = _ms_json(_arlov("AM"),         state.vaf_ar_am)
+    state.vaf_ar_owner_ms  = _ms_json(_arlov("Deal Owner"), state.vaf_ar_owner)
+    state.vaf_ar_status_ms = _ms_json(_arlov("Due Status"), state.vaf_ar_status)
+
 def on_ms_change(state):
     """One shared handler for every custom multi-select. The JS writes
     '<key>|<json-list>||<counter>' into the hidden ms_bridge input."""
@@ -2841,6 +3011,7 @@ def on_ms_change(state):
     elif scope == "usage": _apply_usage_filter(state)
     elif scope == "activity": _build_cohort_tables(state)
     elif scope == "vaf":   _vaf_refresh(state)
+    elif scope == "ar":    _ar_refresh(state)
     _sync_ms(state)
 
 
@@ -2958,6 +3129,7 @@ def _refresh_all(state):
     _mkt_refresh(state)
     _va_ops_refresh(state)
     _vaf_refresh(state)
+    _ar_refresh(state)
     _sync_ms(state)
 
 def on_init(state):
