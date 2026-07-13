@@ -462,51 +462,119 @@ def _make_trend(labels, dc, qual):
     return fig
 
 
-def _usage_28(email):
+# Event-table events that count as "work" (turn a streak dot green + active), the
+# accounting-sync signal (purple), and the engagement-only events (light blue,
+# NOT active). Uploads and Accounting Syncs themselves come from the unbounded
+# _UPL/_SYN summaries; everything else here comes from _ACT_EVENTS.
+_STREAK_EVENT_BUCKET = {
+    "Transaction Ledger Updated": "txns", "Transaction Type Updated": "txns",  # "Transactions updated"
+    "Transaction Status": "txnstatus",                                         # shown separately
+    "Invoice Created": "invoices", "Invoice Bulk Edited": "invoices",
+    "Entity Created": "entities", "Recon Processed": "recon",
+    "Vendor Mismatch Resolved": "vmr", "Mapping Completed": "mapping",
+    "Delete": "deletes",                       # work
+    "Login": "logins", "Dashboard Viewed": "views",   # engagement only (not active)
+}
+_STREAK_WORK_BUCKETS = {"txns", "invoices", "entities", "recon", "vmr", "mapping", "deletes"}
+
+# Activity Score weighting: per event per day -> weight * min(count, cap_per_day),
+# summed over the last 28 days and all events. Max 315 pts/day. Uses the raw
+# event-table counts for all 14 events (from _ACT_EVENTS).
+_ACTIVITY_SCORE = {
+    "Login": (1, 1), "Dashboard Viewed": (1, 4), "Upload": (5, 10), "Delete": (1, 5),
+    "Transaction Status": (1, 20), "Transaction Ledger Updated": (2, 15),
+    "Transaction Type Updated": (2, 15), "Entity Created": (1, 20),
+    "Invoice Created": (3, 10), "Invoice Bulk Edited": (3, 5),
+    "Vendor Mismatch Resolved": (4, 10), "Recon Processed": (4, 5),
+    "Accounting Sync": (8, 5), "Mapping Completed": (10, 1),
+}
+
+def _activity_scores():
+    """Per-account Activity Score over the last 28 days: sum over days & events of
+    weight * min(daily_count, cap_per_day). One vectorized pass over the in-memory
+    _ACT_EVENTS (no DB). Returns {account_id: score}."""
+    today = pd.Timestamp(date.today()).normalize()
+    start = today - pd.Timedelta(days=27)
+    ev = _ACT_EVENTS
+    if ev is None or len(ev) == 0:
+        return {}
+    e = ev[(ev["event_time"] >= start) & (ev["event_time"] < today + pd.Timedelta(days=1))
+           & (ev["event_name"].isin(_ACTIVITY_SCORE))].dropna(subset=["account_id"]).copy()
+    if len(e) == 0:
+        return {}
+    e["_d"] = e["event_time"].dt.normalize()
+    daily = e.groupby(["account_id", "_d", "event_name"]).size().reset_index(name="n")
+    daily["w"]   = daily["event_name"].map(lambda x: _ACTIVITY_SCORE[x][0])
+    daily["cap"] = daily["event_name"].map(lambda x: _ACTIVITY_SCORE[x][1])
+    daily["pts"] = daily["w"] * daily[["n", "cap"]].min(axis=1)
+    return daily.groupby("account_id")["pts"].sum().astype(int).to_dict()
+
+def _recent_event_lookup():
+    """Per (account_id, day) counts of the streak's event-table events for the last
+    28 days, computed ONCE from the in-memory _ACT_EVENTS so _usage_28 is a cheap
+    dict lookup per customer (no DB, no 124k-row rescan per account)."""
+    today = pd.Timestamp(date.today()).normalize()
+    start = today - pd.Timedelta(days=27)
+    ev = _ACT_EVENTS
+    if ev is None or len(ev) == 0:
+        return {}
+    e = ev[(ev["event_time"] >= start) & (ev["event_time"] < today + pd.Timedelta(days=1))].copy()
+    e["_b"] = e["event_name"].map(_STREAK_EVENT_BUCKET)
+    e = e.dropna(subset=["_b", "account_id"])
+    if len(e) == 0:
+        return {}
+    e["_d"] = e["event_time"].dt.normalize()
+    lu = {}
+    for (ac, d, b), n in e.groupby(["account_id", "_d", "_b"]).size().items():
+        lu.setdefault(ac, {}).setdefault(d, {})[b] = int(n)
+    return lu
+
+def _usage_28(email, ev_lu):
     """Usage in the last 28 days for a customer's account. Returns
-    (active_days_count, streak). `streak` encodes 28 days as ';'-joined tokens
-    "on,uploads,syncs,items,views" (index 0 = today .. 27 = today-27d): on=1 when
-    there was any upload OR sync that day; uploads = sum of total_uploads (all
-    upload types, NOT syncs); syncs = number of sync events; items = sum of
-    items_count for that day; views = count of "Dashboard Viewed" events that day
-    (from the new aia_session_events tracking — display-only, does NOT affect
-    `on`/`active`, matching Customer Activity Cohort's account-id bridge but
-    otherwise independent of Upload/Sync). The grid renders dots + a per-day
-    tooltip from this."""
+    (active_days_count, streak). `streak` encodes 28 days as ';'-joined 13-field
+    tokens (index 0 = today .. 27 = today-27d):
+      on,uploads,syncs,items,views,txns,entities,recon,vmr,mapping,invoices,deletes,logins,txnstatus
+    on=1 (ACTIVE) when there was ANY event that day — an upload, an accounting
+    sync, any work event (transactions / entities / invoices / recon /
+    vendor-mismatch / mapping / delete), OR a presence event (login /
+    dashboard-viewed). The grid colours the dot: green=accounting sync,
+    yellow=any other event, grey=nothing."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
-    blank = ";".join(["0,0,0,0,0"] * 28)
+    blank = ";".join([",".join(["0"] * 14)] * 28)
     if ac is None:
         return 0, blank
     start = today - pd.Timedelta(days=27)
-    active = set(); uploads = {}; syncs = {}; items = {}; views = {}
+    uploads = {}; syncs = {}; items = {}
     if "date" in _UPL.columns:
         u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)].copy()
         if len(u) and "total_uploads" in u.columns:
             u["_d"] = u["date"].dt.normalize()
-            active |= set(u[u["total_uploads"].fillna(0) > 0]["_d"])
             uploads = u.groupby("_d")["total_uploads"].sum().to_dict()
     if "event_date" in _SYN.columns:
         sy = _SYN[(_SYN["account_id"] == ac) & (_SYN["event_date"] >= start) & (_SYN["event_date"] <= today)].copy()
         if len(sy):
             sy["_d"] = sy["event_date"].dt.normalize()
             if "items_count" in sy.columns:
-                active |= set(sy[sy["items_count"].fillna(0) > 0]["_d"])
                 items = sy.groupby("_d")["items_count"].sum().to_dict()
             syncs = sy.groupby("_d").size().to_dict()
-    if len(_DVIEW_EVENTS):
-        dv = _DVIEW_EVENTS[(_DVIEW_EVENTS["account_id"] == ac)
-                           & (_DVIEW_EVENTS["event_time"] >= start)
-                           & (_DVIEW_EVENTS["event_time"] < today + pd.Timedelta(days=1))]
-        if len(dv):
-            views = dv.groupby(dv["event_time"].dt.normalize()).size().to_dict()
+    acc_ev = ev_lu.get(ac, {})
+    active = 0
     toks = []
     for i in range(28):
         d = today - pd.Timedelta(days=i)
-        toks.append("%d,%d,%d,%d,%d" % (1 if d in active else 0, int(uploads.get(d, 0) or 0),
-                                        int(syncs.get(d, 0) or 0), int(items.get(d, 0) or 0),
-                                        int(views.get(d, 0) or 0)))
-    return len(active), ";".join(toks)
+        up = int(uploads.get(d, 0) or 0); sc = int(syncs.get(d, 0) or 0); it = int(items.get(d, 0) or 0)
+        ce = acc_ev.get(d, {})
+        txn = ce.get("txns", 0); ent = ce.get("entities", 0); rec = ce.get("recon", 0)
+        vmr = ce.get("vmr", 0); mp = ce.get("mapping", 0); inv = ce.get("invoices", 0)
+        dele = ce.get("deletes", 0); log = ce.get("logins", 0); vw = ce.get("views", 0)
+        ts = ce.get("txnstatus", 0)   # Transaction Status (shown separately from "Transactions updated")
+        # active = ANY event that day, presence (login / dashboard-viewed) included
+        on = 1 if (up or sc or txn or ts or ent or rec or vmr or mp or inv or dele or log or vw) else 0
+        active += on
+        toks.append("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
+            on, up, sc, it, vw, txn, ent, rec, vmr, mp, inv, dele, log, ts))
+    return active, ";".join(toks)
 
 
 def _va_mrr(record_ids):
@@ -1799,7 +1867,7 @@ def _aia_ops_refresh(state):
 # ═══════════════════════════════════════════════════════════════════
 
 def _apply_usage_filter(state):
-    """Filter the Customer Usage & Health grid by Deal Name / CSM / Stage / Deal Owner."""
+    """Filter the Customer Usage & Health grid by Deal Name / CSM / Stage / Deal Owner / Status."""
     d = state.cs_usage_all
     if d is None or len(d) == 0:
         state.cs_usage_json = grid_payload_b64(pd.DataFrame())
@@ -1816,13 +1884,18 @@ def _apply_usage_filter(state):
     _ow = _sel(state.cs_usage_owner)
     if _ow:
         d = d[d["Deal Owner"].isin(_ow)]
+    # Status includes "" (empty box) as a real option — use the raw list, since
+    # _sel() strips "" (its "no filter" sentinel).
+    _sta = state.cs_usage_status if isinstance(state.cs_usage_status, list) else []
+    if _sta:
+        d = d[d["Status"].isin(_sta)]
     d = d.drop(columns=["Deal Owner"], errors="ignore")   # filter-only, never shown
     state.cs_usage_json = grid_payload_b64(
         d, sort_default_col="Usage Active Days (28d)",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
         center_cols=["Paid On", "Int Date", "Due On", "Cadence", "Status"],
         date_cols=["Paid On", "Int Date", "Due On"],
-        heat_cols={"Usage Active Days (28d)": "green"},
+        heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
 def _merge_cohort_pct_count(cnt_df, pct_df):
@@ -1869,8 +1942,11 @@ def _build_cohort_tables(state):
                                  center_all=True, heat_cols=_coh_heat, autosize=True)
                 if len(m) else grid_payload_b64(pd.DataFrame()))
 
-    # Customer Usage Cohort (Accounting Sync & Uploads only) — merged % (count).
-    cnt_df, pct_df = _usage_cohort(deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
+    # Customer Usage Cohort (Accounting Sync only) — merged % (count). Passing
+    # event_filter=["Accounting Sync"] resolves to _ACTIVE_WEEKS_SYN (sync weeks
+    # from the unbounded _SYN table), so uploads no longer count here.
+    cnt_df, pct_df = _usage_cohort(event_filter=["Accounting Sync"],
+                                   deal_filter=_act_deal, stage_filter=_act_stage, csm_filter=_act_csm)
     state.cs_cohort_count_json = _merged_json(cnt_df, pct_df)
 
     # Customer Activity Cohort — same shape, sourced from the aia_*_events tables
@@ -2116,10 +2192,14 @@ def _cs_refresh(state):
     # filters, so the top-nav CS Owner / Deal Name filters must not scope it (or
     # a stale top selection leaves the usage dropdowns limited to that deal).
     usage_base = _AIA[_AIA["payment_date"].notna()]
+    _ev_lu = _recent_event_lookup()   # one in-memory pre-group; no DB, no per-customer rescan
+    _scores = _activity_scores()      # {account_id: 28d weighted Activity Score}
     usage_rows = []
     for _, row in usage_base.iterrows():
         email  = _clean_email(row.get("login_email_id",""))
-        active_days, streak = _usage_28(email)
+        active_days, streak = _usage_28(email, _ev_lu)
+        _acct = _EMAIL_ACCT.get(email)
+        activity_score = int(_scores.get(_acct, 0)) if _acct else 0
         intd = row.get("integration_done_date")
         dsince = (today.normalize() - pd.Timestamp(intd).normalize()).days if pd.notna(intd) else 0
         cad = _cadence_of(row)
@@ -2135,6 +2215,7 @@ def _cs_refresh(state):
             "Due On":          _due_on(row.get("record_id")),
             "Cadence":         cad,
             "Usage Active Days (28d)": active_days,
+            "Activity Score": activity_score,
             "Usage Streak Last 28D (desc)": streak,
             # Status is blank when not yet integrated (no days-since basis), matching PBI
             "Status": (_customer_status_m(_acct_for(email),
@@ -2679,7 +2760,7 @@ cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_mrr_exact="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
 cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
-cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]
+cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]; cs_usage_status=[]
 cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]; cs_usage_owner_list=[]
 cs_renewal_window_json=""
 # Customer Activity Cohort (14 tracked events across the 5 aia_*_events tables)
@@ -2774,6 +2855,7 @@ cs_usage_deal_ms  = _ms_json([], [])
 cs_usage_csm_ms   = _ms_json([], [])
 cs_usage_stage_ms = _ms_json([], [])
 cs_usage_owner_ms = _ms_json([], [])
+cs_usage_status_ms = _ms_json([], [])
 cs_activity_event_ms = _ms_json(cs_activity_event_list, [])
 cs_activity_deal_ms  = _ms_json(cs_activity_deal_list,  [])
 cs_activity_stage_ms = _ms_json(cs_activity_stage_list, [])
@@ -2874,6 +2956,7 @@ _MS_DISPATCH = {
     "cs_usage_csm":   ("cs_usage_csm",           "usage"),
     "cs_usage_stage": ("cs_usage_stage",         "usage"),
     "cs_usage_owner": ("cs_usage_owner",         "usage"),
+    "cs_usage_status": ("cs_usage_status",       "usage"),
     "cs_activity_event": ("cs_activity_event",   "activity"),
     "cs_activity_deal":  ("cs_activity_deal",    "activity"),
     "cs_activity_stage": ("cs_activity_stage",   "activity"),
@@ -2935,24 +3018,29 @@ def _sync_ms(state):
         cs_deal_lov = cs_deal_list
     state.cs_deal_ms        = _ms_json(cs_deal_lov, state.cs_selected_deal)
 
-    # Customer Usage & Health: Deal Name / CSM / Stage / Deal Owner cross-filter
+    # Customer Usage & Health: Deal Name / CSM / Stage / Deal Owner / Status cross-filter
     _ua = state.cs_usage_all
     def _ulov(target):
         d = _ua
         if d is None or len(d) == 0:
             return []
         for col, sv in (("Deal Name", state.cs_usage_deal), ("CSM", state.cs_usage_csm),
-                        ("Stage", state.cs_usage_stage), ("Deal Owner", state.cs_usage_owner)):
+                        ("Stage", state.cs_usage_stage), ("Deal Owner", state.cs_usage_owner),
+                        ("Status", state.cs_usage_status)):
             if col == target:
                 continue
-            s = _sel(sv)
+            # Status keeps its raw list so the "" (empty-box) option isn't stripped
+            # by _sel; the other columns normalise through _sel as usual.
+            s = (sv if isinstance(sv, list) else []) if col == "Status" else _sel(sv)
             if s:
                 d = d[d[col].isin(s)]
         return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.cs_usage_deal_ms  = _ms_json(_ulov("Deal Name"),  state.cs_usage_deal)
-    state.cs_usage_csm_ms   = _ms_json(_ulov("CSM"),        state.cs_usage_csm)
-    state.cs_usage_stage_ms = _ms_json(_ulov("Stage"),      state.cs_usage_stage)
-    state.cs_usage_owner_ms = _ms_json(_ulov("Deal Owner"), state.cs_usage_owner)
+    state.cs_usage_deal_ms   = _ms_json(_ulov("Deal Name"),  state.cs_usage_deal)
+    state.cs_usage_csm_ms    = _ms_json(_ulov("CSM"),        state.cs_usage_csm)
+    state.cs_usage_stage_ms  = _ms_json(_ulov("Stage"),      state.cs_usage_stage)
+    state.cs_usage_owner_ms  = _ms_json(_ulov("Deal Owner"), state.cs_usage_owner)
+    # empty Status "" is included as a real, selectable option (an empty box)
+    state.cs_usage_status_ms = _ms_json(_ulov("Status"), state.cs_usage_status)
 
     # VA Deal Name options depend on the selected Recurring Type(s)
     _vrt = _sel(state.vaf_selected_rectype)
@@ -3094,7 +3182,7 @@ def on_reset_filters(state, *_):
     state.va_channel_filter  = "All"; state.va_filter_label  = ""
     # CS Finance
     state.cs_selected_owner  = []; state.cs_selected_deal = []; state.cs_selected_rectype = []
-    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []
+    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []; state.cs_usage_status = []
     state.cs_activity_event = []; state.cs_activity_deal = []; state.cs_activity_stage = []; state.cs_activity_csm = []
     # Marketing
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""

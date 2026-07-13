@@ -292,8 +292,9 @@ _GRID_HTML = r"""<!DOCTYPE html>
         overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   .dot{ display:inline-block; width:11px; height:11px; border-radius:50%;
         margin:0 1px; vertical-align:middle; cursor:default; }
-  .dot.on{ background:#16a34a; }
-  .dot.off{ background:#d8dee6; }
+  .dot.on{ background:#eab308; }     /* yellow: any non-sync event that day */
+  .dot.off{ background:#d8dee6; }    /* grey: no activity */
+  .dot.sync{ background:#16a34a; }   /* green: a day with an accounting sync */
   td.streakcell{ text-align:left; }
   /* custom per-day tooltip — uniform white text, stays put for screenshots */
   #streaktip{ position:fixed; display:none; z-index:99999; background:#1a3a6b;
@@ -432,11 +433,17 @@ function streakHtml(s){
   let h='<span class="streak">', copytxt='';
   for(let i=0;i<days.length;i++){
     const p=(days[i]||"").split(",");
-    const on=p[0]==="1";
-    copytxt += on ? "●" : "○";   // filled / hollow circle for copy-paste
-    h+='<span class="dot '+(on?"on":"off")+'" data-i="'+i+'" data-on="'+(on?1:0)
+    const on=p[0]==="1";                       // active: ANY event that day
+    const sync=(+(p[2]||0))>0;                 // accounting sync -> green
+    const cls = sync?"sync":(on?"on":"off");   // green=sync, yellow=any other event, grey=none
+    copytxt += (on||sync) ? "●" : "○";   // filled / hollow circle for copy-paste
+    h+='<span class="dot '+cls+'" data-i="'+i+'" data-on="'+(on?1:0)
       +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)
-      +'" data-views="'+(p[4]||0)+'"></span>';
+      +'" data-views="'+(p[4]||0)+'" data-txns="'+(p[5]||0)+'" data-entities="'+(p[6]||0)
+      +'" data-recon="'+(p[7]||0)+'" data-vmr="'+(p[8]||0)+'" data-mapping="'+(p[9]||0)
+      +'" data-invoices="'+(p[10]||0)+'" data-deletes="'+(p[11]||0)+'" data-logins="'+(p[12]||0)
+      +'" data-txnstatus="'+(p[13]||0)
+      +'"></span>';
   }
   // hidden but copyable string of the streak (dots are CSS-only and don't copy)
   return h+'<span class="streak-copy">'+copytxt+'</span></span>';
@@ -461,12 +468,20 @@ function streakHtml(s){
     clearTimeout(hideT);
     var i=+dot.getAttribute("data-i");
     var html=dateLabel(i)+(i===0?" (today)":"");
-    if(dot.getAttribute("data-on")==="1"){
-      html+=metricLine("Uploads", dot.getAttribute("data-up"))
-           +metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))
-           +metricLine("Items Synced", dot.getAttribute("data-items"));
-    }
-    html+=metricLine("Dashboard Viewed", dot.getAttribute("data-views"));
+    var on=dot.getAttribute("data-on")==="1";
+    html+=(on?metricLine("Uploads", dot.getAttribute("data-up")):"")
+         +metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))   // ungated so a purple (sync) dot always explains itself
+         +(on?metricLine("Items Synced", dot.getAttribute("data-items")):"")
+         +metricLine("Transaction status", dot.getAttribute("data-txnstatus"))
+         +metricLine("Transactions updated", dot.getAttribute("data-txns"))
+         +metricLine("Entities created", dot.getAttribute("data-entities"))
+         +metricLine("Invoices created / bulk-edited", dot.getAttribute("data-invoices"))
+         +metricLine("Recon processed", dot.getAttribute("data-recon"))
+         +metricLine("Vendor mismatches resolved", dot.getAttribute("data-vmr"))
+         +metricLine("Mapping completed", dot.getAttribute("data-mapping"))
+         +metricLine("Deletes", dot.getAttribute("data-deletes"))
+         +metricLine("Logins", dot.getAttribute("data-logins"))
+         +metricLine("Dashboard Viewed", dot.getAttribute("data-views"));
     t.innerHTML=html;
     t.style.display="block";
     var r=dot.getBoundingClientRect(), tr=t.getBoundingClientRect();
