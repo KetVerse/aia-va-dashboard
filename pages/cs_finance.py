@@ -166,7 +166,7 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Customer Usage & Health**
+**Customer Usage & Health** <|ⓘ|text|hover_text={cs_usage_tip}|class_name=info-ico|>
 
 <|layout|columns=1 1 1 1 1|gap=12px|
 <|part|

@@ -2791,6 +2791,12 @@ cs_ret_tip = ("Customer Retention Matrix\n"
               "• Cohort Spread: Based on recurring customers by term\n"
               "• Fresh Renewals: Customers who paid that month\n"
               "• Total: Sum of recurring customers")
+cs_usage_tip = ("Usage Streak — last 28 days\n"
+                "• Green = Accounting Sync that day\n"
+                "• Yellow = any other event (uploads, transactions, invoices, recon, logins…)\n"
+                "• Grey = not active (no event that day)\n"
+                "Usage Active Days (28d) = number of active days (green + yellow); grey days are not active.\n"
+                "Hover a dot for that day's event counts.")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Fresh Renewals: Monthly cash collected\n"
