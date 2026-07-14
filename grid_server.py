@@ -29,7 +29,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
                      heat_by_row=False, link_cols=None, date_cols=None, header_tips=None,
-                     max_height=None):
+                     max_height=None, tip_cols=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -101,6 +101,14 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
             if display_col in cols and id_col in cols:
                 link_map[display_col] = {"idCol": id_col, "baseUrl": base_url}
                 hidden_cols.add(id_col)
+    # tip_cols: {display_col: source_col} — display_col's cell gets a native title=
+    # from the (hidden) source_col value on that row (e.g. the list of deal names).
+    tip_map = {}
+    if tip_cols:
+        for display_col, src_col in tip_cols.items():
+            if display_col in cols and src_col in cols:
+                tip_map[display_col] = src_col
+                hidden_cols.add(src_col)
     hidden = [bool(cols[i] in hidden_cols) for i in range(len(cols))]
     date_set = set(date_cols or [])    # cols of "dd-MMM-yy" strings -> sort chronologically
     date_flag = [bool(cols[i] in date_set) for i in range(len(cols))]
@@ -115,7 +123,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "firstW": first_col_w, "rowHeat": row_heat_cols or {},
                "heatByRow": bool(heat_by_row), "linkCols": link_map,
                "hidden": hidden, "dateCols": date_flag, "headerTips": header_tip_list,
-               "maxHeight": max_height}
+               "maxHeight": max_height, "tipCols": tip_map}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -509,6 +517,13 @@ function body(){
   // build a col-name→index map for resolving id columns in link_cols
   const colIdx={};
   cols.forEach((c,i)=>{ colIdx[c]=i; });
+  const tipCols=DATA.tipCols||{};
+  function tipAttr(colName, r){        // native title= from a hidden source column
+    const src=tipCols[colName]; if(!src) return "";
+    const idx=colIdx[src]; if(idx===undefined) return "";
+    const t=String(r[idx]==null?"":r[idx]).trim();
+    return t ? ' title="'+t.replace(/"/g,"&quot;")+'"' : "";
+  }
   const maxes={};
   bars.forEach((on,i)=>{ if(on) maxes[i]=colMax(i); });
   let rows=sortRows(DATA.rows);
@@ -573,7 +588,7 @@ function body(){
              +'<span class="bar-fill" style="width:'+w+'%;background:'+bc+'"></span>'
              +'<span class="bar-val">'+fmt(v,num[i])+'</span></span></td>';
       } else {
-        html+='<td class="'+cls(i)+'"'+style+'>'+fmt(v,num[i])+'</td>';
+        html+='<td class="'+cls(i)+'"'+style+tipAttr(colName,r)+'>'+fmt(v,num[i])+'</td>';
       }
     });
     html+="</tr>";

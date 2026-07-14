@@ -638,8 +638,9 @@ def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=Non
 
 def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_filter=None):
     """Customer Usage Cohort (last 12 integration weeks). Rows = integration-week
-    Monday; columns = Integrated (cohort size) + W0..W9 (active accounts that had
-    any upload/sync activity in that week-offset window). Returns (counts_df,
+    Monday; columns = Integrated (cohort size) + W1..W12 (active accounts that had
+    any upload/sync activity in that week-offset window; W1 = the integration week
+    itself). The current in-progress calendar week is excluded. Returns (counts_df,
     pct_df), each with a pinned Total row. Replicates the DAX cohort measures.
 
     event_filter (Customer Activity Cohort mode — used by the new event-driven
@@ -661,7 +662,7 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
 
     deal_filter / stage_filter / csm_filter: optional lists restricting the
     cohort base by Deal Name / Deal Stage / CSM (cs_owner) before computing
-    W0..W11 — used by the Customer Activity Cohort's filter row. None/[] means
+    W1..W12 — used by the Customer Activity Cohort's filter row. None/[] means
     no restriction (matches every prior call site, including the legacy one
     above)."""
     _OLD_SOURCED = {"Upload": _ACTIVE_WEEKS_UPL, "Accounting Sync": _ACTIVE_WEEKS_SYN}
@@ -694,10 +695,14 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
         return pd.DataFrame(), pd.DataFrame()
     iw = base["integration_done_date"].dt.normalize()
     base["iw"] = iw - pd.to_timedelta(iw.dt.weekday, unit="D")     # Monday
-    weeks = sorted([w for w in base["iw"].dropna().unique()])[-12:]  # last 12 weeks
+    today = pd.Timestamp(date.today()).normalize()
+    # last COMPLETE calendar week (its Sunday has already passed). The current
+    # in-progress week is dropped from both the integration-week rows AND the
+    # offset columns so every shown number reflects a full week of data.
+    last_complete_mon = (today - pd.Timedelta(days=today.weekday())) - pd.Timedelta(days=7)
+    weeks = sorted([w for w in base["iw"].dropna().unique() if w <= last_complete_mon])[-12:]
     if not weeks:
         return pd.DataFrame(), pd.DataFrame()
-    today = pd.Timestamp(date.today())
     OFFS = list(range(12))
 
     cnt_rows, pct_rows = [], []
@@ -727,8 +732,8 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
         prow = {"Integration Week": label, "Integrated": size}
         for o in OFFS:
             cws = wk + pd.Timedelta(days=o * 7)
-            col = f"W{o}"
-            if cws > today:
+            col = f"W{o+1}"                 # W1 = the integration week itself (1-indexed)
+            if cws > last_complete_mon:     # current in-progress / future week -> blank
                 crow[col] = ""; prow[col] = ""
                 continue
             active = sum(1 for a in deal_accts if a and (a, cws) in weeks_set)
@@ -741,7 +746,7 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
     cnt_tot = {"Integration Week": "Total", "Integrated": tot_int}
     pct_tot = {"Integration Week": "Total", "Integrated": tot_int}
     for o in OFFS:
-        col = f"W{o}"
+        col = f"W{o+1}"
         cnt_tot[col] = tot_act[o] if tot_valid[o] else ""
         _tp = round(tot_act[o] / tot_size[o] * 100) if (tot_valid[o] and tot_size[o]) else 0
         pct_tot[col] = (f"{_tp}%" if _tp else "")   # blank when 0%
@@ -904,7 +909,7 @@ def _q(url, sql, _tries=5, statement_timeout_ms=None):
 # account_id, event_name[, items_count]) so Postgres can answer via an
 # index-only scan — no `email`, no `raw` jsonb, no SELECT *. This project had a
 # Disk IO Budget outage from an unbounded/malformed query; every query here is
-# bounded to a rolling 90-day window (event_time >= now() - interval '90 days')
+# bounded to a rolling 100-day window (event_time >= now() - interval '100 days')
 # and account_id IS NOT NULL. See OPS notes for the required indexes:
 #   CREATE INDEX idx_session_events_cohort         ON aia_session_events        (event_time) INCLUDE (account_id, event_name);
 #   CREATE INDEX idx_upload_events_cohort          ON aia_upload_events         (event_time) INCLUDE (account_id, event_name);
@@ -939,7 +944,7 @@ def _load_activity_events():
                           if key == "session" else "account_id IS NOT NULL")
             out[key] = _q(SUPABASE_URL,
                 f"SELECT {collist} FROM public.{table} "
-                f"WHERE event_time >= now() - interval '90 days' AND {acct_where}",
+                f"WHERE event_time >= now() - interval '100 days' AND {acct_where}",
                 statement_timeout_ms=10000)
         except Exception as ex:
             print(f"[WARN] activity event table {table} failed: {ex} -- using empty frame")
@@ -1933,7 +1938,7 @@ def _build_cohort_tables(state):
     _act_deal  = _sel(state.cs_activity_deal)
     _act_stage = _sel(state.cs_activity_stage)
     _act_csm   = _sel(state.cs_activity_csm)
-    _coh_heat = {f"W{o}": "green" for o in range(12)}
+    _coh_heat = {f"W{o+1}": "green" for o in range(12)}
 
     def _merged_json(cnt_df, pct_df):
         m = _merge_cohort_pct_count(cnt_df, pct_df)
@@ -2110,6 +2115,8 @@ def _cs_refresh(state):
 
     _excl_uc = ["Churned","CS Parked","Product Blocked","Integration Failed","Integration Done"]
     t1_rows, t2_rows, t3_rows = [], [], []
+    _today_ts = pd.Timestamp(date.today()).normalize()
+    _month_start_ts = _today_ts.replace(day=1)   # 1st of the current month (for Renewals Collected MTD)
     for csm in sorted(df["cs_owner"].dropna().unique()):
         c   = df[df["cs_owner"]==csm]
         cp  = c[c["payment_date"].notna() & (c["module_type"]=="AIA Paid")]
@@ -2119,10 +2126,24 @@ def _cs_refresh(state):
                        & ~c["deal_stage"].isin(_excl_uc)]["record_id"].nunique()
         int_failed = mod[mod["deal_stage"]=="Integration Failed"]["record_id"].nunique()
         integrated = mod[mod["deal_stage"]=="Integration Done"]["record_id"].nunique()
+        # Renewals Collected (MTD): every Renewal line item (payment) of this CSM's
+        # deals with date_paid in the current month. NOT de-duped by deal — a deal
+        # that pays twice this month (e.g. clearing last month's overdue AND paying
+        # the current cycle) counts as 2 collections.
+        _c_rids = set(c["record_id"].dropna())
+        _ren = _AIA_LI[_AIA_LI["record_id"].isin(_c_rids)
+                       & (_AIA_LI["recurring_type"] == "Renewal")
+                       & _AIA_LI["date_paid"].notna()
+                       & (_AIA_LI["date_paid"] >= _month_start_ts)
+                       & (_AIA_LI["date_paid"] <= _today_ts)]
+        # tooltip: one line per payment "<deal> — <dd Mon>" so a double payment
+        # shows twice (matching the count) with its paid date.
+        _ren_s = _ren.sort_values("date_paid")
+        _ren_deals = [f'{str(dn) if pd.notna(dn) else "(unnamed)"} — {pd.Timestamp(dp).strftime("%d %b")}'
+                      for dn, dp in _ren_s[["deal_name", "date_paid"]].itertuples(index=False)]
         t1_rows.append({
             "CSM":       csm,
             "AIA Paid":  cp["record_id"].nunique(),
-            "Under CS":  int(int_due + int_failed + integrated),   # DAX: ID + IF + Integrated
             "Int Due":   int(int_due),
             "Int Failed":int(int_failed),
             "Integrated":int(integrated),
@@ -2138,6 +2159,8 @@ def _cs_refresh(state):
                  ((c["deal_stage"]=="Ready for Renewal") &
                   (c["billing_cycle"]!="Monthly" if "billing_cycle" in c.columns else True)))
             ]["record_id"].nunique(),
+            "Renewals Collected (MTD)": len(_ren),
+            "Renewals Collected Deals": "\n".join(_ren_deals),   # hidden — tooltip source
             "CS Parked": cp[cp["deal_stage"]=="CS Parked"]["record_id"].nunique(),
             "Churned":   c[c["deal_stage"]=="Churned"]["record_id"].nunique(),
         })
@@ -2172,7 +2195,8 @@ def _cs_refresh(state):
 
     state.cs_csm_aia_json = grid_payload_b64(
         _with_total(t1_rows, "CSM"), total_id_col="CSM", sort_default_col="AIA Paid",
-        blank_zeros=True, bar_cols=["Int Due"], bar_color="#f4a98c", autosize=True)
+        blank_zeros=True, bar_cols=["Int Due"], bar_color="#f4a98c", autosize=True,
+        tip_cols={"Renewals Collected (MTD)": "Renewals Collected Deals"})
     state.cs_csm_eng_json = grid_payload_b64(
         _with_total(t2_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
         blank_zeros=True, autosize=True)
