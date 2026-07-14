@@ -2126,21 +2126,29 @@ def _cs_refresh(state):
                        & ~c["deal_stage"].isin(_excl_uc)]["record_id"].nunique()
         int_failed = mod[mod["deal_stage"]=="Integration Failed"]["record_id"].nunique()
         integrated = mod[mod["deal_stage"]=="Integration Done"]["record_id"].nunique()
-        # Renewals Collected (MTD): every Renewal line item (payment) of this CSM's
-        # deals with date_paid in the current month. NOT de-duped by deal — a deal
-        # that pays twice this month (e.g. clearing last month's overdue AND paying
-        # the current cycle) counts as 2 collections.
+        # Renewals Collected (MTD): ₹ collected from every Renewal line item of this
+        # CSM's deals with date_paid in the current month. NOT de-duped by deal — a
+        # deal that pays twice this month (e.g. clearing last month's overdue AND the
+        # current cycle) contributes both payments.
+        # Amount per line item = unit_price, but for MONTHLY billing the unit_price
+        # is the per-month price so it's unit_price × term (# months paid) — same
+        # rule as the contract-value calc in export_renewed.py.
         _c_rids = set(c["record_id"].dropna())
         _ren = _AIA_LI[_AIA_LI["record_id"].isin(_c_rids)
                        & (_AIA_LI["recurring_type"] == "Renewal")
                        & _AIA_LI["date_paid"].notna()
                        & (_AIA_LI["date_paid"] >= _month_start_ts)
-                       & (_AIA_LI["date_paid"] <= _today_ts)]
-        # tooltip: one line per payment "<deal> — <dd Mon>" so a double payment
-        # shows twice (matching the count) with its paid date.
+                       & (_AIA_LI["date_paid"] <= _today_ts)].copy()
+        _up   = _ren["unit_price"].fillna(0)
+        _term = _ren["term"].where(_ren["term"] > 0, 1).fillna(1)
+        _mon  = _ren["billing_frequency"].astype(str).str.lower().str.strip() == "monthly"
+        _ren["_amt"] = _up.where(~_mon, _up * _term)
+        _ren_total = float(_ren["_amt"].sum())
+        # tooltip: one line per payment "<deal> — ₹<amt> (dd Mon)" so a double
+        # payment shows twice, and the lines add up to the column total.
         _ren_s = _ren.sort_values("date_paid")
-        _ren_deals = [f'{str(dn) if pd.notna(dn) else "(unnamed)"} — {pd.Timestamp(dp).strftime("%d %b")}'
-                      for dn, dp in _ren_s[["deal_name", "date_paid"]].itertuples(index=False)]
+        _ren_deals = [f'{(str(dn) if pd.notna(dn) else "(unnamed)")} — ₹{int(round(am)):,} ({pd.Timestamp(dp).strftime("%d %b")})'
+                      for dn, am, dp in _ren_s[["deal_name", "_amt", "date_paid"]].itertuples(index=False)]
         t1_rows.append({
             "CSM":       csm,
             "AIA Paid":  cp["record_id"].nunique(),
@@ -2159,7 +2167,7 @@ def _cs_refresh(state):
                  ((c["deal_stage"]=="Ready for Renewal") &
                   (c["billing_cycle"]!="Monthly" if "billing_cycle" in c.columns else True)))
             ]["record_id"].nunique(),
-            "Renewals Collected (MTD)": len(_ren),
+            "Renewals Collected ₹ (MTD)": round(_ren_total),
             "Renewals Collected Deals": "\n".join(_ren_deals),   # hidden — tooltip source
             "CS Parked": cp[cp["deal_stage"]=="CS Parked"]["record_id"].nunique(),
             "Churned":   c[c["deal_stage"]=="Churned"]["record_id"].nunique(),
@@ -2196,7 +2204,7 @@ def _cs_refresh(state):
     state.cs_csm_aia_json = grid_payload_b64(
         _with_total(t1_rows, "CSM"), total_id_col="CSM", sort_default_col="AIA Paid",
         blank_zeros=True, bar_cols=["Int Due"], bar_color="#f4a98c", autosize=True,
-        tip_cols={"Renewals Collected (MTD)": "Renewals Collected Deals"})
+        tip_cols={"Renewals Collected ₹ (MTD)": "Renewals Collected Deals"})
     state.cs_csm_eng_json = grid_payload_b64(
         _with_total(t2_rows, "CSM"), total_id_col="CSM", sort_default_col="ID + RFR + Renewed",
         blank_zeros=True, autosize=True)
