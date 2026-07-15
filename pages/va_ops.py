@@ -103,6 +103,15 @@ EOM Estimate
 <iframe src="/grid/va_utm" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
 |>
 
+<|part|class_name=chart-card|
+**AM Incentive Tracker**
+
+<|part|class_name=gridholder gridholder-va_incentive|
+<|{va_incentive_json}|text|mode=raw|>
+|>
+<iframe src="/grid/va_incentive" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
+|>
+
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
 **Channel Distribution**  (click a slice to filter the page)

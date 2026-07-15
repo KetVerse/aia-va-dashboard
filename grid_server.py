@@ -576,8 +576,8 @@ function body(){
       } else if(stat[i]){
         const sv=String(v);
         const SMAP={"Active":"st-active","Collected":"st-active",
-                    "Risk of Churn":"st-risk","Overdue":"st-risk",
-                    "Inactive":"st-inactive","Pending":"st-inactive",
+                    "Risk of Churn":"st-risk","Pending":"st-risk",
+                    "Inactive":"st-inactive","Overdue":"st-inactive",
                     "Upcoming":"st-black","Churned":"st-churned"};
         const c=SMAP[sv]||"";
         html+='<td class="'+cls(i)+'"><span class="'+c+'">'+fmt(v,num[i])+'</span></td>';

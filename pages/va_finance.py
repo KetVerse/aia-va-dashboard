@@ -73,6 +73,26 @@ Due ±14 Days
 <iframe src="/grid/vaf_retention" class="grid-frame" style="width:100%;height:480px;border:none;"></iframe>
 |>
 
+<|layout|columns=1 1|gap=16px|
+<|part|class_name=chart-card|
+**Parked Customers — Reason × AM**
+
+<|part|class_name=gridholder gridholder-vaf_parked|
+<|{vaf_parked_json}|text|mode=raw|>
+|>
+<iframe src="/grid/vaf_parked" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**Churned Customers — Reason × AM**
+
+<|part|class_name=gridholder gridholder-vaf_churned|
+<|{vaf_churned_json}|text|mode=raw|>
+|>
+<iframe src="/grid/vaf_churned" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
+|>
+|>
+
 <|part|class_name=chart-card|
 **Accounts Receivable Tracker**
 

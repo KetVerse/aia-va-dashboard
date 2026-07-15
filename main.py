@@ -592,6 +592,56 @@ def _va_mrr(record_ids):
     return int((li["unit_price"] / term).sum())
 
 
+def _va_incentive(s, e):
+    """Per-AM incentive view for the selected date range [s, e]:
+      • One-time Collected = One-time line items paid in the range
+      • MRR Collected      = the AM's MRR bucket for the month(s) in range — each
+        RENEWAL line's monthly rate (unit_price/term) is SPREAD across its `term`
+        months from billing_start; we sum the slices whose month falls inside the
+        range (VA is operational, so MRR is earned in the months it covers, not
+        up-front). New-business lines are NOT tracked here.
+      • Total MRR = One-time Collected + MRR Collected
+    AM comes from va_live.am_owner; independent of the page's owner/campaign/
+    channel filters (only the date range applies)."""
+    li = _VA_LI
+    if li is None or len(li) == 0 or "recurring_type" not in li.columns:
+        return pd.DataFrame()
+    am_map = ({} if "am_owner" not in _VA.columns else
+              _VA.dropna(subset=["record_id"]).drop_duplicates("record_id")
+                 .set_index("record_id")["am_owner"].to_dict())
+    def _am(rid):
+        v = am_map.get(rid)
+        return v.strip() if (isinstance(v, str) and v.strip()) else "—"
+    sp, ep = s.to_period("M"), e.to_period("M")
+    onetime, mrr = {}, {}
+    ot = li[(li["recurring_type"] == "One-time") & li["date_paid"].notna()]
+    ot = ot[(ot["date_paid"] >= s) & (ot["date_paid"] <= e)]
+    for r in ot.itertuples():
+        onetime[_am(r.record_id)] = onetime.get(_am(r.record_id), 0) + float(r.unit_price or 0)
+    rec = li[li["recurring_type"] == "Renewal"].copy()
+    rec["bstart"] = rec["billing_start_date"].where(rec["billing_start_date"].notna(), rec["date_paid"])
+    rec = rec.dropna(subset=["bstart"])
+    for r in rec.itertuples():
+        term = int(r.term) if (pd.notna(r.term) and r.term and r.term > 0) else 1
+        rate = float(r.unit_price or 0) / term
+        bp = pd.Period(r.bstart, "M")
+        am = _am(r.record_id)
+        for k in range(term):
+            if sp <= (bp + k) <= ep:
+                mrr[am] = mrr.get(am, 0) + rate
+    ams = sorted(set(onetime) | set(mrr))
+    rows = [{"AM": am, "One-time Collected": round(onetime.get(am, 0)),
+             "MRR Collected": round(mrr.get(am, 0)),
+             "Total MRR": round(onetime.get(am, 0) + mrr.get(am, 0))} for am in ams]
+    t = pd.DataFrame(rows)
+    if len(t):
+        t = t.sort_values("Total MRR", ascending=False).reset_index(drop=True)
+        tot = t[["One-time Collected", "MRR Collected", "Total MRR"]].sum().to_dict()
+        tot["AM"] = "Total"
+        t = pd.concat([t, pd.DataFrame([tot])], ignore_index=True)
+    return t
+
+
 def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=None,
                    drop_zero_spend=False):
     """Marketing performance broken down by period (month/week): Spend, Leads,
@@ -1859,7 +1909,7 @@ def _aia_ops_refresh(state):
                            "Incentive Payout":inc_df["Incentive Payout"].sum()}
                 inc_df = pd.concat([inc_df, pd.DataFrame([tot_row])], ignore_index=True)
                 state.aia_incentive_json = grid_payload_b64(
-                    inc_df, "GM", sort_default_col="Incentive Payout",
+                    inc_df, "GM", sort_default_col="AIA+VA Revenue",
                     center_cols=["Achievement %", "Incentive Tier"],
                     bar_cols=["Gap (Prev Month)", "Incentive Payout"],
                     bar_color={"Gap (Prev Month)": "#f1a0a0", "Incentive Payout": "#c5e07a"},
@@ -2496,6 +2546,16 @@ def _va_ops_refresh(state):
                                          fixed=True, autosize=True, first_col_w=250,
                                          header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected cohort"})
 
+    _inc = _va_incentive(s, e)
+    state.va_incentive_json = (grid_payload_b64(_inc, total_id_col="AM",
+                               sort_default_col="Total MRR",
+                               autosize=True, first_col_w=220,
+                               center_cols=["One-time Collected", "MRR Collected", "Total MRR"],
+                               heat_cols={"Total MRR": "green"},
+                               header_tips={"MRR Collected": "Renewal MRR spread across the month(s) in the date filter",
+                                            "Total MRR": "One-time Collected + MRR Collected for the selected month(s)"})
+                               if len(_inc) else grid_payload_b64(pd.DataFrame()))
+
     def _rv(col,label,rcol):
         sub = _rng(df,col,s,e)
         if rcol not in sub.columns: return pd.DataFrame(columns=["Reason",label])
@@ -2527,9 +2587,9 @@ def _ar_build_base():
     """Full AR table across every VA deal with recurring line items.
     Status logic (non-churned):
       • overdue period = a due period (start ≤ today) with no covering line item
-      • Overdue  → the ONLY uncovered-due period is the current/most-recent one
-                   (clean record that just lapsed)
-      • Pending  → any older gap, or 2+ uncovered periods (accumulated dues)
+      • Pending  → the ONLY uncovered-due period is the current/most-recent one
+                   (clean record that just lapsed) — orange
+      • Overdue  → any older gap, or 2+ uncovered periods (accumulated dues) — red
       • Upcoming → fully paid up, next coverage ends within 14 days
       • Collected→ fully paid up, next coverage ends > 14 days out
     Dues/Outstanding: Overdue/Pending = uncovered periods × (span, unit_price);
@@ -2561,12 +2621,20 @@ def _ar_build_base():
         latest_span   = spans[-1]
         latest_price  = prices[-1] if prices else 0
 
+        # blank owner/AM/stage -> "—" (a real, selectable value) instead of "",
+        # which _sel() treats as "no filter" so the blank option can't filter.
         def _v(col):
             if rid in vshow.index and col in vshow.columns:
                 x = vshow.loc[rid, col]
-                return x if (isinstance(x, str) or pd.notna(x)) else ""
-            return ""
-        deal_name = _v("deal_name") or (g["deal_name"].iloc[0] if "deal_name" in g.columns else "")
+                if isinstance(x, str):
+                    x = x.strip()
+                    return x if x else "—"
+                if pd.notna(x):
+                    return x
+            return "—"
+        deal_name = _v("deal_name")
+        if deal_name == "—" and "deal_name" in g.columns and pd.notna(g["deal_name"].iloc[0]):
+            deal_name = str(g["deal_name"].iloc[0])
         stage = _v("deal_stage")
         pay1  = vshow.loc[rid, "payment_date"] if (rid in vshow.index and "payment_date" in vshow.columns) else pd.NaT
         churned = isinstance(stage, str) and "churn" in stage.lower()
@@ -2589,7 +2657,7 @@ def _ar_build_base():
             n = len(overdue)
             dues, outstanding, next_due = n * latest_span, n * latest_price, cov_end
             last_due = due_periods[-1] if due_periods else None
-            status = "Overdue" if (n == 1 and overdue[0] == last_due) else "Pending"
+            status = "Pending" if (n == 1 and overdue[0] == last_due) else "Overdue"
         elif cov_end is not None and cov_end <= today + pd.Timedelta(days=14):
             status, dues, outstanding, next_due = "Upcoming", latest_span, latest_price, cov_end
         else:
@@ -2604,7 +2672,7 @@ def _ar_build_base():
         })
     return pd.DataFrame(rows)
 
-_AR_STATUS_RANK = {"Pending": 0, "Overdue": 1, "Upcoming": 2, "Collected": 3, "Churned": 4}
+_AR_STATUS_RANK = {"Overdue": 0, "Pending": 1, "Upcoming": 2, "Collected": 3, "Churned": 4}
 
 def _ar_refresh(state):
     base = _ar_build_base()
@@ -2719,6 +2787,35 @@ def _vaf_refresh(state):
                                        autosize=True, heat_cols=_vret_heat, row_heat_cols=_MATRIX_ROW_HEAT,
                                        heat_by_row=True)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
+
+    # Parked / Churned reason breakdowns — paid customers only (payment_date
+    # known), independent of the page filters (these are deal-stage roll-ups of
+    # va_live, not line-item views). Reason × AM, counted, most-common first.
+    _paid_va = _VA[_VA["payment_date"].notna()]
+    def _reason_tbl(stage, reason_col, count_name):
+        s = _paid_va[_paid_va["deal_stage"].astype(str).str.lower() == stage]
+        if len(s) == 0 or reason_col not in s.columns:
+            return pd.DataFrame()
+        t = pd.DataFrame({
+            "ReasonFull": s[reason_col].astype(str).str.strip().replace(
+                {"": "—", "None": "—", "nan": "—"}),
+            "AM": (s["am_owner"].astype(str).str.strip().replace(
+                {"": "—", "None": "—", "nan": "—"}) if "am_owner" in s.columns else "—"),
+        })
+        g = t.groupby(["ReasonFull", "AM"]).size().reset_index(name=count_name)
+        g = g.sort_values(count_name, ascending=False).reset_index(drop=True)
+        # truncate the reason in-cell; full text stays available as a hover tooltip
+        g.insert(0, "Reason", g["ReasonFull"].map(
+            lambda x: x if len(x) <= 40 else x[:39].rstrip() + "…"))
+        return g[["Reason", "ReasonFull", "AM", count_name]]
+    _parked  = _reason_tbl("parked",  "va_parked_reason", "Parked")
+    _churned = _reason_tbl("churned", "churned_reason",   "Churned")
+    state.vaf_parked_json  = (grid_payload_b64(_parked, no_sort=True,
+                              center_cols=["AM", "Parked"], tip_cols={"Reason": "ReasonFull"})
+                              if len(_parked) else grid_payload_b64(pd.DataFrame()))
+    state.vaf_churned_json = (grid_payload_b64(_churned, no_sort=True,
+                              center_cols=["AM", "Churned"], tip_cols={"Reason": "ReasonFull"})
+                              if len(_churned) else grid_payload_b64(pd.DataFrame()))
 
     if len(li) > 0:
         li3 = li.dropna(subset=["date_paid"]).copy()
@@ -2861,7 +2958,7 @@ va_kpi_discards=0; va_kpi_parked=0; va_kpi_closed_lost=0
 va_kpi_revenue="₹0"; va_kpi_revenue_exact="₹0"; va_kpi_mrr="₹0"; va_kpi_mrr_exact="₹0"; va_kpi_eom="0"
 va_funnel_fig=go.Figure(); va_trend_df=pd.DataFrame(); va_channel_pie_json=""
 va_channel_filter="All"; va_filter_label=""; va_channel_click=""; va_channel_click_last=""
-va_gm_json=""; va_utm_json=""
+va_gm_json=""; va_utm_json=""; va_incentive_json=""
 va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFrame()
 
 # Page 5
@@ -2874,6 +2971,7 @@ vaf_selected_deal=[]; vaf_selected_line_item=[]; vaf_selected_rectype=[]
 vaf_kpi_active=0; vaf_kpi_refunds=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exact="₹0"; vaf_kpi_mrr="₹0"; vaf_kpi_mrr_exact="₹0"; vaf_kpi_due_14d=0
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
+vaf_parked_json=""; vaf_churned_json=""
 # Accounts Receivable Tracker — its own 5 cross-filtering dropdowns, independent
 # of the page's top filter bar (mirrors the CS Usage & Health table pattern).
 vaf_ar_all=pd.DataFrame(); vaf_ar_json=""
