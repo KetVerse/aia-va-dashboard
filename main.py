@@ -804,7 +804,7 @@ def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_fi
     return pd.DataFrame(cnt_rows), pd.DataFrame(pct_rows)
 
 
-def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None):
+def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None, add_new=False):
     """Refunds-adjusted billing-to-MRR cohort matrix (replicates the DAX
     total_monthly_collection / #Active Paid Users). Each non-refunded line item
     is recognised across its active term (billing_start_date month .. +term,
@@ -883,11 +883,19 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None):
         return b.reindex(full, fill_value=0).round(0).astype(int)
 
     extra = []
+    # New Collection = full cash collected from 'New' line items in the month paid
+    # (cash view, like Fresh Renewals / One-time — NOT the normalised cohort split).
+    if add_new:
+        ncb = _by_month(li[li["recurring_type"] == "New"])
+        extra.append({"Cohort": "New Collection", **{c: int(ncb[p]) for c, p in zip(cols, full)}})
     frb = _by_month(li[li["recurring_type"] == "Renewal"])
     extra.append({"Cohort": "Fresh Renewals", **{c: int(frb[p]) for c, p in zip(cols, full)}})
     if add_onetime:
         otb = _by_month(li[li["recurring_type"] == "One-time"])
         extra.append({"Cohort": "One-time", **{c: int(otb[p]) for c, p in zip(cols, full)}})
+    # Total row stays = column sums of the cohort (New-acquisition, normalised-MRR)
+    # rows only. The cash rows above (New Collection / Fresh Renewals / One-time)
+    # are informational and are deliberately NOT rolled into this Total.
     extra.append({"Cohort": "Total", **{c: int(piv[c].sum()) for c in cols}})
     return pd.concat([out, pd.DataFrame(extra)], ignore_index=True)
 
@@ -911,6 +919,23 @@ def _matrix_current_mrr(rev_m, today, exclude_onetime=False):
             if o not in ("", "0"):
                 val -= int(float(o))
     return val
+
+def _distinct_payers_by_month(li, refund_map, cols):
+    """Distinct paying customers per month across New/Renewal/One-time line items
+    (refund-filtered), keyed to the matrix's '%b %y' column labels. A customer who
+    paid two types in the same month counts ONCE — unlike summing the type rows,
+    which would count them twice. Used for the retention 'Total Payments' row."""
+    d = li.dropna(subset=["date_paid"])
+    d = d[d["recurring_type"].isin(["New", "Renewal", "One-time"])]
+    if refund_map is not None:
+        ref = d["record_id"].map(refund_map).astype("string").str.strip().str.lower()
+        d = d[(ref != "yes").fillna(True)]
+    by = d.groupby(d["date_paid"].dt.to_period("M"))["record_id"].nunique()
+    out = {}
+    for c in cols:
+        p = pd.Period(pd.to_datetime(c, format="%b %y"), freq="M")
+        out[c] = int(by.get(p, 0))
+    return out
 
 NEON_URL     = os.getenv("NEON_DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
@@ -1922,7 +1947,7 @@ def _aia_ops_refresh(state):
 # ═══════════════════════════════════════════════════════════════════
 
 def _apply_usage_filter(state):
-    """Filter the Customer Usage & Health grid by Deal Name / CSM / Stage / Deal Owner / Status."""
+    """Filter the Customer Usage & Health grid by Deal Name / CSM / Stage / Deal Owner / Cadence / Status."""
     d = state.cs_usage_all
     if d is None or len(d) == 0:
         state.cs_usage_json = grid_payload_b64(pd.DataFrame())
@@ -1939,6 +1964,9 @@ def _apply_usage_filter(state):
     _ow = _sel(state.cs_usage_owner)
     if _ow:
         d = d[d["Deal Owner"].isin(_ow)]
+    _cad = _sel(state.cs_usage_cadence)
+    if _cad:
+        d = d[d["Cadence"].isin(_cad)]
     # Status includes "" (empty box) as a real option — use the raw list, since
     # _sel() strips "" (its "no filter" sentinel).
     _sta = state.cs_usage_status if isinstance(state.cs_usage_status, list) else []
@@ -2314,6 +2342,8 @@ def _cs_refresh(state):
                                  if len(usage_all) else [])
     state.cs_usage_owner_list = (sorted(usage_all["Deal Owner"].dropna().unique().tolist())
                                  if len(usage_all) else [])
+    state.cs_usage_cadence_list = (sorted(usage_all["Cadence"].dropna().unique().tolist())
+                                   if len(usage_all) else [])
     _apply_usage_filter(state)
 
     # Renewal window ±14d — only Ready for Renewal / Renewal Done; Due On =
@@ -2770,22 +2800,49 @@ def _vaf_refresh(state):
     if "asked_refund" in _VA.columns:
         _v_refund_map = (_VA.dropna(subset=["record_id"]).drop_duplicates("record_id")
                             .set_index("record_id")["asked_refund"])
-    _vrev = _mrr_matrix(li, _v_refund_map, "revenue", add_onetime=True, as_of=today)   # VA: + One-time row
-    _vret = _mrr_matrix(li, _v_refund_map, "retention", add_onetime=True, as_of=today)
+    _vrev = _mrr_matrix(li, _v_refund_map, "revenue", add_onetime=True, as_of=today, add_new=True)   # VA: + New Collection / One-time rows
+    _vret = _mrr_matrix(li, _v_refund_map, "retention", add_onetime=True, as_of=today, add_new=True)
+    # MRR KPI reads the raw "Total" row (recurring MRR) — compute it BEFORE the
+    # matrix is renamed/re-laid-out below.
     _va_mrr = _matrix_current_mrr(_vrev, today, exclude_onetime=True)
     state.vaf_kpi_mrr = _fmt2(_va_mrr)
     state.vaf_kpi_mrr_exact = f"{_inr(_va_mrr)} · Excludes One-time amount & Refunds"
+    # Re-lay-out for display: cohorts, then the recurring Total (renamed), then the
+    # cash memo rows, then a Collected total that sums ONLY the three cash rows.
+    #   revenue  : "Total MRR"       + "Total Collected"    (₹)
+    #   retention: "Total Recurring" + "Total Transactions" (counts)
+    def _finalize_va_matrix(m, total_label, collected_label, collected_values=None):
+        if m is None or not len(m):
+            return m
+        _memo = ["New Collection", "Fresh Renewals", "One-time"]
+        _cols = [c for c in m.columns if c != "Cohort"]
+        cohorts = m[~m["Cohort"].isin(_memo + ["Total"])].copy()
+        totrow  = m[m["Cohort"] == "Total"].copy()
+        totrow["Cohort"] = total_label                       # rename recurring Total
+        memo    = m[m["Cohort"].isin(_memo)].copy()
+        coll = {"Cohort": collected_label}
+        for c in _cols:
+            # revenue → sum the cash rows (₹). retention → distinct payers, so a
+            # customer paying two types in a month counts once (collected_values).
+            coll[c] = (int(collected_values.get(c, 0)) if collected_values is not None
+                       else int(pd.to_numeric(memo[c], errors="coerce").fillna(0).sum()))
+        return pd.concat([cohorts, totrow, memo, pd.DataFrame([coll])], ignore_index=True)
+    _vrev = _finalize_va_matrix(_vrev, "Total MRR", "Total Collected")
+    _ret_cols = [c for c in _vret.columns if c != "Cohort"] if len(_vret) else []
+    _vret_distinct = _distinct_payers_by_month(li, _v_refund_map, _ret_cols)
+    _vret = _finalize_va_matrix(_vret, "Total Recurring", "Total Payments",
+                                collected_values=_vret_distinct)
     _vrev_heat = {c: "green" for c in _vrev.columns if c != "Cohort"} if len(_vrev) else {}
     _vret_heat = {c: "green" for c in _vret.columns if c != "Cohort"} if len(_vret) else {}
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
                                        autosize=True, heat_cols=_vrev_heat, row_heat_cols=_MATRIX_ROW_HEAT,
-                                       heat_by_row=True)
+                                       heat_by_row=True, total_inline=True)
                                        if len(_vrev) else grid_payload_b64(pd.DataFrame()))
     state.vaf_retention_matrix_json = (grid_payload_b64(_vret, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
                                        autosize=True, heat_cols=_vret_heat, row_heat_cols=_MATRIX_ROW_HEAT,
-                                       heat_by_row=True)
+                                       heat_by_row=True, total_inline=True)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
 
     # Parked / Churned reason breakdowns — paid customers only (payment_date
@@ -2889,8 +2946,8 @@ cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_mrr_exact="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
 cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
-cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]; cs_usage_status=[]
-cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]; cs_usage_owner_list=[]
+cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]; cs_usage_status=[]; cs_usage_cadence=[]
+cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]; cs_usage_owner_list=[]; cs_usage_cadence_list=[]
 cs_renewal_window_json=""
 # Customer Activity Cohort (14 tracked events across the 5 aia_*_events tables)
 cs_activity_event_list = [
@@ -2929,11 +2986,13 @@ cs_usage_tip = ("Usage Streak — last 28 days\n"
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Fresh Renewals: Monthly cash collected\n"
-               "• Total: Sum of MRR + one-time revenue (excludes Fresh Renewals)")
+               "• Total MRR: Sum of MRR + one-time revenue (excludes Fresh Renewals)\n"
+               "• Total Collected: New + Fresh Renewals + One-time (all cash collected)")
 vaf_ret_tip = ("Customer Retention Matrix\n"
                "• Cohort Spread: Based on recurring + one-time customers\n"
                "• Fresh Renewals: Customers who paid that month (includes one-time)\n"
-               "• Total: Sum of recurring + one-time customers")
+               "• Total Recurring: Sum of recurring + one-time customers\n"
+               "• Total Payments: distinct customers who paid that month")
 
 # Page 3
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)
@@ -2991,6 +3050,7 @@ cs_usage_deal_ms  = _ms_json([], [])
 cs_usage_csm_ms   = _ms_json([], [])
 cs_usage_stage_ms = _ms_json([], [])
 cs_usage_owner_ms = _ms_json([], [])
+cs_usage_cadence_ms = _ms_json([], [])
 cs_usage_status_ms = _ms_json([], [])
 cs_activity_event_ms = _ms_json(cs_activity_event_list, [])
 cs_activity_deal_ms  = _ms_json(cs_activity_deal_list,  [])
@@ -3092,6 +3152,7 @@ _MS_DISPATCH = {
     "cs_usage_csm":   ("cs_usage_csm",           "usage"),
     "cs_usage_stage": ("cs_usage_stage",         "usage"),
     "cs_usage_owner": ("cs_usage_owner",         "usage"),
+    "cs_usage_cadence": ("cs_usage_cadence",     "usage"),
     "cs_usage_status": ("cs_usage_status",       "usage"),
     "cs_activity_event": ("cs_activity_event",   "activity"),
     "cs_activity_deal":  ("cs_activity_deal",    "activity"),
@@ -3162,6 +3223,7 @@ def _sync_ms(state):
             return []
         for col, sv in (("Deal Name", state.cs_usage_deal), ("CSM", state.cs_usage_csm),
                         ("Stage", state.cs_usage_stage), ("Deal Owner", state.cs_usage_owner),
+                        ("Cadence", state.cs_usage_cadence),
                         ("Status", state.cs_usage_status)):
             if col == target:
                 continue
@@ -3175,6 +3237,7 @@ def _sync_ms(state):
     state.cs_usage_csm_ms    = _ms_json(_ulov("CSM"),        state.cs_usage_csm)
     state.cs_usage_stage_ms  = _ms_json(_ulov("Stage"),      state.cs_usage_stage)
     state.cs_usage_owner_ms  = _ms_json(_ulov("Deal Owner"), state.cs_usage_owner)
+    state.cs_usage_cadence_ms = _ms_json(_ulov("Cadence"),   state.cs_usage_cadence)
     # empty Status "" is included as a real, selectable option (an empty box)
     state.cs_usage_status_ms = _ms_json(_ulov("Status"), state.cs_usage_status)
 
@@ -3318,7 +3381,7 @@ def on_reset_filters(state, *_):
     state.va_channel_filter  = "All"; state.va_filter_label  = ""
     # CS Finance
     state.cs_selected_owner  = []; state.cs_selected_deal = []; state.cs_selected_rectype = []
-    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []; state.cs_usage_status = []
+    state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []; state.cs_usage_cadence = []; state.cs_usage_status = []
     state.cs_activity_event = []; state.cs_activity_deal = []; state.cs_activity_stage = []; state.cs_activity_csm = []
     # Marketing
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""

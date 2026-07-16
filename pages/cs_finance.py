@@ -168,7 +168,7 @@ Integration Due
 <|part|class_name=chart-card|
 **Customer Usage & Health** <|ⓘ|text|hover_text={cs_usage_tip}|class_name=info-ico|>
 
-<|layout|columns=1 1 1 1 1|gap=12px|
+<|layout|columns=1 1 1 1 1 1|gap=12px|
 <|part|
 <div class="msc wide" data-key="cs_usage_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_usage_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_deal|>
@@ -184,6 +184,10 @@ Integration Due
 <|part|
 <div class="msc" data-key="cs_usage_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_usage_owner_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_owner|>
+|>
+<|part|
+<div class="msc" data-key="cs_usage_cadence"><div class="msc-cap">Cadence</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_usage_cadence_ms}|text|mode=raw|class_name=msc-data msc-data-cs_usage_cadence|>
 |>
 <|part|
 <div class="msc" data-key="cs_usage_status"><div class="msc-cap">Status</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>

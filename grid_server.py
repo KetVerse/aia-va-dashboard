@@ -29,7 +29,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
                      heat_by_row=False, link_cols=None, date_cols=None, header_tips=None,
-                     max_height=None, tip_cols=None):
+                     max_height=None, tip_cols=None, total_inline=False):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -58,8 +58,15 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
     else:
         is_tot = pd.Series([False] * len(df), index=df.index)
 
-    data_df  = df[~is_tot].copy()
-    total_df = df[is_tot].copy()
+    # total_inline: keep the Total row in the body (at its dataframe position) and
+    # style it in place, instead of pinning it to the footer. Lets memo rows placed
+    # AFTER the Total in the frame render below it.
+    if total_inline:
+        data_df  = df.copy()
+        total_df = df.iloc[0:0].copy()
+    else:
+        data_df  = df[~is_tot].copy()
+        total_df = df[is_tot].copy()
 
     if not no_sort and sort_default_col in data_df.columns and len(data_df):
         data_df = data_df.sort_values(sort_default_col, ascending=False)
@@ -123,7 +130,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "firstW": first_col_w, "rowHeat": row_heat_cols or {},
                "heatByRow": bool(heat_by_row), "linkCols": link_map,
                "hidden": hidden, "dateCols": date_flag, "headerTips": header_tip_list,
-               "maxHeight": max_height, "tipCols": tip_map}
+               "maxHeight": max_height, "tipCols": tip_map,
+               "inlineTotal": bool(total_inline)}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -321,6 +329,10 @@ _GRID_HTML = r"""<!DOCTYPE html>
     text-align:center;
   }
   tfoot td.left{ text-align:left; }
+  /* inline Total row (total_inline): same look as the footer total, but rendered
+     in place in the body so memo rows can sit below it. */
+  tr.totrow td{ background:var(--tot); color:var(--tottxt); font-weight:700;
+    border-top:2px solid var(--totb); border-bottom:2px solid var(--totb); }
   .empty{ padding:24px; color:#94a3b8; font-size:13px; text-align:center; }
 </style></head>
 <body>
@@ -535,13 +547,15 @@ function body(){
   const heat=DATA.heat||[];
   const hmax={};
   heat.forEach((c,i)=>{ if(c) hmax[i]=heatMax(i); });
+  const inlineTot=DATA.inlineTotal;
   let html="";
   for(const r of rows){
-    html+="<tr>";
+    const isTot = inlineTot && (r[0]==null?'':String(r[0]).trim()).indexOf("Total")===0;
+    html+= isTot ? '<tr class="totrow">' : "<tr>";
     r.forEach((v,i)=>{
       if(hidden[i]) return;
       let style="";
-      if(heat[i]){
+      if(heat[i] && !isTot){
         const n=numOf(v);
         if(n!==null && n>0){
           const rl=(r[0]==null?'':String(r[0]).trim());
