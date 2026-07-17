@@ -131,7 +131,7 @@ Integration Due
 <|part|class_name=chart-card|
 **Customer Activity Cohort**
 
-<|layout|columns=1 1 1 1|gap=12px|
+<|layout|columns=1 1 1 1 1|gap=12px|
 <|part|
 <div class="msc wide" data-key="cs_activity_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_activity_deal_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_deal|>
@@ -147,6 +147,10 @@ Integration Due
 <|part|
 <div class="msc" data-key="cs_activity_event"><div class="msc-cap">Event Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{cs_activity_event_ms}|text|mode=raw|class_name=msc-data msc-data-cs_activity_event|>
+|>
+<|part|
+<div class="msc" data-key="cs_cohort_view"><div class="msc-cap">View</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{cs_cohort_view_ms}|text|mode=raw|class_name=msc-data msc-data-cs_cohort_view|>
 |>
 |>
 

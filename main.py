@@ -855,11 +855,14 @@ def _mrr_matrix(li, refund_map, mode, add_onetime=False, as_of=None, add_new=Fal
 
     lo = min(li["cohort_p"].min(), li["start_p"].min())
     hi = li["start_p"].max()
-    # Extend columns through the current month so multi-month subscriptions show
-    # their full monthly split up to today — even when the latest payment in view
-    # is earlier (e.g. a single deal filtered to one past payment month).
+    # Columns always END at the current month: extend to it when the latest
+    # payment in view is earlier (so a multi-month subscription still shows its
+    # split up to today), and never run PAST it — a line item billed for a future
+    # month (e.g. paid 16-Jul, billing_start in Aug) must not open a future
+    # column and expose every other cohort's not-yet-earned future spread.
     if as_of is not None:
-        hi = max(hi, pd.Period(pd.Timestamp(as_of), freq="M"))
+        _asof = pd.Period(pd.Timestamp(as_of), freq="M")
+        hi = _asof if _asof >= lo else lo
     full = pd.period_range(lo, hi, freq="M")
 
     if mode == "revenue":
@@ -1973,38 +1976,61 @@ def _apply_usage_filter(state):
     if _sta:
         d = d[d["Status"].isin(_sta)]
     d = d.drop(columns=["Deal Owner"], errors="ignore")   # filter-only, never shown
+    # Sl no is a running serial over the CURRENT view: the grid re-numbers it 1..N
+    # in display order (see rownum_col), so it stays pinned top-to-bottom through
+    # any re-sort, and the last row = how many rows survived the filters.
+    d = d.reset_index(drop=True)
+    d.insert(0, "Sl no", range(1, len(d) + 1))
     state.cs_usage_json = grid_payload_b64(
-        d, sort_default_col="Usage Active Days (28d)",
+        d, sort_default_col="Usage Active Days (28d)", rownum_col="Sl no",
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
         center_cols=["Paid On", "Int Date", "Due On", "Cadence", "Status"],
         date_cols=["Paid On", "Int Date", "Due On"],
         heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
+        class_cols={"Int Date": "__intcls"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
-def _merge_cohort_pct_count(cnt_df, pct_df):
-    """Combine the count + % cohort frames into ONE table where each week-offset
-    cell shows the count as the main figure with the % in brackets, e.g.
-    '16 (94%)'. 'Integration Week' / 'Integrated' pass through unchanged; blank
-    (future) and zero-activity cells stay blank. The grid's numOf() parses the
-    leading count so the green heatmap shades by count."""
+def _merge_cohort_pct_count(cnt_df, pct_df, mode="all"):
+    """Combine the count + % cohort frames into ONE table. `mode` picks what each
+    week-offset cell prints:
+      "all"   -> '16 (94%)'   (count with the % in brackets — the default)
+      "pct"   -> '94%'        (retention only, no brackets)
+      "count" -> '16'         (customer count only)
+    'Integration Week' / 'Integrated' pass through unchanged; blank (future) and
+    zero-activity cells stay blank.
+    Also emits a hidden numeric '__pct_<W>' column per week holding the raw
+    retention %, returned as a {display_col: source_col} map. The grid shades
+    from THOSE on a fixed 0-100 scale (heat_from + heat_max), so the colour always
+    means retention — never the headcount, and never rescaled per column."""
     if not len(cnt_df) or not len(pct_df):
-        return cnt_df
+        return cnt_df, {}
     wcols = [c for c in cnt_df.columns if c not in ("Integration Week", "Integrated")]
+    def _pct_num(pv):
+        try:
+            return float(str(pv).replace("%", "").strip())
+        except (TypeError, ValueError):
+            return None
     def _cell(cnt, pctv):
         if cnt is None or cnt == "":
-            return ""                       # offset past today
+            return "", None                 # offset past today
         try:
             c = int(cnt)
         except (TypeError, ValueError):
-            return ""
+            return "", None
         if c == 0:
-            return ""                       # no activity that week
+            return "", None                 # no activity that week
         p = pctv if (isinstance(pctv, str) and pctv) else "0%"
-        return f"{c} ({p})"
+        txt = f"{c}" if mode == "count" else (p if mode == "pct" else f"{c} ({p})")
+        return txt, _pct_num(p)
     m = cnt_df.copy()
+    heat_from = {}
     for c in wcols:
-        m[c] = [_cell(cv, pv) for cv, pv in zip(cnt_df[c], pct_df[c])]
-    return m
+        pairs = [_cell(cv, pv) for cv, pv in zip(cnt_df[c], pct_df[c])]
+        m[c] = [t for t, _ in pairs]
+        src = f"__pct_{c}"
+        m[src] = [n for _, n in pairs]
+        heat_from[c] = src
+    return m, heat_from
 
 
 def _build_cohort_tables(state):
@@ -2017,12 +2043,19 @@ def _build_cohort_tables(state):
     _act_stage = _sel(state.cs_activity_stage)
     _act_csm   = _sel(state.cs_activity_csm)
     _coh_heat = {f"W{o+1}": "green" for o in range(12)}
+    # View: "Cohort %" -> % only, "Customers" -> counts only, else both (default).
+    _cv = _sel(state.cs_cohort_view)
+    _mode = ("pct" if _cv == ["Cohort %"] else "count" if _cv == ["Customers"] else "all")
 
     def _merged_json(cnt_df, pct_df):
-        m = _merge_cohort_pct_count(cnt_df, pct_df)
+        m, _hfrom = _merge_cohort_pct_count(cnt_df, pct_df, _mode)
+        # Shade by the retention % on a FIXED 0-100 scale so the same % is the
+        # same green in every cell — independent of cohort size, of which column
+        # it sits in, and of whether the cell is currently printing the % or not.
         return (grid_payload_b64(m, total_id_col="Integration Week",
                                  no_sort=True, fixed=True, sortable=False,
-                                 center_all=True, heat_cols=_coh_heat, autosize=True)
+                                 center_all=True, heat_cols=_coh_heat, autosize=True,
+                                 heat_from=_hfrom, heat_max=100)
                 if len(m) else grid_payload_b64(pd.DataFrame()))
 
     # Customer Usage Cohort (Accounting Sync only) — merged % (count). Passing
@@ -2322,6 +2355,11 @@ def _cs_refresh(state):
             "Stage":           row.get("deal_stage",""),
             "Paid On":         _ddmy(row.get("payment_date")),
             "Int Date":        _ddmy(row.get("integration_done_date")),
+            # Orange Int Date while the customer is still inside their initial
+            # milestone window (days_since <= the cadence's past-initial day);
+            # black once they're in steady state. Hidden — drives the cell class.
+            "__intcls":        ("cell-orange" if (pd.notna(intd)
+                                and dsince <= _CAD_PASTINIT.get(cad, 29)) else ""),
             "Due On":          _due_on(row.get("record_id")),
             "Cadence":         cad,
             "Usage Active Days (28d)": active_days,
@@ -2958,6 +2996,9 @@ cs_activity_event_list = [
 ]
 cs_activity_event = []   # [] = All Events
 cs_activity_count_json = ""; cs_activity_pct_json = ""
+# View mode for BOTH cohort tables: All (count + %) / Cohort % / Customers
+cs_cohort_view_list = ["Cohort %", "Customers"]
+cs_cohort_view = []
 # Deal Name / Deal Stage / CSM filters, scoped to the cohort's own base population
 # (integrated AIA Paid records) so every option can actually match a row.
 _act_base_mask = (_AIA["integration_done_date"].notna()) & (_AIA["module_type"] == "AIA Paid")
@@ -3056,6 +3097,7 @@ cs_activity_event_ms = _ms_json(cs_activity_event_list, [])
 cs_activity_deal_ms  = _ms_json(cs_activity_deal_list,  [])
 cs_activity_stage_ms = _ms_json(cs_activity_stage_list, [])
 cs_activity_csm_ms   = _ms_json(cs_activity_csm_list,   [])
+cs_cohort_view_ms    = _ms_json(cs_cohort_view_list,    [])
 vaf_deal_ms       = _ms_json(vaf_deal_list,      [])
 vaf_rectype_ms    = _ms_json(vaf_rectype_list,   [])
 vaf_line_item_ms  = _ms_json(vaf_line_item_list, [])
@@ -3158,6 +3200,7 @@ _MS_DISPATCH = {
     "cs_activity_deal":  ("cs_activity_deal",    "activity"),
     "cs_activity_stage": ("cs_activity_stage",   "activity"),
     "cs_activity_csm":   ("cs_activity_csm",     "activity"),
+    "cs_cohort_view":    ("cs_cohort_view",      "activity"),
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
     "vaf_rectype":    ("vaf_selected_rectype",   "vaf"),
@@ -3202,6 +3245,7 @@ def _sync_ms(state):
                 d = d[d[col].isin(s)]
         return sorted(d[target].dropna().unique().tolist())
     state.cs_activity_event_ms = _ms_json(cs_activity_event_list, state.cs_activity_event)
+    state.cs_cohort_view_ms    = _ms_json(cs_cohort_view_list, state.cs_cohort_view)
     state.cs_activity_deal_ms  = _ms_json(_alov("deal_name"),  state.cs_activity_deal)
     state.cs_activity_stage_ms = _ms_json(_alov("deal_stage"), state.cs_activity_stage)
     state.cs_activity_csm_ms   = _ms_json(_alov("cs_owner"),   state.cs_activity_csm)

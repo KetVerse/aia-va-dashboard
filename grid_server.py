@@ -29,7 +29,9 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      search_cols=None, status_cols=None, heat_cols=None,
                      autosize=False, first_col_w=None, row_heat_cols=None,
                      heat_by_row=False, link_cols=None, date_cols=None, header_tips=None,
-                     max_height=None, tip_cols=None, total_inline=False):
+                     max_height=None, tip_cols=None, total_inline=False,
+                     heat_from=None, heat_max=None, class_cols=None,
+                     rownum_col=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -116,6 +118,28 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
             if display_col in cols and src_col in cols:
                 tip_map[display_col] = src_col
                 hidden_cols.add(src_col)
+    # heat_from: {display_col: numeric_source_col} — shade display_col from the
+    # (hidden) source column's value instead of parsing the cell text. Needed when
+    # the cell shows something other than the value being shaded (e.g. a cohort
+    # cell printing "16 (94%)" or just "16", but shaded by the 94% retention).
+    # Pair with heat_max for a FIXED scale (e.g. 100) so the same % is the same
+    # colour everywhere instead of being rescaled per column.
+    heat_from_map = {}
+    if heat_from:
+        for display_col, src_col in heat_from.items():
+            if display_col in cols and src_col in cols:
+                heat_from_map[display_col] = src_col
+                hidden_cols.add(src_col)
+    # class_cols: {display_col: source_col} — the (hidden) source column holds a CSS
+    # class name applied to display_col's cell (blank = no class). Lets a cell be
+    # styled from a condition computed in Python (e.g. an Int Date shown orange
+    # while the customer is still inside their initial-milestone window).
+    class_map = {}
+    if class_cols:
+        for display_col, src_col in class_cols.items():
+            if display_col in cols and src_col in cols:
+                class_map[display_col] = src_col
+                hidden_cols.add(src_col)
     hidden = [bool(cols[i] in hidden_cols) for i in range(len(cols))]
     date_set = set(date_cols or [])    # cols of "dd-MMM-yy" strings -> sort chronologically
     date_flag = [bool(cols[i] in date_set) for i in range(len(cols))]
@@ -131,7 +155,14 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                "heatByRow": bool(heat_by_row), "linkCols": link_map,
                "hidden": hidden, "dateCols": date_flag, "headerTips": header_tip_list,
                "maxHeight": max_height, "tipCols": tip_map,
-               "inlineTotal": bool(total_inline)}
+               "inlineTotal": bool(total_inline),
+               "heatFrom": heat_from_map, "heatMax": heat_max,
+               "classCols": class_map,
+               # rownum_col is re-numbered 1..N in DISPLAY order by the front-end
+               # (after sorting / searching), so the serial always reads top-to-
+               # bottom instead of travelling with its row when the user re-sorts.
+               "rowNumCol": (cols.index(rownum_col)
+                             if (rownum_col and rownum_col in cols) else -1)}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -322,6 +353,9 @@ _GRID_HTML = r"""<!DOCTYPE html>
   .st-inactive{ color:#dc2626; font-weight:700; }
   .st-churned{ color:#94a3b8; font-weight:700; }
   .st-black{ color:#0f172a; font-weight:700; }
+  /* a cell flagged from Python via class_cols (e.g. Int Date during the
+     initial-milestone window) — orange, but lighter than the status labels */
+  .cell-orange{ color:#ea580c; font-weight:600; }
   tfoot td{
     position:sticky; bottom:0; z-index:2;
     background:var(--tot); color:var(--tottxt); font-weight:700;
@@ -530,6 +564,13 @@ function body(){
   const colIdx={};
   cols.forEach((c,i)=>{ colIdx[c]=i; });
   const tipCols=DATA.tipCols||{};
+  const heatFrom=DATA.heatFrom||{};
+  const classCols=DATA.classCols||{};
+  function cellCls(colName, r){        // CSS class from a hidden source column
+    const src=classCols[colName]; if(!src) return "";
+    const idx=colIdx[src]; if(idx===undefined) return "";
+    return String(r[idx]==null?"":r[idx]).trim();
+  }
   function tipAttr(colName, r){        // native title= from a hidden source column
     const src=tipCols[colName]; if(!src) return "";
     const idx=colIdx[src]; if(idx===undefined) return "";
@@ -548,21 +589,33 @@ function body(){
   const hmax={};
   heat.forEach((c,i)=>{ if(c) hmax[i]=heatMax(i); });
   const inlineTot=DATA.inlineTotal;
+  const rowNumIdx=(DATA.rowNumCol===undefined)?-1:DATA.rowNumCol;
   let html="";
+  let rn=0;
   for(const r of rows){
     const isTot = inlineTot && (r[0]==null?'':String(r[0]).trim()).indexOf("Total")===0;
+    if(!isTot) rn++;
     html+= isTot ? '<tr class="totrow">' : "<tr>";
     r.forEach((v,i)=>{
       if(hidden[i]) return;
+      // serial column: always the row's position in the CURRENT view
+      if(i===rowNumIdx && !isTot){ html+='<td class="'+cls(i)+'">'+rn+'</td>'; return; }
       let style="";
       if(heat[i] && !isTot){
-        const n=numOf(v);
+        // heatFrom: shade from a hidden numeric column (e.g. the cohort %) rather
+        // than the printed cell, so the colour tracks the metric regardless of
+        // what the cell is showing.
+        const hfSrc=heatFrom[cols[i]];
+        const hfIdx=(hfSrc!==undefined)?colIdx[hfSrc]:undefined;
+        const n=(hfIdx!==undefined)?numOf(r[hfIdx]):numOf(v);
         if(n!==null && n>0){
           const rl=(r[0]==null?'':String(r[0]).trim());
           const ro=(DATA.rowHeat && DATA.rowHeat[rl]) ? DATA.rowHeat[rl] : null;
-          // matrices (heatByRow) scale every cohort row to its OWN acquisition max,
-          // so the first-revenue diagonal is consistently the darkest shade.
-          const denom = (DATA.heatByRow || ro) ? rowHeatMax(r) : hmax[i];
+          // heatMax pins a FIXED scale (e.g. 0-100%) so the same value is the same
+          // colour everywhere; otherwise matrices (heatByRow) scale each row to its
+          // OWN max, and the default scales each column to its column max.
+          const denom = DATA.heatMax ? DATA.heatMax
+                      : ((DATA.heatByRow || ro) ? rowHeatMax(r) : hmax[i]);
           if(denom>0){
             // specially-coloured rows (Fresh Renewals/One-time) get a higher floor
             // so even small values stay distinct from the pale Total row
@@ -602,7 +655,9 @@ function body(){
              +'<span class="bar-fill" style="width:'+w+'%;background:'+bc+'"></span>'
              +'<span class="bar-val">'+fmt(v,num[i])+'</span></span></td>';
       } else {
-        html+='<td class="'+cls(i)+'"'+style+tipAttr(colName,r)+'>'+fmt(v,num[i])+'</td>';
+        const cc=cellCls(colName,r);
+        const inner=cc ? '<span class="'+cc+'">'+fmt(v,num[i])+'</span>' : fmt(v,num[i]);
+        html+='<td class="'+cls(i)+'"'+style+tipAttr(colName,r)+'>'+inner+'</td>';
       }
     });
     html+="</tr>";
