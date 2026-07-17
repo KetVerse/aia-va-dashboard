@@ -31,7 +31,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      heat_by_row=False, link_cols=None, date_cols=None, header_tips=None,
                      max_height=None, tip_cols=None, total_inline=False,
                      heat_from=None, heat_max=None, class_cols=None,
-                     rownum_col=None):
+                     rownum_col=None, col_w=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -162,7 +162,11 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                # (after sorting / searching), so the serial always reads top-to-
                # bottom instead of travelling with its row when the user re-sorts.
                "rowNumCol": (cols.index(rownum_col)
-                             if (rownum_col and rownum_col in cols) else -1)}
+                             if (rownum_col and rownum_col in cols) else -1),
+               # col_w: {column: px} — preferred width for specific columns. The
+               # table is auto-layout, so the slack goes to the columns left auto
+               # instead of being soaked up by the widest text column.
+               "colW": [(col_w or {}).get(cols[i]) for i in range(len(cols))]}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -356,6 +360,10 @@ _GRID_HTML = r"""<!DOCTYPE html>
   /* a cell flagged from Python via class_cols (e.g. Int Date during the
      initial-milestone window) — orange, but lighter than the status labels */
   .cell-orange{ color:#ea580c; font-weight:600; }
+  /* col_w: cap a column by clipping its content — an inner block with a max-width
+     bounds the cell's max-content, which is what auto-layout sizes the column to.
+     Overlong values ellipsize and keep the full text in a hover title. */
+  .clip{ display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   tfoot td{
     position:sticky; bottom:0; z-index:2;
     background:var(--tot); color:var(--tottxt); font-weight:700;
@@ -404,7 +412,9 @@ function header(){
     if(!sortable) c2 += " nosort";
     const tips=DATA.headerTips||[];
     const tip = tips[i] ? ' title="'+String(tips[i]).replace(/"/g,"&quot;")+'"' : '';
-    tr+='<th class="'+c2.trim()+'" data-i="'+i+'"'+tip+'>'+c+arr+pri+'</th>';
+    const cw=(DATA.colW||[])[i];
+    const wsty = cw ? ' style="width:'+cw+'px"' : '';
+    tr+='<th class="'+c2.trim()+'" data-i="'+i+'"'+tip+wsty+'>'+c+arr+pri+'</th>';
   });
   h.innerHTML=tr+"</tr>";
   if(sortable) h.querySelectorAll("th").forEach(th=>th.onclick=e=>onSort(+th.dataset.i, e.shiftKey));
@@ -566,6 +576,12 @@ function body(){
   const tipCols=DATA.tipCols||{};
   const heatFrom=DATA.heatFrom||{};
   const classCols=DATA.classCols||{};
+  const colW=DATA.colW||[];
+  function clipWrap(i, inner, raw){    // cap a col_w column's content (+ full text on hover)
+    const w=colW[i]; if(!w) return inner;
+    const t=String(raw==null?"":raw).trim().replace(/"/g,"&quot;");
+    return '<span class="clip" style="max-width:'+w+'px"'+(t?' title="'+t+'"':'')+'>'+inner+'</span>';
+  }
   function cellCls(colName, r){        // CSS class from a hidden source column
     const src=classCols[colName]; if(!src) return "";
     const idx=colIdx[src]; if(idx===undefined) return "";
@@ -634,9 +650,9 @@ function body(){
         const href=id ? lk.baseUrl+id : "";
         const inner=fmt(v,num[i]);
         if(href){
-          html+='<td class="'+cls(i)+'"'+style+'><a href="'+href+'" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;cursor:pointer">'+inner+'</a></td>';
+          html+='<td class="'+cls(i)+'"'+style+'>'+clipWrap(i,'<a href="'+href+'" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;cursor:pointer">'+inner+'</a>',v)+'</td>';
         } else {
-          html+='<td class="'+cls(i)+'"'+style+'>'+inner+'</td>';
+          html+='<td class="'+cls(i)+'"'+style+'>'+clipWrap(i,inner,v)+'</td>';
         }
       } else if(strk[i] && typeof v==="string"){
         html+='<td class="streakcell">'+streakHtml(v)+'</td>';
@@ -657,7 +673,7 @@ function body(){
       } else {
         const cc=cellCls(colName,r);
         const inner=cc ? '<span class="'+cc+'">'+fmt(v,num[i])+'</span>' : fmt(v,num[i]);
-        html+='<td class="'+cls(i)+'"'+style+tipAttr(colName,r)+'>'+inner+'</td>';
+        html+='<td class="'+cls(i)+'"'+style+tipAttr(colName,r)+'>'+clipWrap(i,inner,v)+'</td>';
       }
     });
     html+="</tr>";

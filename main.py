@@ -1983,6 +1983,7 @@ def _apply_usage_filter(state):
     d.insert(0, "Sl no", range(1, len(d) + 1))
     state.cs_usage_json = grid_payload_b64(
         d, sort_default_col="Usage Active Days (28d)", rownum_col="Sl no",
+        col_w={"Deal Name": 300},   # keep the slack off the widest text column
         streak_cols=["Usage Streak Last 28D (desc)"], status_cols=["Status"],
         center_cols=["Paid On", "Int Date", "Due On", "Cadence", "Status"],
         date_cols=["Paid On", "Int Date", "Due On"],
