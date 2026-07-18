@@ -246,9 +246,15 @@ _MULTISELECT_SCRIPT = """
       if(d && d.raw !== msc.__msLast){ msc.__msLast = d.raw; render(msc, d.obj); }
     });
   }
-  document.addEventListener("click", function(){
+  function closeAllMsc(){
     document.querySelectorAll(".msc.open").forEach(function(o){ o.classList.remove("open"); });
-  });
+  }
+  document.addEventListener("click", closeAllMsc);
+  // Clicks land inside the grid/pie IFRAMES (separate documents), so they never
+  // bubble to this parent click handler. Focus leaving the parent window (which
+  // happens the moment an iframe is clicked) fires 'blur' — use it to close any
+  // open dropdown when the user clicks a chart or table.
+  window.addEventListener("blur", closeAllMsc);
   var pending = false;
   function schedule(){ if(pending) return; pending = true; setTimeout(function(){ pending = false; scan(); }, 40); }
   // characterData:true is essential — the *_ms option holders start EMPTY and are
