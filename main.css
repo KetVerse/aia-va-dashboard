@@ -142,6 +142,16 @@ body {
     min-width: 170px !important;
     margin: 0 !important;
 }
+/* date_range = two of those same 170px boxes side by side (the single control's
+   default fields are ~237px, too wide); each of its Start/End fields gets 170px so
+   the combined control matches the original two Start Date / End Date boxes. */
+.filter-bar .taipy-date-range .MuiFormControl-root,
+.filter-bar .taipy-date-range .MuiTextField-root,
+.filter-bar .taipy-date-range .MuiInputBase-root {
+    width: 170px !important;
+    min-width: 170px !important;
+    margin: 0 !important;
+}
 .filter-bar .taipy-selector,
 .filter-bar .taipy-selector .MuiFormControl-root,
 .filter-bar .taipy-selector .MuiAutocomplete-root,

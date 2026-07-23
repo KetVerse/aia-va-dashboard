@@ -4,12 +4,9 @@ AIA_OPS_PAGE = """
 <|part|class_name=topbar|
 <|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
-<|layout|columns=1 1 1 1|gap=12px|
+<|layout|columns=1 1 1|gap=12px|
 <|part|
-<|{aia_start_date}|date|label=Start Date|format=dd/MM/yyyy|on_change=on_aia_filter_change|>
-|>
-<|part|
-<|{aia_end_date}|date|label=End Date|format=dd/MM/yyyy|on_change=on_aia_filter_change|>
+<|{aia_date_range}|date_range|label_start=Start Date|label_end=End Date|format=dd/MM/yyyy|on_change=on_aia_date|>
 |>
 <|part|
 <div class="msc" data-key="aia_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>

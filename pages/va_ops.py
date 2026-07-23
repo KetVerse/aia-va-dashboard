@@ -4,12 +4,9 @@ VA_OPS_PAGE = """
 <|part|class_name=topbar|
 <|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
-<|layout|columns=1 1 1 1|gap=12px|
+<|layout|columns=1 1 1|gap=12px|
 <|part|
-<|{va_start_date}|date|label=Start Date|format=dd/MM/yyyy|on_change=on_va_filter_change|>
-|>
-<|part|
-<|{va_end_date}|date|label=End Date|format=dd/MM/yyyy|on_change=on_va_filter_change|>
+<|{va_date_range}|date_range|label_start=Start Date|label_end=End Date|format=dd/MM/yyyy|on_change=on_va_date|>
 |>
 <|part|
 <div class="msc" data-key="va_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>

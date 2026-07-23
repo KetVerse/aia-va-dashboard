@@ -365,6 +365,40 @@ _COPYBTN_SCRIPT = """
 </script>
 """
 
+_DATERANGE_SCRIPT = """
+<script id="daterange-autoend">
+// Taipy's date_range is two independent single pickers (MUI's real range picker
+// is a paid Pro component), so picking the start doesn't hand off to the end.
+// This bridges that: after a day is chosen in the START calendar, auto-open the
+// END calendar — giving the "click start → pick end" flow with the native control.
+(function(){
+  var advance = false;
+  document.addEventListener("click", function(e){
+    if(!e.target.closest) return;
+    if(e.target.closest(".taipy-date-range-picker-start button")){ advance = true;  return; }
+    if(e.target.closest(".taipy-date-range-picker-end button"))  { advance = false; return; }
+    if(advance && e.target.closest(".MuiPickersDay-root")){
+      advance = false;
+      // The start-pick fires a server refresh that re-renders the picker; opening
+      // the End calendar mid-refresh gets closed, and the MUI icon button TOGGLES
+      // (so rapid re-clicks just flip it shut). Instead: wait for the DOM to go
+      // quiet for 400ms (refresh settled), then click the End button exactly ONCE.
+      var settle = null, cap = null;
+      var obs = new MutationObserver(function(){ clearTimeout(settle); settle = setTimeout(fire, 400); });
+      function fire(){
+        clearTimeout(settle); clearTimeout(cap); obs.disconnect();
+        var eb = document.querySelector(".taipy-date-range-picker-end button");
+        if(eb) eb.click();
+      }
+      obs.observe(document.body, {childList: true, subtree: true});
+      settle = setTimeout(fire, 700);   // in case no mutations fire at all
+      cap    = setTimeout(fire, 4000);  // hard cap
+    }
+  }, true);
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
@@ -374,7 +408,7 @@ def _inject_zoom_lock(resp):
                 resp.set_data(html.replace(
                     "</body>",
                     _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT
-                    + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + "</body>"))
+                    + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + _DATERANGE_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass
@@ -1878,23 +1912,37 @@ def _aia_ops_refresh(state):
             va_c  = _rng(_VA,  "payment_date", m_start, m_end)
             aia_p = _rng(_AIA, "payment_date", pm_start, pm_end)
             va_p  = _rng(_VA,  "payment_date", pm_start, pm_end)
-            # Per-GM hover breakdown: one line per line item "Deal: ₹val · Nm · dd-Mmm"
-            # (one-time lines tagged). Used for the AIA+VA Revenue / Combined MRR cells.
-            def _tip_lines(li_frame, val_col):
-                out = []
-                if li_frame is None or len(li_frame) == 0:
-                    return out
-                for r in li_frame.sort_values("deal_name").itertuples():
-                    dn = str(getattr(r, "deal_name", "") or "").strip() or "—"
-                    try: v = float(getattr(r, val_col, 0) or 0)
-                    except (TypeError, ValueError): v = 0
-                    tm = getattr(r, "term", None)
-                    tm = int(tm) if (pd.notna(tm) and tm) else None
-                    dp = getattr(r, "date_paid", None)
-                    dps = pd.Timestamp(dp).strftime("%d-%b") if pd.notna(dp) else ""
-                    ot = "OT " if str(getattr(r, "recurring_type", "") or "") == "One-time" else ""
-                    bits = [f"₹{int(round(v)):,}"] + ([f"{tm}m"] if tm else [])
-                    out.append(f"{dn}: {ot}" + " · ".join(bits) + (f" ({dps})" if dps else ""))
+            # Per-GM hover breakdown, one line per DEAL:
+            #   "₹price[, OT ₹ot] (date, term) – Deal Name"
+            # rec_frame carries the main price in `val_col`; ot_frame supplies the
+            # one-time price (summed per deal). Deals with only a one-time line still
+            # appear (price omitted).
+            def _tip_lines(rec_frame, ot_frame, val_col):
+                ot_map = {}
+                if ot_frame is not None and len(ot_frame):
+                    for r in ot_frame.itertuples():
+                        dn = str(getattr(r, "deal_name", "") or "").strip() or "—"
+                        try: ot_map[dn] = ot_map.get(dn, 0) + float(getattr(r, "unit_price", 0) or 0)
+                        except (TypeError, ValueError): pass
+                def _row(dn, price, tm, dps, ot):
+                    parts = ([f"₹{int(round(price)):,}"] if price is not None else [])
+                    if ot: parts.append(f"OT ₹{int(round(ot)):,}")
+                    paren = ", ".join(([dps] if dps else []) + ([f"{tm}m"] if tm else []))
+                    return ", ".join(parts) + (f" ({paren})" if paren else "") + f"  {dn}"
+                out, seen = [], set()
+                if rec_frame is not None and len(rec_frame):
+                    for r in rec_frame.sort_values("date_paid").itertuples():   # chronological
+                        dn = str(getattr(r, "deal_name", "") or "").strip() or "—"
+                        try: v = float(getattr(r, val_col, 0) or 0)
+                        except (TypeError, ValueError): v = 0
+                        tm = getattr(r, "term", None); tm = int(tm) if (pd.notna(tm) and tm) else None
+                        dp = getattr(r, "date_paid", None); dps = pd.Timestamp(dp).strftime("%d-%b") if pd.notna(dp) else ""
+                        ot = ot_map.get(dn) if dn not in seen else None
+                        seen.add(dn)
+                        out.append(_row(dn, v, tm, dps, ot))
+                for dn, ot in ot_map.items():          # deals with only a one-time line
+                    if dn in seen: continue
+                    seen.add(dn); out.append(_row(dn, None, None, "", ot))
                 return out
             inc_rows = []
             for _, tr in curr_t.iterrows():
@@ -1925,18 +1973,28 @@ def _aia_ops_refresh(state):
                 va_li_n   = _VA_LI[_VA_LI["record_id"].isin(va_ids) & (_VA_LI["recurring_type"] == "New")] if "recurring_type" in _VA_LI.columns else _VA_LI.iloc[0:0]
                 comb_mrr  = (aia_li_n["mrr"].sum() + gst_li_n["mrr"].sum()
                              + ((va_li_n["unit_price"] / va_li_n["term"].replace(0,1).fillna(1)).sum() if len(va_li_n) else 0))
-                # tooltips: Revenue = every line item's unit_price; MRR = New lines'
-                # per-month rate (aia/gst 'mrr'; va unit_price/term) + one-time prices.
+                # Hover breakdowns (one line per deal). Revenue = recurring lines'
+                # unit_price; MRR = New lines' per-month rate (aia/gst 'mrr'; va
+                # unit_price/term). Both attach the deal's one-time price as OT.
                 _aia_all = _AIA_LI[_AIA_LI["record_id"].isin(list(aia_ids) + list(gst_ids))]
                 _va_all  = _VA_LI[_VA_LI["record_id"].isin(list(va_ids))]
-                rev_tip = "\n".join(_tip_lines(_aia_all, "unit_price") + _tip_lines(_va_all, "unit_price"))
-                _va_new2 = (va_li_n.assign(mrrv=va_li_n["unit_price"] / va_li_n["term"].replace(0,1).fillna(1))
-                            if len(va_li_n) else va_li_n)
+                _has_rt  = "recurring_type" in _aia_all.columns
                 _ot = (pd.concat([_aia_all[_aia_all["recurring_type"] == "One-time"],
                                   _va_all[_va_all["recurring_type"] == "One-time"]])
-                       if "recurring_type" in _aia_all.columns else _aia_all.iloc[0:0])
-                mrr_tip = "\n".join(_tip_lines(aia_li_n, "mrr") + _tip_lines(gst_li_n, "mrr")
-                                    + _tip_lines(_va_new2, "mrrv") + _tip_lines(_ot, "unit_price"))
+                       if _has_rt else _aia_all.iloc[0:0])
+                _rev_rec = (pd.concat([_aia_all[_aia_all["recurring_type"] != "One-time"],
+                                       _va_all[_va_all["recurring_type"] != "One-time"]])
+                            if _has_rt else pd.concat([_aia_all, _va_all]))
+                if len(_rev_rec):
+                    _rev_rec = _rev_rec.assign(tipval=_rev_rec["unit_price"])
+                _mrr_rec = pd.concat([
+                    aia_li_n.assign(tipval=aia_li_n["mrr"]) if len(aia_li_n) else aia_li_n,
+                    gst_li_n.assign(tipval=gst_li_n["mrr"]) if len(gst_li_n) else gst_li_n,
+                    (va_li_n.assign(tipval=va_li_n["unit_price"] / va_li_n["term"].replace(0,1).fillna(1))
+                     if len(va_li_n) else va_li_n),
+                ])
+                rev_tip = "\n".join(_tip_lines(_rev_rec, _ot, "tipval"))
+                mrr_tip = "\n".join(_tip_lines(_mrr_rec, _ot, "tipval"))
                 ach = total_rev / adj_tgt if adj_tgt > 0 else 0
                 if base_tgt == 0:    tier = "No Target Set"
                 elif total_rev == 0: tier = "No Revenue"
@@ -2653,7 +2711,7 @@ def _va_ops_refresh(state):
         tot2 = va_utm.select_dtypes("number").sum().to_dict(); tot2["UTM"]="Total"
         va_utm = pd.concat([va_utm, pd.DataFrame([tot2])], ignore_index=True)
     state.va_utm_json = grid_payload_b64(va_utm, "UTM", bar_cols=["HI (ATP)", "ATP"],
-                                         fixed=True, autosize=True, first_col_w=250,
+                                         fixed=True, first_col_w=250,
                                          header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected cohort"})
 
     _inc = _va_incentive(s, e)
@@ -2999,6 +3057,7 @@ _lead_min    = _lead_dates.min().date() if len(_lead_dates) else date(2024, 12, 
 
 # Page 1
 aia_start_date = _month_start;  aia_end_date = _month_end
+aia_date_range = [_month_start, _month_end]   # single-box range picker <-> start/end
 aia_owner_list    = sorted(_AIA["deal_owner"].dropna().unique().tolist())
 aia_campaign_list = sorted(_AIA["utm_campaign"].dropna().unique().tolist())
 aia_selected_owner = [];  aia_selected_campaign = []
@@ -3092,6 +3151,7 @@ mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_c
 
 # Page 4
 va_start_date = _month_start;  va_end_date = _month_end
+va_date_range = [_month_start, _month_end]    # single-box range picker <-> start/end
 va_owner_list    = sorted(_VA["deal_owner"].dropna().unique().tolist())
 va_campaign_list = sorted(_VA["utm_campaign"].dropna().unique().tolist())
 va_selected_owner=[]; va_selected_campaign=[]
@@ -3221,6 +3281,22 @@ def on_va_filter_change(state):
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
 def on_vaf_filter_change(state): _vaf_refresh(state); _sync_ms(state)
+
+# Single-box date-range pickers (AIA/VA Ops): split the [start, end] list back into
+# the existing start/end vars, mirror to the linked page's picker, then reuse the
+# existing filter-change flow so nothing downstream needs to know about the range.
+def on_aia_date(state):
+    dr = state.aia_date_range
+    if isinstance(dr, (list, tuple)) and len(dr) == 2 and dr[0] and dr[1]:
+        state.aia_start_date = dr[0]; state.aia_end_date = dr[1]
+        state.va_date_range = [dr[0], dr[1]]
+        on_aia_filter_change(state)
+def on_va_date(state):
+    dr = state.va_date_range
+    if isinstance(dr, (list, tuple)) and len(dr) == 2 and dr[0] and dr[1]:
+        state.va_start_date = dr[0]; state.va_end_date = dr[1]
+        state.aia_date_range = [dr[0], dr[1]]
+        on_va_filter_change(state)
 
 # ── Custom multi-select bridge ──────────────────────────────────────────────
 # key -> (state var holding the chosen list, scope deciding which refresh runs)
