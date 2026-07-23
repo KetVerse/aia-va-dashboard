@@ -1878,6 +1878,24 @@ def _aia_ops_refresh(state):
             va_c  = _rng(_VA,  "payment_date", m_start, m_end)
             aia_p = _rng(_AIA, "payment_date", pm_start, pm_end)
             va_p  = _rng(_VA,  "payment_date", pm_start, pm_end)
+            # Per-GM hover breakdown: one line per line item "Deal: ₹val · Nm · dd-Mmm"
+            # (one-time lines tagged). Used for the AIA+VA Revenue / Combined MRR cells.
+            def _tip_lines(li_frame, val_col):
+                out = []
+                if li_frame is None or len(li_frame) == 0:
+                    return out
+                for r in li_frame.sort_values("deal_name").itertuples():
+                    dn = str(getattr(r, "deal_name", "") or "").strip() or "—"
+                    try: v = float(getattr(r, val_col, 0) or 0)
+                    except (TypeError, ValueError): v = 0
+                    tm = getattr(r, "term", None)
+                    tm = int(tm) if (pd.notna(tm) and tm) else None
+                    dp = getattr(r, "date_paid", None)
+                    dps = pd.Timestamp(dp).strftime("%d-%b") if pd.notna(dp) else ""
+                    ot = "OT " if str(getattr(r, "recurring_type", "") or "") == "One-time" else ""
+                    bits = [f"₹{int(round(v)):,}"] + ([f"{tm}m"] if tm else [])
+                    out.append(f"{dn}: {ot}" + " · ".join(bits) + (f" ({dps})" if dps else ""))
+                return out
             inc_rows = []
             for _, tr in curr_t.iterrows():
                 gm        = tr["gm_combined"]
@@ -1907,6 +1925,18 @@ def _aia_ops_refresh(state):
                 va_li_n   = _VA_LI[_VA_LI["record_id"].isin(va_ids) & (_VA_LI["recurring_type"] == "New")] if "recurring_type" in _VA_LI.columns else _VA_LI.iloc[0:0]
                 comb_mrr  = (aia_li_n["mrr"].sum() + gst_li_n["mrr"].sum()
                              + ((va_li_n["unit_price"] / va_li_n["term"].replace(0,1).fillna(1)).sum() if len(va_li_n) else 0))
+                # tooltips: Revenue = every line item's unit_price; MRR = New lines'
+                # per-month rate (aia/gst 'mrr'; va unit_price/term) + one-time prices.
+                _aia_all = _AIA_LI[_AIA_LI["record_id"].isin(list(aia_ids) + list(gst_ids))]
+                _va_all  = _VA_LI[_VA_LI["record_id"].isin(list(va_ids))]
+                rev_tip = "\n".join(_tip_lines(_aia_all, "unit_price") + _tip_lines(_va_all, "unit_price"))
+                _va_new2 = (va_li_n.assign(mrrv=va_li_n["unit_price"] / va_li_n["term"].replace(0,1).fillna(1))
+                            if len(va_li_n) else va_li_n)
+                _ot = (pd.concat([_aia_all[_aia_all["recurring_type"] == "One-time"],
+                                  _va_all[_va_all["recurring_type"] == "One-time"]])
+                       if "recurring_type" in _aia_all.columns else _aia_all.iloc[0:0])
+                mrr_tip = "\n".join(_tip_lines(aia_li_n, "mrr") + _tip_lines(gst_li_n, "mrr")
+                                    + _tip_lines(_va_new2, "mrrv") + _tip_lines(_ot, "unit_price"))
                 ach = total_rev / adj_tgt if adj_tgt > 0 else 0
                 if base_tgt == 0:    tier = "No Target Set"
                 elif total_rev == 0: tier = "No Revenue"
@@ -1931,6 +1961,8 @@ def _aia_ops_refresh(state):
                     "Achievement %":    f"{ach*100:.1f}%",
                     "Incentive Tier":   tier,
                     "Incentive Payout": int(round(aia_inc + gst_inc + va_inc)),
+                    "AIA+VA Revenue tip": rev_tip,
+                    "Combined MRR tip":   mrr_tip,
                 })
             if inc_rows:
                 inc_df = pd.DataFrame(inc_rows).sort_values("Incentive Payout", ascending=False).reset_index(drop=True)
@@ -1940,14 +1972,17 @@ def _aia_ops_refresh(state):
                            "Base Target":inc_df["Base Target"].sum(),
                            "Adjusted Target":inc_df["Adjusted Target"].sum(),
                            "Achievement %":"","Incentive Tier":"",
-                           "Incentive Payout":inc_df["Incentive Payout"].sum()}
+                           "Incentive Payout":inc_df["Incentive Payout"].sum(),
+                           "AIA+VA Revenue tip":"","Combined MRR tip":""}
                 inc_df = pd.concat([inc_df, pd.DataFrame([tot_row])], ignore_index=True)
                 state.aia_incentive_json = grid_payload_b64(
                     inc_df, "GM", sort_default_col="AIA+VA Revenue",
                     center_cols=["Achievement %", "Incentive Tier"],
                     bar_cols=["Gap (Prev Month)", "Incentive Payout"],
                     bar_color={"Gap (Prev Month)": "#f1a0a0", "Incentive Payout": "#c5e07a"},
-                    heat_cols={"AIA+VA Revenue": "green"}, autosize=True)
+                    heat_cols={"AIA+VA Revenue": "green"}, autosize=True,
+                    tip_cols={"AIA+VA Revenue": "AIA+VA Revenue tip",
+                              "Combined MRR": "Combined MRR tip"})
             else:
                 state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
 

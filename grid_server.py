@@ -555,13 +555,30 @@ function streakHtml(s){
     t.style.top=top+"px"; t.style.left=left+"px";
   }
   function hide(){ var t=el(); if(t) t.style.display="none"; }
+  // Generic text tooltip for any cell carrying data-tip (from grid tip_cols) — a
+  // JS bubble so it works on mobile-with-mouse, unlike a native title=. Deal names
+  // can contain <>&, so escape before injecting; \n -> <br> for multi-line.
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function showText(elm){
+    var t=el(); if(!t) return; clearTimeout(hideT);
+    var txt=elm.getAttribute("data-tip"); if(!txt) return;
+    t.innerHTML=esc(txt).replace(/\n/g,"<br>");
+    t.style.display="block";
+    var r=elm.getBoundingClientRect(), tr=t.getBoundingClientRect();
+    var top=r.top-tr.height-8; if(top<4) top=r.bottom+8;
+    var left=r.left+r.width/2-tr.width/2;
+    left=Math.max(4, Math.min(left, window.innerWidth-tr.width-4));
+    t.style.top=top+"px"; t.style.left=left+"px";
+  }
   document.addEventListener("mouseover", function(e){
     var dot=e.target.closest ? e.target.closest(".dot") : null;
-    if(dot) show(dot);
+    if(dot){ show(dot); return; }
+    var te=e.target.closest ? e.target.closest("[data-tip]") : null;
+    if(te) showText(te);
   });
   document.addEventListener("mouseout", function(e){
-    var dot=e.target.closest ? e.target.closest(".dot") : null;
-    if(dot){ clearTimeout(hideT); hideT=setTimeout(hide, 600); }
+    var hit=e.target.closest ? (e.target.closest(".dot") || e.target.closest("[data-tip]")) : null;
+    if(hit){ clearTimeout(hideT); hideT=setTimeout(hide, 600); }
   });
 })();
 function body(){
@@ -587,11 +604,11 @@ function body(){
     const idx=colIdx[src]; if(idx===undefined) return "";
     return String(r[idx]==null?"":r[idx]).trim();
   }
-  function tipAttr(colName, r){        // native title= from a hidden source column
-    const src=tipCols[colName]; if(!src) return "";
-    const idx=colIdx[src]; if(idx===undefined) return "";
+  function tipAttr(colName, r){        // JS bubble (see streaktip IIFE) from a hidden
+    const src=tipCols[colName]; if(!src) return "";   // source column. NOT native title=,
+    const idx=colIdx[src]; if(idx===undefined) return "";  // which mobile browsers ignore.
     const t=String(r[idx]==null?"":r[idx]).trim();
-    return t ? ' title="'+t.replace(/"/g,"&quot;")+'"' : "";
+    return t ? ' data-tip="'+t.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/\n/g,"&#10;")+'"' : "";
   }
   const maxes={};
   bars.forEach((on,i)=>{ if(on) maxes[i]=colMax(i); });
