@@ -3,6 +3,7 @@ AIA + VA Operations Dashboard — 5 Pages
 Run: python main.py
 """
 import os
+import re
 import sys
 import math
 import json
@@ -481,6 +482,55 @@ _DC_LEGEND_SCRIPT = """
 </script>
 """
 
+_DSIG_SCRIPT = """
+<script id="dsig-render">
+// The Marketing "Daily signals" panel is emitted as an HTML string through a Taipy
+// text|mode=raw holder, which renders it HTML-ESCAPED (as visible text). This reads
+// that decoded text (element.textContent unescapes the entities) and injects it as
+// real innerHTML into a sibling render div. CSS hides the raw source (.taipy-text-raw)
+// so it never flashes; a MutationObserver injects the instant Taipy drops the content
+// in (and re-syncs after each data refresh), with a slow interval as a safety net.
+(function(){
+  function sync(){
+    document.querySelectorAll('.dsig-holder').forEach(function(h){
+      var raw = h.querySelector('.taipy-text-raw');
+      if(!raw) return;
+      var html = raw.textContent || '';
+      var tgt = h.querySelector('.dsig-render-target');
+      if(!tgt){
+        tgt = document.createElement('div');
+        tgt.className = 'dsig-render-target';
+        raw.parentNode.insertBefore(tgt, raw);
+      }
+      if(tgt._lastHtml !== html){
+        tgt.innerHTML = html;
+        tgt._lastHtml = html;
+      }
+      raw.style.display = 'none';
+    });
+  }
+  var pending = false;
+  function schedule(){                        // coalesce mutation bursts into one sync
+    if(pending) return;
+    pending = true;
+    (window.requestAnimationFrame || function(f){ setTimeout(f, 0); })(function(){
+      pending = false; sync();
+    });
+  }
+  function start(){
+    if(document.body){
+      new MutationObserver(schedule).observe(document.body, {childList: true, subtree: true});
+    }
+    sync();
+  }
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', start);
+  } else { start(); }
+  setInterval(sync, 1000);                    // safety net
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
@@ -491,7 +541,7 @@ def _inject_zoom_lock(resp):
                     "</body>",
                     _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT
                     + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + _DATERANGE_SCRIPT
-                    + _CHART_KEYS_SCRIPT + _DC_LEGEND_SCRIPT + "</body>"))
+                    + _CHART_KEYS_SCRIPT + _DC_LEGEND_SCRIPT + _DSIG_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass
@@ -1214,6 +1264,33 @@ def _load_acct_by_email():
                 m[em] = ac
     return m
 
+def _load_signals():
+    """Marketing 'Daily signals' inputs from Supabase: GA sessions (ga_daily) and
+    the AI SDR WhatsApp log ("AI SDR - Conversations"). Both are bounded to a rolling
+    45-day window (this project had a prior Disk-IO incident, so every pull is bounded
+    + time-limited) and each is guarded independently so a failure just yields an empty
+    frame rather than blanking the Marketing page. aia_live lives on Neon, so the joins
+    to these happen later in pandas."""
+    ga = pd.DataFrame(columns=["date", "hostname", "landing_page", "sessions"])
+    conv = pd.DataFrame(columns=["lead_phone", "deal_id", "direction",
+                                 "template_name", "delivery_status", "timestamp"])
+    try:
+        ga = _q(SUPABASE_URL,
+            "SELECT date, hostname, landing_page, sessions FROM public.ga_daily "
+            "WHERE date >= current_date - interval '45 days'",
+            statement_timeout_ms=15000)
+    except Exception as ex:
+        print(f"[WARN] ga_daily load failed: {ex} -- using empty frame")
+    try:
+        conv = _q(SUPABASE_URL,
+            'SELECT lead_phone, deal_id, direction, template_name, delivery_status, '
+            '"timestamp" FROM "AI SDR - Conversations" '
+            "WHERE \"timestamp\" >= now() - interval '45 days'",
+            statement_timeout_ms=20000)
+    except Exception as ex:
+        print(f"[WARN] AI SDR conversations load failed: {ex} -- using empty frame")
+    return ga, conv
+
 def _load_all():
     try:
         aia = _q(NEON_URL, "SELECT * FROM public.aia_live WHERE is_deleted IS NULL")
@@ -1373,6 +1450,36 @@ def _prep_li(raw):
     aia_li = df[df["pipeline"]=="AIA"].copy()
     va_li  = df[df["pipeline"]=="Virtual Accounting"].copy()
     return aia_li, va_li
+
+def _phone10(v):
+    """Normalise any phone string to its last 10 digits (drops +91 / spaces / dashes)
+    so aia_live.poc_number and Conversations.lead_phone join on the same key."""
+    d = re.sub(r"\D", "", str(v or ""))
+    return d[-10:] if len(d) >= 10 else ""
+
+def _prep_signals(ga, conv):
+    """Normalise the Daily-signals inputs. GA: date -> midnight, sessions numeric.
+    Conversations: timestamptz -> naive IST, a msg_date day column, a last-10-digit
+    phone key, and lower-cased direction/template/status for clean matching."""
+    ga = ga.copy() if ga is not None else pd.DataFrame()
+    if len(ga):
+        if "date" in ga.columns:
+            ga["date"] = pd.to_datetime(ga["date"], errors="coerce").dt.normalize()
+        ga["sessions"] = pd.to_numeric(ga.get("sessions"), errors="coerce").fillna(0)
+    conv = conv.copy() if conv is not None else pd.DataFrame()
+    if len(conv):
+        ts = pd.to_datetime(conv["timestamp"], errors="coerce", utc=True)
+        ts_ist = ts.dt.tz_convert(_IST).dt.tz_localize(None)
+        conv["timestamp"] = ts_ist
+        conv["msg_date"] = ts_ist.dt.normalize()
+        conv["p10"] = conv["lead_phone"].apply(_phone10)
+        for cc in ("direction", "template_name", "delivery_status"):
+            if cc in conv.columns:
+                conv[cc] = conv[cc].astype(str).str.strip().str.lower()
+    return ga, conv
+
+_RAW_GA, _RAW_CONV = _load_signals()
+_GA, _CONV = _prep_signals(_RAW_GA, _RAW_CONV)
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -1555,7 +1662,10 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL
+    global _RAW_GA, _RAW_CONV, _GA, _CONV
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
+    _RAW_GA, _RAW_CONV = _load_signals()
+    _GA, _CONV = _prep_signals(_RAW_GA, _RAW_CONV)
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -2633,7 +2743,224 @@ def _cs_refresh(state):
 # PAGE 3 — MARKETING
 # ═══════════════════════════════════════════════════════════════════
 
+# ── Marketing "Daily signals" panel ──────────────────────────────────────────
+_FT_TEMPLATES = {"initial_verification", "demo_details", "updated_demo_details"}
+_DS_TEMPLATES = {"demo_details", "updated_demo_details"}
+_DELIVERED_STATUS = {"delivered", "read"}
+
+def _grp(n):
+    """Indian-grouped integer string, NO currency symbol: 1234567 -> '12,34,567'.
+    (Distinct from _inr, which prefixes ₹ — keep them separate.)"""
+    n = int(round(float(n)))
+    neg = n < 0
+    s = str(abs(n))
+    if len(s) > 3:
+        head, tail = s[:-3], s[-3:]
+        head = re.sub(r"(?<=\d)(?=(?:\d\d)+$)", ",", head)
+        s = head + "," + tail
+    return ("-" if neg else "") + s
+
+def _mad_band(vals):
+    """Median and the MAD band: median ± 1.4826·MAD (robust ~1σ). MAD is used
+    instead of stddev because ad spend / lead counts are spiky and one outlier day
+    would inflate σ enough to swallow a genuine anomaly."""
+    a = np.asarray([float(x) for x in vals], dtype=float)
+    if a.size == 0:
+        return 0.0, 0.0, 0.0
+    med = float(np.median(a))
+    mad = float(np.median(np.abs(a - med)))
+    span = 1.4826 * mad
+    return med, med - span, med + span
+
+def _rate_color(v, good, ok):
+    return "green" if v >= good else ("amber" if v >= ok else "red")
+
+def _sig_rate_card(title, value_txt, unit, sub, pct, color, date_txt=""):
+    pct = max(0.0, min(100.0, float(pct)))
+    date_html = f'<span class="dsig-date">{date_txt}</span>' if date_txt else ""
+    return (
+        f'<div class="dsig-card dsig-{color}">'
+        f'<div class="dsig-title"><span class="dsig-name">{title}</span>{date_html}</div>'
+        f'<div class="dsig-val dsig-val-{color}">{value_txt}<span class="dsig-unit">{unit}</span></div>'
+        f'<div class="dsig-sub">{sub}</div>'
+        f'<div class="dsig-bar"><div class="dsig-bar-fill dsig-fill-{color}" style="width:{pct:.2f}%"></div></div>'
+        f'</div>')
+
+def _sig_band_card(title, value_txt, date_txt, lo, med, hi, value, is_money, higher_good=True):
+    # Colour is direction-aware, not just "in/out of band": red means a BAD surprise, not
+    # merely an unusual one. In band -> green (normal). Out of band -> good if it moved the
+    # helpful way (leads up / spend down) = green, else red. So a lead spike reads green,
+    # a lead drought or a spend blow-out reads red.
+    lo = max(0.0, float(lo)); hi = float(hi); med = float(med); value = float(value)
+    in_band = (lo <= value <= hi)
+    if in_band:
+        status = "green"
+    else:
+        good = (value > hi) == bool(higher_good)   # above & higher-good, or below & lower-good
+        status = "green" if good else "red"
+    width = (hi - lo) if hi > lo else 1.0
+    clamp = lambda x: max(0.0, min(100.0, x))
+    pos     = clamp((value - lo) / width * 100.0)
+    mid_pos = clamp((med   - lo) / width * 100.0)
+    fmt = (lambda x: "₹" + _grp(x)) if is_money else (lambda x: _grp(x))
+    date_html = f'<span class="dsig-date">{date_txt}</span>' if date_txt else ""
+    return (
+        f'<div class="dsig-card dsig-band dsig-{status}">'
+        f'<div class="dsig-title"><span class="dsig-name">{title}</span>{date_html}</div>'
+        f'<div class="dsig-val">{value_txt}</div>'
+        '<div class="dsig-slider">'
+        '<div class="dsig-track"></div>'
+        f'<div class="dsig-mid" style="left:{mid_pos:.2f}%"></div>'
+        f'<div class="dsig-dot dsig-dot-{status}" style="left:{pos:.2f}%"></div>'
+        '</div>'
+        f'<div class="dsig-scale"><span>{fmt(lo)}</span><span>{fmt(med)}</span><span>{fmt(hi)}</span></div>'
+        '</div>')
+
+def _daily_signals_html():
+    """Build the 6 'Daily signals' cards. Funnel cards (LP traffic-to-lead, First-touch,
+    DS follow-up, WhatsApp delivered) are for TODAY (IST); the two Google band cards
+    (spend, leads) are for YESTERDAY with a trailing-28-day median ± MAD band. aia_live
+    (Neon) joins to Conversations (Supabase) on the last-10-digit phone; POC history for
+    the first-touch template gate is bounded to the 45-day Conversations pull."""
+    now_ist = datetime.now(_IST)
+    today = pd.Timestamp(now_ist.date())
+    yday  = today - pd.Timedelta(days=1)
+    aia, conv, ga, mkt = _AIA, _CONV, _GA, _MKT
+
+    def _live(df):
+        return df[df["is_deleted"] != "Yes"] if "is_deleted" in df.columns else df
+
+    # outbound messages grouped by last-10 phone (for the three messaging cards)
+    by_phone = {}
+    if len(conv):
+        cout = conv[conv["direction"] == "outbound"]
+        by_phone = {p: g for p, g in cout.groupby("p10") if p}
+
+    # Card 2 — First-touch sent (today's created deals)
+    dt = _live(_rng(aia, "create_date", today, today)).copy()
+    ft_den = int(dt["record_id"].nunique()) if len(dt) else 0
+    ft_num = 0
+    deliver_flags = []           # one per first-touch deal -> feeds the delivered card
+    if len(dt):
+        dt["p10"] = dt["poc_number"].apply(_phone10) if "poc_number" in dt.columns else ""
+        for _, r in dt.iterrows():
+            p = r["p10"]; cdate = r["create_date"]
+            pf = by_phone.get(p)
+            if pf is None or pd.isna(cdate):
+                continue
+            outs  = pf[pf["msg_date"] >= cdate]     # outbound after the deal was created
+            prior = pf[pf["msg_date"] <  cdate]     # any earlier thread => repeat POC
+            is_repeat = len(prior) > 0
+            cand = outs if is_repeat else outs[outs["template_name"].isin(_FT_TEMPLATES)]
+            if len(cand):
+                ft_num += 1
+                first = cand.sort_values("timestamp").iloc[0]
+                deliver_flags.append(str(first["delivery_status"]) in _DELIVERED_STATUS)
+    ft_rate = (100.0 * ft_num / ft_den) if ft_den else 0.0
+
+    # Card 4 — WhatsApp delivered (of the first-touch messages that went out)
+    del_den = len(deliver_flags)
+    del_num = int(sum(deliver_flags))
+    del_rate = (100.0 * del_num / del_den) if del_den else 0.0
+
+    # Card 3 — DS follow-up sent (today's demos booked)
+    ds = _live(_rng(aia, "ds_date", today, today)).copy()
+    ds_den = int(ds["record_id"].nunique()) if len(ds) else 0
+    ds_num = 0
+    if len(ds):
+        ds["p10"] = ds["poc_number"].apply(_phone10) if "poc_number" in ds.columns else ""
+        for _, r in ds.iterrows():
+            p = r["p10"]; bdate = r["ds_date"]
+            pf = by_phone.get(p)
+            if pf is None or pd.isna(bdate):
+                continue
+            cand = pf[(pf["msg_date"] >= bdate) & (pf["template_name"].isin(_DS_TEMPLATES))]
+            if len(cand):
+                ds_num += 1
+    ds_rate = (100.0 * ds_num / ds_den) if ds_den else 0.0
+
+    # gads leads (deal_source contains GAds/Google), non-deleted, dated
+    def _gads_live(df):
+        d = _live(df)
+        if "deal_source" in d.columns:
+            d = d[d["deal_source"].astype(str).str.contains("gads|google", case=False, na=False)]
+        return d
+    gl = _gads_live(aia).copy()
+    gl["_d"] = pd.to_datetime(gl["create_date"], errors="coerce").dt.normalize()
+
+    ydtxt = yday.strftime("%d %b")
+
+    # Card 1 — LP traffic-to-lead (YESTERDAY): gads leads / paid gads sessions.
+    # Yesterday (not today) because GA sessions land ~a day late.
+    lp_den = 0
+    if len(ga):
+        g = ga.copy()
+        g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
+        sel = g[(g["_d"] == yday)
+                & (g["hostname"].astype(str) == "www.aiaccountant.com")
+                & (g["landing_page"].astype(str).str.contains("gads", case=False, na=False))]
+        lp_den = int(pd.to_numeric(sel["sessions"], errors="coerce").fillna(0).sum())
+    lp_num = int(gl[gl["_d"] == yday]["record_id"].nunique())
+    lp_rate = (100.0 * lp_num / lp_den) if lp_den else 0.0
+
+    # Band = the last 7 days PREVIOUS TO yesterday (yesterday itself excluded), so
+    # yesterday is judged against the past week of clean history — a genuine spike/drop
+    # yesterday isn't diluted by being counted in its own band. So if yesterday's leads
+    # jump to 54 while the prior 7 days top out at 49, it reads OUT of band (dot right, red).
+    _BAND_DAYS = 7
+    band_start = yday - pd.Timedelta(days=_BAND_DAYS)  # yday-7 .. yday-1  (7 days)
+    band_end   = yday - pd.Timedelta(days=1)
+    band_idx   = pd.date_range(band_start, band_end, freq="D")
+
+    # Card 6 — Google leads: yesterday's value vs the prior-28-day band
+    leads_val = int(gl[gl["_d"] == yday]["record_id"].nunique())
+    ld = gl[(gl["_d"] >= band_start) & (gl["_d"] <= band_end)]
+    ld_daily = ld.groupby("_d")["record_id"].nunique().reindex(band_idx, fill_value=0)
+    l_med, l_lo, l_hi = _mad_band(ld_daily.values)
+
+    # Card 5 — Google spend: yesterday's value vs the prior-28-day band
+    gs = mkt.copy()
+    if "channel" in gs.columns:
+        gs = gs[gs["channel"] == "Google Ads"]
+    spend_val = 0.0; s_med = s_lo = s_hi = 0.0
+    if {"day", "cost"}.issubset(gs.columns) and len(gs):
+        gs["_d"] = pd.to_datetime(gs["day"], errors="coerce").dt.normalize()
+        spend_val = float(gs.loc[gs["_d"] == yday, "cost"].sum())
+        spb = gs[(gs["_d"] >= band_start) & (gs["_d"] <= band_end)]
+        sp_daily = spb.groupby("_d")["cost"].sum().reindex(band_idx, fill_value=0.0)
+        s_med, s_lo, s_hi = _mad_band(sp_daily.values)
+    spend_date = ydtxt
+
+    cards = [
+        _sig_rate_card("LP Traffic-to-Deal (Google)", f"{lp_rate:.2f}", "%",
+                       f"{lp_num} of {_grp(lp_den)} sessions", lp_rate,
+                       _rate_color(lp_rate, 0.8, 0.4), ydtxt),
+        _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
+                       f"{ft_num} of {ft_den} deals", ft_rate,
+                       _rate_color(ft_rate, 90, 75)),
+        _sig_rate_card("DS follow-up sent", f"{ds_rate:.1f}", "%",
+                       f"{ds_num} of {ds_den} demos", ds_rate,
+                       _rate_color(ds_rate, 90, 75)),
+        _sig_rate_card("WhatsApp delivered", f"{del_rate:.1f}", "%",
+                       f"{del_num} of {del_den} sent", del_rate,
+                       _rate_color(del_rate, 90, 75)),
+        _sig_band_card("Google spend", "₹" + _grp(spend_val), spend_date,
+                       s_lo, s_med, s_hi, spend_val, True, higher_good=False),
+        _sig_band_card("Google leads", str(leads_val), ydtxt,
+                       l_lo, l_med, l_hi, leads_val, False, higher_good=True),
+    ]
+    head = (f'<div class="dsig-head">Daily signals '
+            f'<span>{today.strftime("%d %b %Y")}</span></div>')
+    return ('<div class="dsig-panel">' + head
+            + '<div class="dsig-grid">' + "".join(cards) + '</div></div>')
+
+
 def _mkt_refresh(state):
+    try:
+        state.mkt_signals_html = _daily_signals_html()
+    except Exception as ex:
+        print(f"[WARN] daily signals failed: {ex}")
+        state.mkt_signals_html = ""
     s = pd.Timestamp(state.mkt_start_date)
     e = pd.Timestamp(state.mkt_end_date)
     mkt_all = _MKT[(_MKT["day"]>=s)&(_MKT["day"]<=e)] if "day" in _MKT.columns else _MKT
@@ -3274,6 +3601,7 @@ mkt_line_item_list = (["All"] + sorted(_AIA_LI["line_item_name"].dropna().unique
 mkt_selected_deal="All"; mkt_selected_line_item="All"
 mkt_kpi_spend="₹0"; mkt_kpi_leads="0"; mkt_kpi_cpl="₹0"; mkt_kpi_cac="₹0"
 mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
+mkt_signals_html=""
 mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_df=pd.DataFrame()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""

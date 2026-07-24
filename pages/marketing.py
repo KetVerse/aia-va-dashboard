@@ -11,6 +11,10 @@ MARKETING_PAGE = """
 <|Refreshed at: {last_synced} IST|text|class_name=sync-stamp|>
 |>
 
+<|part|class_name=dsig-holder|
+<|{mkt_signals_html}|text|mode=raw|>
+|>
+
 <|layout|columns=1 1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Total Spend

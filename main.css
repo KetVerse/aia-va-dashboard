@@ -553,7 +553,161 @@ table.taipy-table thead tr th,
     vertical-align: middle !important;
 }
 
+/* ── Marketing "Daily signals" panel ────────────────────────────────────── */
+/* The panel HTML is delivered through a Taipy text|mode=raw holder, which renders it
+   HTML-ESCAPED (visible markup). Keep that source hidden so it never flashes before the
+   injection script (see _DSIG_SCRIPT) swaps in the real cards. */
+.dsig-holder .taipy-text-raw { display: none !important; }
+
+.dsig-panel {
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    padding: 16px 18px 18px 18px;
+    margin: 4px 3px 16px 3px;
+}
+.dsig-head {
+    font-size: 15px;
+    font-weight: 700;
+    color: #1e293b;
+    margin-bottom: 14px;
+}
+.dsig-head span {
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    margin-left: 8px;
+}
+.dsig-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+}
+.dsig-card {
+    background: #ffffff;
+    border: 1px solid #e6eaf1;
+    border-top: 3px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 11px 12px 13px 12px;
+    min-height: 96px;
+}
+.dsig-green { border-top-color: #16a34a; }
+.dsig-amber { border-top-color: #f59e0b; }
+.dsig-red   { border-top-color: #dc2626; }
+/* band cards carry a direction-aware status class (dsig-green / dsig-red) that colours
+   the top strip; the neutral fallback below only applies if no status is set */
+.dsig-band:not(.dsig-green):not(.dsig-red):not(.dsig-amber) { border-top-color: #cbd5e1; }
+
+.dsig-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #475569;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 6px;
+    line-height: 1.25;
+    min-height: 30px;      /* 2 lines' worth, so single- and double-line titles align */
+}
+.dsig-name { min-width: 0; }        /* allow long labels to wrap instead of overflowing */
+.dsig-date {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #64748b;
+    flex: none;
+    white-space: nowrap;
+}
+.dsig-val {
+    font-size: 24px;
+    font-weight: 800;
+    line-height: 1.05;
+    color: #1f3a5f;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+}
+.dsig-val-green { color: #16a34a; }
+.dsig-val-amber { color: #b45309; }
+.dsig-val-red   { color: #dc2626; }
+.dsig-unit {
+    font-size: 13px;
+    font-weight: 700;
+    color: #64748b;
+    margin-left: 3px;
+}
+.dsig-sub {
+    font-size: 11px;
+    color: #64748b;
+    margin: 5px 0 9px 0;
+}
+
+/* progress-bar rate cards */
+.dsig-bar {
+    height: 6px;
+    background: #eef2f7;
+    border-radius: 4px;
+    overflow: hidden;
+}
+.dsig-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: #cbd5e1;
+}
+.dsig-fill-green { background: #16a34a; }
+.dsig-fill-amber { background: #f59e0b; }
+.dsig-fill-red   { background: #dc2626; }
+
+/* band-slider cards (spend / leads) */
+.dsig-slider {
+    position: relative;
+    height: 16px;
+    margin: 12px 0 2px 0;
+}
+.dsig-track {
+    position: absolute;
+    top: 50%;
+    left: 0; right: 0;
+    height: 6px;
+    transform: translateY(-50%);
+    background: #d7e3f2;
+    border-radius: 4px;
+}
+.dsig-mid {
+    position: absolute;
+    top: 50%;
+    width: 2px;
+    height: 13px;
+    transform: translate(-50%, -50%);
+    background: #94a3b8;
+    border-radius: 1px;
+}
+.dsig-dot {
+    position: absolute;
+    top: 50%;
+    width: 13px;
+    height: 13px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.08);
+}
+.dsig-dot-green { background: #16a34a; }
+.dsig-dot-red   { background: #dc2626; }
+.dsig-scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9.5px;
+    font-weight: 600;
+    color: #64748b;
+    margin-top: 6px;
+    white-space: nowrap;
+}
+
 /* ── Responsive ─────────────────────────────────────────────────────────── */
+/* Daily-signals: 6-up on wide, then 3 / 2 / 1 as width drops */
+@media (max-width: 1250px) { .dsig-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 820px)  { .dsig-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px)  { .dsig-grid { grid-template-columns: 1fr; } }
 @media (max-width: 900px) {
     .kpi-value { font-size: 20px !important; }
     .filter-bar { flex-wrap: wrap !important; }
