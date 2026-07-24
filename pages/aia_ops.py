@@ -84,9 +84,9 @@ Refunds
 <|chart|figure={aia_funnel_fig}|plot_config={chart_config}|>
 |>
 <|part|class_name=chart-card|
-**Demo Conducted vs Qualified Trend**
+**Demos Scheduled vs Conducted vs Qualified Trend**
 
-<|chart|figure={aia_trend_fig}|plot_config={chart_config}|>
+<|chart|figure={aia_trend_fig}|plot_config={trend_config}|>
 |>
 |>
 

@@ -76,9 +76,9 @@ EOM Estimate
 <|chart|figure={va_funnel_fig}|plot_config={chart_config}|>
 |>
 <|part|class_name=chart-card|
-**Demo Conducted Trend**
+**Demos Scheduled vs Conducted Trend**
 
-<|{va_trend_df}|chart|type=bar|x=date_label|y=DC|layout={va_trend_layout}|plot_config={chart_config}|>
+<|chart|figure={va_trend_fig}|plot_config={trend_config}|>
 |>
 |>
 

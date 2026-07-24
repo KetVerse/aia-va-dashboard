@@ -399,6 +399,88 @@ _DATERANGE_SCRIPT = """
 </script>
 """
 
+_CHART_KEYS_SCRIPT = """
+<script id="trend-chart-keys">
+// Trend charts: while hovering one, press 'z' = Zoom, 'v' = Pan, 'r' = Reset axes.
+// Clicks the plotly modebar button for that plot (no global Plotly needed). Scoped
+// to the trend plots (those with a DS bar trace) so other charts/inputs are safe.
+(function(){
+  var hovered = null;
+  function isTrend(gd){
+    try { return (gd.data||[]).some(function(t){ return t.name==='DS'; }); }
+    catch(e){ return false; }
+  }
+  document.addEventListener('mouseover', function(e){
+    var gd = e.target.closest ? e.target.closest('.js-plotly-plot') : null;
+    if(gd && gd.data && isTrend(gd)) hovered = gd;
+  });
+  var MAP = {z:'Zoom', v:'Pan', r:'Reset axes'};
+  document.addEventListener('keydown', function(e){
+    if(!hovered) return;
+    var tag = e.target && e.target.tagName;
+    if(tag && /^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;   // don't hijack typing
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    var title = MAP[(e.key||'').toLowerCase()];
+    if(!title) return;
+    var btn = hovered.querySelector('.modebar a[data-title="'+title+'"]');
+    if(btn){ btn.click(); e.preventDefault(); }
+  });
+})();
+</script>
+"""
+
+_DC_LEGEND_SCRIPT = """
+<script id="trend-anno-sync">
+// The DC numbers and the Qualified value boxes are plotly ANNOTATIONS (layout-level), so
+// unlike bar/line text they do NOT disappear when their series is unchecked in the legend.
+// This keeps them in sync with the legend: hide the DC numbers when DC is off, hide the
+// Qualified boxes when Qualified is off. DS labels are bar text, so they hide on their own.
+// Also: DC numbers are WHITE so they read on the blue DS bar; when DS is off they sit on a
+// white background, so flip them to dark. Annotations are classified by their text colour
+// (navy = Qualified box; white/dark-orange = DC number). Scoped to trend plots (DS bar).
+(function(){
+  var DARK = '#9c4a0f', NAVY = 'rgb(31,78,121)';
+  function isTrend(gd){ try { return (gd.data||[]).some(function(t){return t.name==='DS';}); } catch(e){ return false; } }
+  function vis(gd, name){
+    var t = (gd.data||[]).find(function(x){ return x.name===name; });
+    if(!t) return 'absent';
+    return (t.visible==='legendonly') ? 'off' : 'on';
+  }
+  function fillOf(t){
+    var f = (t.style && t.style.fill) || t.getAttribute('fill') || '';
+    return f.replace(/\\s+/g, '').toLowerCase();
+  }
+  function sync(gd){
+    var dsOff = vis(gd,'DS')==='off', dcOff = vis(gd,'DC')==='off', qOff = vis(gd,'Qualified')==='off';
+    gd.querySelectorAll('.infolayer text.annotation-text').forEach(function(t){
+      var grp = (t.closest && t.closest('.annotation')) || t.parentNode;
+      var f = fillOf(t);
+      if(f === NAVY){                               // Qualified value box
+        grp.style.display = qOff ? 'none' : '';
+        return;
+      }
+      // otherwise a DC number (white, or dark-orange on DC>=DS days)
+      if(dcOff){ grp.style.display = 'none'; return; }
+      grp.style.display = '';
+      if(dsOff && (f === 'rgb(255,255,255)' || f === '#ffffff')){   // on white bg -> dark
+        t.style.fill = DARK;
+        t.querySelectorAll('tspan').forEach(function(s){ s.style.fill = DARK; });
+      }
+    });
+  }
+  function bind(){
+    document.querySelectorAll('.js-plotly-plot').forEach(function(gd){
+      if(gd._trendSync || !isTrend(gd) || typeof gd.on !== 'function') return;
+      gd._trendSync = true;
+      gd.on('plotly_afterplot', function(){ sync(gd); });
+      sync(gd);
+    });
+  }
+  setInterval(bind, 1500); bind();
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
@@ -408,7 +490,8 @@ def _inject_zoom_lock(resp):
                 resp.set_data(html.replace(
                     "</body>",
                     _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT
-                    + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + _DATERANGE_SCRIPT + "</body>"))
+                    + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + _DATERANGE_SCRIPT
+                    + _CHART_KEYS_SCRIPT + _DC_LEGEND_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass
@@ -468,36 +551,67 @@ def _make_funnel(stages, values, labels):
     return fig
 
 
-def _make_trend(labels, dc, qual):
-    """Line + column combo (Power BI style): DC as blue bars, Qualified as a
-    dark-blue line with markers; value labels in soft rounded boxes; bold dates."""
+def _make_trend(labels, ds, dc, qual=None):
+    """Overlay column + optional line (Power BI style): DS as blue bars in the BACK
+    and DC as orange bars in FRONT, both on the 0 baseline (so DC reads as a portion
+    of DS, not added to it); Qualified — when given — as a navy spline with boxed
+    values. DS labels sit above each bar; DC numbers sit just above the orange bar,
+    adaptively lifted so they never overlap the Qualified boxes. Bold labels + ticks."""
     xb = [f"<b>{l}</b>" for l in labels]   # slightly bold date ticks
-    bar_c, line_c = "#1a7fc4", "#1f4e79"
+    ds_c, dc_c, line_c = "#1a7fc4", "#ed7d31", "#1f4e79"   # DS blue, DC orange, line navy
     fig = go.Figure()
-    fig.add_bar(x=xb, y=dc, name="DC", marker_color=bar_c, marker_line_width=0,
-                text=[str(d) if d else "" for d in dc], textposition="outside",
+    # DS behind (full-height bar) — the only bars that carry value labels
+    fig.add_bar(x=xb, y=ds, name="DS", marker_color=ds_c, marker_line_width=0,
+                text=[f"<b>{v}</b>" if v else "" for v in ds], textposition="outside",
                 textfont={"size": 10, "color": "#1a3a6b", "family": "Inter,sans-serif"},
                 cliponaxis=False)
-    fig.add_scatter(x=xb, y=qual, name="Qualified", mode="lines+markers",
-                    line={"color": line_c, "width": 3, "shape": "spline"},
-                    marker={"size": 7, "color": line_c})
+    # DC in front (drawn after DS -> on top), orange. Its value is a white number just
+    # ABOVE the orange bar, adaptively lifted so it never overlaps the Qualified box
+    # below it (Conducted >= Qualified); dark text on the rare DC >= DS day (sits on
+    # white). White reads on the blue DS bar.
+    fig.add_bar(x=xb, y=dc, name="DC", marker_color=dc_c, marker_line_width=0,
+                cliponaxis=False)
 
-    # soft rounded label boxes for the LINE points only
+    # Stack bottom -> top: Qualified box, DC number, DS label — never overlapping. Use
+    # an estimate of px-per-data-unit to lift the DC number clear of the Qualified box.
+    _qs = list(qual) if qual is not None else [0] * len(dc)
+    _ymax = max([v for v in list(ds) + list(dc) + _qs if v] + [1])
+    _ppu = 240.0 / (_ymax * 1.12)          # ~plot-area px per unit (h360 - t30 - b90)
     anns = []
-    for x, q in zip(xb, qual):
-        if q:
-            anns.append(dict(x=x, y=q, text=f"<b>{q}</b>", showarrow=False, yshift=13,
-                             bgcolor="#e6edf6", bordercolor="#9fb6d4", borderpad=3,
-                             font=dict(size=10, color=line_c, family="Inter,sans-serif")))
+    for i, (x, d) in enumerate(zip(xb, dc)):
+        if not d:
+            continue
+        q   = _qs[i] if i < len(_qs) else 0
+        dsv = ds[i]  if i < len(ds)  else 0
+        dc_ys = 11
+        if q:                               # lift so the DC number clears the Qual box
+            _need = 32 - (d - q) * _ppu
+            if _need > dc_ys:
+                dc_ys = _need
+        _col = "#ffffff" if d < dsv else "#9c4a0f"
+        anns.append(dict(x=x, y=d, text=f"<b>{d}</b>", showarrow=False, yshift=round(dc_ys),
+                         font=dict(size=10, color=_col, family="Inter,sans-serif")))
+    if qual is not None:
+        fig.add_scatter(x=xb, y=qual, name="Qualified", mode="lines+markers",
+                        line={"color": line_c, "width": 3, "shape": "spline"},
+                        marker={"size": 7, "color": line_c})
+        # soft rounded label boxes for the LINE points only
+        for x, q in zip(xb, qual):
+            if q:
+                anns.append(dict(x=x, y=q, text=f"<b>{q}</b>", showarrow=False, yshift=13,
+                                 bgcolor="#e6edf6", bordercolor="#9fb6d4", borderpad=3,
+                                 font=dict(size=10, color=line_c, family="Inter,sans-serif")))
     fig.update_layout(
-        barmode="group", height=360, annotations=anns,
+        barmode="overlay", height=360, annotations=anns, dragmode="pan",
         margin={"l": 40, "r": 20, "t": 30, "b": 90},
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font={"family": "Inter,sans-serif", "size": 12},
         legend={"orientation": "h", "y": -0.34, "x": 0},
         xaxis={"title": "", "tickangle": -45,
                "tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#1a3a6b"}},
-        yaxis={"title": "", "showgrid": True, "gridcolor": "#eef2f7"},
+        # fixedrange locks the y-axis so drag/pan only moves left-right (no up-down
+        # or diagonal); the x-axis stays pannable.
+        yaxis={"title": "", "showgrid": True, "gridcolor": "#eef2f7", "fixedrange": True},
     )
     return fig
 
@@ -1791,17 +1905,22 @@ def _aia_ops_refresh(state):
         ["Leads", "DS", "DC", "HI", "Paid"],
         [leads, ds_n, dc_n, hi2, paid2], _labels)
 
-    # DC vs Qualified trend — bars (DC) + line (Qualified), capped at today
+    # Scheduled/Conducted/Qualified trend — DS (blue) behind DC (orange) overlay
+    # bars + Qualified line, capped at today. DS by ds_date, DC/Qualified by dc_date.
     e_cap  = min(e, pd.Timestamp(date.today()))
     dc_sub = _rng(df,"dc_date",s,e_cap).copy()
     dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
     daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
     daily_q  = dc_sub[dc_sub["prospect_score"]>=60].groupby("date")["record_id"].nunique().reset_index(name="Qualified")
+    ds_sub = _rng(df,"ds_date",s,e_cap).copy()
+    ds_sub["date"] = ds_sub["ds_date"].dt.normalize()
+    daily_ds = ds_sub.groupby("date")["record_id"].nunique().reset_index(name="DS")
     trend = pd.DataFrame({"date": pd.date_range(s, e_cap, freq="D")})
-    trend = trend.merge(daily_dc,on="date",how="left").merge(daily_q,on="date",how="left").fillna(0)
+    trend = (trend.merge(daily_ds,on="date",how="left").merge(daily_dc,on="date",how="left")
+                  .merge(daily_q,on="date",how="left").fillna(0))
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
-    trend = trend.astype({"DC":int,"Qualified":int})
-    state.aia_trend_fig = _make_trend(trend["date_label"].tolist(),
+    trend = trend.astype({"DS":int,"DC":int,"Qualified":int})
+    state.aia_trend_fig = _make_trend(trend["date_label"].tolist(), trend["DS"].tolist(),
                                       trend["DC"].tolist(), trend["Qualified"].tolist())
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
@@ -2355,11 +2474,15 @@ def _cs_refresh(state):
         _mon  = _ren["billing_frequency"].astype(str).str.lower().str.strip() == "monthly"
         _ren["_amt"] = _up.where(~_mon, _up * _term)
         _ren_total = float(_ren["_amt"].sum())
-        # tooltip: one line per payment "<deal> — ₹<amt> (dd Mon)" so a double
+        # tooltip: one line per payment "₹<amt> (dd Mon, <term>m) <deal>" so a double
         # payment shows twice, and the lines add up to the column total.
         _ren_s = _ren.sort_values("date_paid")
-        _ren_deals = [f'{(str(dn) if pd.notna(dn) else "(unnamed)")} — ₹{int(round(am)):,} ({pd.Timestamp(dp).strftime("%d %b")})'
-                      for dn, am, dp in _ren_s[["deal_name", "_amt", "date_paid"]].itertuples(index=False)]
+        _ren_deals = []
+        for dn, am, dp, tm in _ren_s[["deal_name", "_amt", "date_paid", "term"]].itertuples(index=False):
+            _deal = str(dn) if pd.notna(dn) else "(unnamed)"
+            _dps  = pd.Timestamp(dp).strftime("%d %b") if pd.notna(dp) else ""
+            _tmi  = int(tm) if (pd.notna(tm) and tm and tm > 0) else 1
+            _ren_deals.append(f'₹{int(round(am)):,} ({_dps}, {_tmi}m) {_deal}')
         t1_rows.append({
             "CSM":       csm,
             "AIA Paid":  cp["record_id"].nunique(),
@@ -2655,12 +2778,19 @@ def _va_ops_refresh(state):
         ["Leads", "DS", "DC", "HI", "Paid"],
         [leads, ds2, dc2, hi2, paid2], _vlabels)
 
-    e_cap = min(e, pd.Timestamp(date.today()))     # cap trend at today, like AIA Ops
+    # Scheduled/Conducted trend — same DS (blue) behind DC (orange) overlay as AIA
+    # Ops, minus the Qualified line (VA has no qualified metric). Capped at today.
+    e_cap = min(e, pd.Timestamp(date.today()))
     dc_sub = _rng(df,"dc_date",s,e_cap).copy(); dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
     daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
-    trend = pd.DataFrame({"date":pd.date_range(s,e_cap,freq="D")}).merge(daily_dc,on="date",how="left").fillna(0)
+    ds_sub = _rng(df,"ds_date",s,e_cap).copy(); ds_sub["date"] = ds_sub["ds_date"].dt.normalize()
+    daily_ds = ds_sub.groupby("date")["record_id"].nunique().reset_index(name="DS")
+    trend = (pd.DataFrame({"date":pd.date_range(s,e_cap,freq="D")})
+             .merge(daily_ds,on="date",how="left").merge(daily_dc,on="date",how="left").fillna(0))
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
-    state.va_trend_df = trend.astype({"DC":int})
+    trend = trend.astype({"DS":int,"DC":int})
+    state.va_trend_fig = _make_trend(trend["date_label"].tolist(),
+                                     trend["DS"].tolist(), trend["DC"].tolist())
 
     ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
     ch.columns = ["Channel","Count"]
@@ -3158,7 +3288,7 @@ va_selected_owner=[]; va_selected_campaign=[]
 va_kpi_leads=0; va_kpi_ds=0; va_kpi_dc=0; va_kpi_hi=0; va_kpi_paid=0
 va_kpi_discards=0; va_kpi_parked=0; va_kpi_closed_lost=0
 va_kpi_revenue="₹0"; va_kpi_revenue_exact="₹0"; va_kpi_mrr="₹0"; va_kpi_mrr_exact="₹0"; va_kpi_eom="0"
-va_funnel_fig=go.Figure(); va_trend_df=pd.DataFrame(); va_channel_pie_json=""
+va_funnel_fig=go.Figure(); va_trend_df=pd.DataFrame(); va_trend_fig=go.Figure(); va_channel_pie_json=""
 va_channel_filter="All"; va_filter_label=""; va_channel_click=""; va_channel_click_last=""
 va_gm_json=""; va_utm_json=""; va_incentive_json=""
 va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFrame()
@@ -3215,6 +3345,12 @@ chart_config = {
     "modeBarButtonsToRemove": ["lasso2d","select2d","autoScale2d",
                                "zoom2d","pan2d","zoomIn2d","zoomOut2d","resetScale2d"],
 }
+# Trend charts (AIA/VA Ops): keep the pan / zoom / reset toolbar buttons so a dense
+# date range can be dragged left-right (dragmode="pan" on their layouts) and zoomed.
+trend_config = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+}
 
 _bg = "rgba(0,0,0,0)"
 _font = {"family":"Inter,sans-serif","size":12}
@@ -3244,7 +3380,7 @@ aia_pie_layout    = {"margin":{"l":20,"r":20,"t":30,"b":60},"height":340,
 va_funnel_layout  = aia_funnel_layout
 va_trend_layout   = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":280,
                      "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font,
-                     "xaxis":{"title":""}}
+                     "dragmode":"pan","xaxis":{"title":""}}
 va_pie_layout     = aia_pie_layout
 
 mkt_trend_layout  = {"barmode":"group","margin":{"l":40,"r":20,"t":10,"b":60},
