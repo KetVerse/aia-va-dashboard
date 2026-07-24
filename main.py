@@ -555,35 +555,6 @@ _PIE_COLORS = ["#1a7fc4", "#16a34a", "#ea580c", "#8b5cf6", "#dc2626",
 # light-orange one (instead of the column green).
 _MATRIX_ROW_HEAT = {"Fresh Renewals": "deepblue", "One-time": "lightorange"}
 
-def _make_pie(df, label_col, value_col, height=340):
-    """Pie with labels+percent pulled OUTSIDE the slices, bold and high-contrast,
-    with leader lines. Clicking a legend entry isolates that slice (native Plotly)."""
-    if df is None or len(df) == 0 or value_col not in df.columns:
-        return go.Figure()
-    labels = df[label_col].astype(str).tolist()
-    values = df[value_col].tolist()
-    fig = go.Figure(go.Pie(
-        labels=labels, values=values, sort=False, direction="clockwise",
-        hole=0.45,
-        textposition="outside",
-        textinfo="label+value+percent",
-        texttemplate="<b>%{label}</b><br>%{value:,} (%{percent})",
-        textfont={"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"},
-        outsidetextfont={"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"},
-        marker={"colors": _PIE_COLORS, "line": {"color": "white", "width": 2}},
-        pull=[0.02] * len(labels),
-        hovertemplate="<b>%{label}</b><br>%{value:,} • %{percent}<extra></extra>",
-        automargin=True,
-    ))
-    fig.update_layout(
-        margin={"l": 30, "r": 30, "t": 20, "b": 20}, height=height,
-        paper_bgcolor="rgba(0,0,0,0)", showlegend=True,
-        legend={"orientation": "h", "y": -0.08, "x": 0.5, "xanchor": "center",
-                "font": {"size": 11, "family": "Inter,sans-serif"}},
-        font={"family": "Inter,sans-serif", "size": 12},
-    )
-    return fig
-
 def _make_funnel(stages, values, labels):
     """Horizontal funnel: stage names on the LEFT, value labels INSIDE when they
     fit and OUTSIDE (to the right) for bars too small to hold them."""
@@ -679,7 +650,6 @@ _STREAK_EVENT_BUCKET = {
     "Delete": "deletes",                       # work
     "Login": "logins", "Dashboard Viewed": "views",   # engagement only (not active)
 }
-_STREAK_WORK_BUCKETS = {"txns", "invoices", "entities", "recon", "vmr", "mapping", "deletes"}
 
 # Activity Score weighting: per event per day -> weight * min(count, cap_per_day),
 # summed over the last 28 days and all events. Max 315 pts/day. Uses the raw
@@ -1919,18 +1889,6 @@ def _inr(v):
         body = ",".join(groups) + "," + tail
     return f"₹{'-' if neg else ''}{body}"
 
-
-def _streak(email, account_id, upl, syn, days=28):
-    today = pd.Timestamp(date.today())
-    dots = []
-    for i in range(days):
-        d = today - pd.Timedelta(days=i)
-        if pd.isna(account_id):
-            dots.append("⚪"); continue
-        u = ((upl["account_id"]==account_id) & (upl["date"]==d)).any() if len(upl) else False
-        s = ((syn["account_id"]==account_id) & (syn["event_date"]==d)).any() if len(syn) else False
-        dots.append("🟢" if (u or s) else "⚪")
-    return "".join(dots)
 
 def _customer_status(row, upl, syn):
     if pd.isna(row.get("integration_done_date")) or pd.isna(row.get("login_email_id")):
@@ -3507,10 +3465,6 @@ _today       = date.today()
 _month_start = date(_today.year, _today.month, 1)
 _month_end   = date(_today.year, _today.month,
                     _calendar.monthrange(_today.year, _today.month)[1])
-# earliest lead (create_date) across AIA + VA — lower bound for the date filters
-_lead_dates  = pd.concat([_AIA.get("create_date", pd.Series(dtype="datetime64[ns]")),
-                          _VA.get("create_date", pd.Series(dtype="datetime64[ns]"))]).dropna()
-_lead_min    = _lead_dates.min().date() if len(_lead_dates) else date(2024, 12, 1)
 
 # Page 1
 aia_start_date = _month_start;  aia_end_date = _month_end
@@ -3541,7 +3495,7 @@ cs_kpi_renewed=0; cs_kpi_refunds=0; cs_kpi_blocked=0; cs_kpi_rfr=0
 cs_kpi_aia_paid=0; cs_kpi_mrr="₹0"; cs_kpi_mrr_exact="₹0"; cs_kpi_active=0
 cs_revenue_matrix_json=""; cs_retention_matrix_json=""; cs_csm_aia_json=""
 cs_csm_eng_json=""; cs_csm_health_json=""
-cs_cohort_count_json=""; cs_cohort_pct_json=""; cs_usage_json=""
+cs_cohort_count_json=""; cs_usage_json=""
 cs_usage_all=pd.DataFrame(); cs_usage_deal=[]; cs_usage_csm=[]; cs_usage_stage=[]; cs_usage_owner=[]; cs_usage_status=[]; cs_usage_cadence=[]
 cs_usage_deal_list=[]; cs_usage_csm_list=[]; cs_usage_stage_list=[]; cs_usage_owner_list=[]; cs_usage_cadence_list=[]
 cs_renewal_window_json=""
@@ -3553,7 +3507,7 @@ cs_activity_event_list = [
     "Vendor Mismatch Resolved", "Recon Processed", "Mapping Completed",
 ]
 cs_activity_event = []   # [] = All Events
-cs_activity_count_json = ""; cs_activity_pct_json = ""
+cs_activity_count_json = ""
 # View mode for BOTH cohort tables: All (count + %) / Cohort % / Customers
 cs_cohort_view_list = ["Cohort %", "Customers"]
 cs_cohort_view = []
@@ -3595,10 +3549,6 @@ vaf_ret_tip = ("Customer Retention Matrix\n"
 
 # Page 3
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)
-mkt_deal_list = ["All"] + sorted(_AIA["deal_name"].dropna().unique().tolist()[:100])
-mkt_line_item_list = (["All"] + sorted(_AIA_LI["line_item_name"].dropna().unique().tolist()[:100])
-                      if "line_item_name" in _AIA_LI.columns else ["All"])
-mkt_selected_deal="All"; mkt_selected_line_item="All"
 mkt_kpi_spend="₹0"; mkt_kpi_leads="0"; mkt_kpi_cpl="₹0"; mkt_kpi_cac="₹0"
 mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
 mkt_signals_html=""
@@ -3616,13 +3566,12 @@ va_selected_owner=[]; va_selected_campaign=[]
 va_kpi_leads=0; va_kpi_ds=0; va_kpi_dc=0; va_kpi_hi=0; va_kpi_paid=0
 va_kpi_discards=0; va_kpi_parked=0; va_kpi_closed_lost=0
 va_kpi_revenue="₹0"; va_kpi_revenue_exact="₹0"; va_kpi_mrr="₹0"; va_kpi_mrr_exact="₹0"; va_kpi_eom="0"
-va_funnel_fig=go.Figure(); va_trend_df=pd.DataFrame(); va_trend_fig=go.Figure(); va_channel_pie_json=""
+va_funnel_fig=go.Figure(); va_trend_fig=go.Figure(); va_channel_pie_json=""
 va_channel_filter="All"; va_filter_label=""; va_channel_click=""; va_channel_click_last=""
 va_gm_json=""; va_utm_json=""; va_incentive_json=""
 va_discard_df=pd.DataFrame(); va_lost_df=pd.DataFrame(); va_parked_df=pd.DataFrame()
 
 # Page 5
-vaf_start_date = date(2020,1,1); vaf_end_date = _today   # no date filter (all-time)
 vaf_deal_list = sorted(_VA_LI["deal_name"].dropna().unique().tolist())  # from line items (matrix source)
 vaf_rectype_list = sorted(_VA_LI["recurring_type"].dropna().unique().tolist()) if "recurring_type" in _VA_LI.columns else []
 vaf_line_item_list = (sorted(_VA_LI["line_item_name"].dropna().unique().tolist())
@@ -3696,30 +3645,11 @@ aia_funnel_layout = {
     "yaxis": {"side": "left", "automargin": True, "title": "",
               "tickfont": {"size": 13, "color": "#1a3a6b", "family": "Inter,sans-serif"}},
 }
-aia_trend_layout  = {"barmode":"group","margin":{"l":40,"r":20,"t":10,"b":70},
-                     "height":320,"legend":{"orientation":"h","y":-0.28,"x":0},
-                     "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font,
-                     "xaxis":{"tickangle":-45}}
-aia_pie_layout    = {"margin":{"l":20,"r":20,"t":30,"b":60},"height":340,
-                     "paper_bgcolor":_bg,"showlegend":True,
-                     "legend":{"orientation":"h","y":-0.2,"x":0.05},"font":_font}
-
-
-va_funnel_layout  = aia_funnel_layout
-va_trend_layout   = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":280,
-                     "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font,
-                     "dragmode":"pan","xaxis":{"title":""}}
-va_pie_layout     = aia_pie_layout
-
 mkt_trend_layout  = {"barmode":"group","margin":{"l":40,"r":20,"t":10,"b":60},
                      "height":300,"legend":{"orientation":"h","y":-0.3},
                      "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font}
 mkt_cpl_layout    = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":300,
                      "legend":{"orientation":"h","y":-0.3},
-                     "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font}
-mkt_pie_layout    = aia_pie_layout
-
-vaf_trend_layout  = {"margin":{"l":40,"r":20,"t":10,"b":60},"height":300,
                      "paper_bgcolor":_bg,"plot_bgcolor":_bg,"font":_font}
 
 # ═══════════════════════════════════════════════════════════════════
