@@ -1973,16 +1973,21 @@ def _aia_ops_refresh(state):
         ["Leads", "DS", "DC", "HI", "Paid"],
         [leads, ds_n, dc_n, hi2, paid2], _labels)
 
-    # Scheduled/Conducted/Qualified trend — DS (blue) behind DC (orange) overlay
-    # bars + Qualified line, capped at today. DS by ds_date, DC/Qualified by dc_date.
+    # Booked/Conducted/Qualified trend — DS (blue) behind DC (orange) overlay
+    # bars + Qualified line, capped at today. DS = demos BOOKED, counted by the day
+    # they are scheduled FOR (ds_for), NOT the booking day (ds_date). ds_for carries
+    # a timestamp + future appointments, so normalise to date before filtering so
+    # today's later-in-the-day demos aren't dropped by the midnight cap.
+    # DC/Qualified by dc_date.
     e_cap  = min(e, pd.Timestamp(date.today()))
     dc_sub = _rng(df,"dc_date",s,e_cap).copy()
     dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
     daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
     daily_q  = dc_sub[dc_sub["prospect_score"]>=60].groupby("date")["record_id"].nunique().reset_index(name="Qualified")
-    ds_sub = _rng(df,"ds_date",s,e_cap).copy()
-    ds_sub["date"] = ds_sub["ds_date"].dt.normalize()
-    daily_ds = ds_sub.groupby("date")["record_id"].nunique().reset_index(name="DS")
+    _dsf = pd.to_datetime(df["ds_for"], errors="coerce").dt.normalize() if "ds_for" in df.columns else pd.Series(pd.NaT, index=df.index)
+    _dsm = _dsf.notna() & (_dsf >= s) & (_dsf <= e_cap)
+    daily_ds = (df[_dsm].assign(date=_dsf[_dsm])
+                .groupby("date")["record_id"].nunique().reset_index(name="DS"))
     trend = pd.DataFrame({"date": pd.date_range(s, e_cap, freq="D")})
     trend = (trend.merge(daily_ds,on="date",how="left").merge(daily_dc,on="date",how="left")
                   .merge(daily_q,on="date",how="left").fillna(0))
