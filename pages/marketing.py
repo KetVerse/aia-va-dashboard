@@ -3,6 +3,22 @@
 MARKETING_PAGE = """
 <|part|class_name=topbar|
 <|navbar|lov={nav_links}|class_name=main-nav|>
+<|part|class_name=filter-bar|
+<|layout|columns=1 1 1|gap=12px|
+<|part|
+<div class="msc" data-key="mkt_channel"><div class="msc-cap">Channel</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{mkt_channel_ms}|text|mode=raw|class_name=msc-data msc-data-mkt_channel|>
+|>
+<|part|
+<div class="msc wide" data-key="mkt_campaign"><div class="msc-cap">UTM Campaign</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{mkt_campaign_ms}|text|mode=raw|class_name=msc-data msc-data-mkt_campaign|>
+|>
+<|part|
+<div class="msc wide" data-key="mkt_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{mkt_deal_ms}|text|mode=raw|class_name=msc-data msc-data-mkt_deal|>
+|>
+|>
+|>
 |>
 
 <|part|class_name=page-header|
@@ -12,6 +28,9 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=dsig-holder|
+<|part|class_name=dsig-datebar|
+<|{mkt_sig_date}|date|on_change=on_mkt_sig_date|format=dd/MM/yyyy|min={mkt_sig_min}|max={mkt_sig_max}|editable=True|>
+|>
 <|{mkt_signals_html}|text|mode=raw|>
 |>
 
@@ -58,7 +77,7 @@ Payback Period
 |>
 
 <|part|class_name=chart-card|
-**Weekly Breakdown**
+**Weekly Funnel (8W)**
 
 <|part|class_name=gridholder gridholder-mkt_weekly|
 <|{mkt_weekly_json}|text|mode=raw|>

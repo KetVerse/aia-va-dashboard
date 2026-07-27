@@ -818,45 +818,128 @@ def _va_incentive(s, e):
 
 def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=None,
                    drop_zero_spend=False):
-    """Marketing performance broken down by period (month/week): Spend, Leads,
-    CPL, DC, DC%, Paid, MRR, CAC, ARPU, Payback — with a pinned Total row."""
+    """Cohort marketing performance by lead create-period, net of refunds: Spend,
+    Leads, CPL, Net Paid, Net Revenue, MRR, CAC, ARPU, Payback — with a pinned
+    Total row. Money is attributed to the month/week the LEAD was created (not
+    when it paid), matching the Marketing Tracker 'Cohort Realized' sheet.
+    Net Paid = leads created in the period that paid (amount_paid>0, not refunded);
+    Net Revenue / MRR = those leads' line items' total_price / mrr (all line items,
+    New + Renewal = the LTV/lifetime basis)."""
     spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
                 if "day" in mkt_df.columns and len(mkt_df) else pd.Series(dtype=float))
     aa = aia_df
-    leads_by = (aa.dropna(subset=["create_date"]).groupby(aa.dropna(subset=["create_date"])["create_date"].dt.to_period(freq))["record_id"].nunique()
-                if "create_date" in aa.columns else pd.Series(dtype=float))
-    dcs = aa[aa["dc_date"].notna()] if "dc_date" in aa.columns else aa.iloc[0:0]
-    dc_by  = dcs.groupby(dcs["dc_date"].dt.to_period(freq))["record_id"].nunique() if len(dcs) else pd.Series(dtype=float)
-    pps = aa[aa["payment_date"].notna()] if "payment_date" in aa.columns else aa.iloc[0:0]
-    paid_by = pps.groupby(pps["payment_date"].dt.to_period(freq))["record_id"].nunique() if len(pps) else pd.Series(dtype=float)
+    if "create_date" not in aa.columns:
+        return pd.DataFrame()
+    # Leads are GROSS (every lead acquired in the period, incl. later-refunded) —
+    # CPL is spend per lead. Only Paid/Revenue/MRR go net of refunds below.
+    aa_all = aa.dropna(subset=["create_date"]).copy()
+    aa_all["cperiod"] = aa_all["create_date"].dt.to_period(freq)
+    leads_by = aa_all.groupby("cperiod")["record_id"].nunique()
+    # net-of-refunds subset, keyed to the lead's create-period
+    aa_ok = aa_all[aa_all["asked_refund"] != "Yes"] if "asked_refund" in aa_all.columns else aa_all
+    amt = aa_ok["amount_paid"] if "amount_paid" in aa_ok.columns else 0
+    pmask = aa_ok["payment_date"].notna() & (amt > 0)
+    netpaid_by = aa_ok[pmask].groupby("cperiod")["record_id"].nunique()
+    # line items → the lead's create-period (revenue/MRR realised by cohort)
+    cmap = aa_ok[["record_id", "cperiod"]].drop_duplicates("record_id")
     lim = li_df.dropna(subset=["date_paid"]) if "date_paid" in li_df.columns else li_df.iloc[0:0]
-    mrr_by = lim.groupby(lim["date_paid"].dt.to_period(freq))["mrr"].sum() if len(lim) else pd.Series(dtype=float)
+    if len(lim) and "record_id" in lim.columns:
+        lim = lim.merge(cmap, on="record_id", how="inner")
+        rev_by = lim.groupby("cperiod")["total_price"].sum() if "total_price" in lim.columns else pd.Series(dtype=float)
+        mrr_by = lim.groupby("cperiod")["mrr"].sum() if "mrr" in lim.columns else pd.Series(dtype=float)
+    else:
+        rev_by = pd.Series(dtype=float); mrr_by = pd.Series(dtype=float)
 
-    idxs = [s.index for s in [spend_by, leads_by, dc_by, paid_by, mrr_by] if len(s)]
+    idxs = [s.index for s in [spend_by, leads_by, netpaid_by, rev_by, mrr_by] if len(s)]
     if not idxs:
         return pd.DataFrame()
     lo = min(i.min() for i in idxs); hi = max(i.max() for i in idxs)
     full = pd.period_range(lo, hi, freq=freq)
     if drop_zero_spend:
+        # Trim only genuinely empty months (no spend AND no leads). A channel like
+        # Organic has real leads with ₹0 spend — keep those rows; dropping on spend
+        # alone would blank the whole table for any no-spend channel.
         sp_full = spend_by.reindex(full, fill_value=0)
-        full = full[[float(sp_full[p]) > 0 for p in full]]
+        ld_full = leads_by.reindex(full, fill_value=0)
+        full = full[[(float(sp_full[p]) > 0 or float(ld_full[p]) > 0) for p in full]]
     if last_n:
         full = full[-last_n:]
     if len(full) == 0:
         return pd.DataFrame()
     g = lambda s: s.reindex(full, fill_value=0)
-    spend, leads, dc, paid, mrr = g(spend_by), g(leads_by), g(dc_by), g(paid_by), g(mrr_by)
+    spend, leads, netpaid, rev, mrr = g(spend_by), g(leads_by), g(netpaid_by), g(rev_by), g(mrr_by)
 
-    def _row(lbl, sp, ld, d, pv, mr):
+    def _row(lbl, sp, ld, npd, rv, mr):
+        cac  = round(sp / npd) if npd else 0
+        arpu = round(mr / npd) if npd else 0
         return {label_name: lbl, "Spend (₹)": sp, "Leads": ld,
-                "CPL": sp // ld if ld else 0, "DC": d,
-                "DC %": (f"{round(d/ld*100)}%" if ld else ""), "Paid": pv, "MRR": mr,
-                "CAC": sp // pv if pv else 0, "ARPU": mr // pv if pv else 0,
-                "Payback (mo)": round((sp/pv)/(mr/pv)) if (pv and mr) else 0}
-    rows = [_row(label_fn(p), int(spend[p]), int(leads[p]), int(dc[p]),
-                 int(paid[p]), int(mrr[p])) for p in full]
-    rows.append(_row("Total", int(spend.sum()), int(leads.sum()), int(dc.sum()),
-                     int(paid.sum()), int(mrr.sum())))
+                "CPL": round(sp / ld) if ld else 0,
+                "Net Paid": npd, "Net Revenue": rv, "MRR": mr,
+                "CAC": cac, "ARPU": arpu,
+                "Payback (mo)": round(cac / arpu) if arpu else 0}
+    rows = [_row(label_fn(p), int(spend[p]), int(leads[p]), int(netpaid[p]),
+                 int(rev[p]), int(mrr[p])) for p in full]
+    rows.append(_row("Total", int(spend.sum()), int(leads.sum()), int(netpaid.sum()),
+                     int(rev.sum()), int(mrr.sum())))
+    return pd.DataFrame(rows)
+
+
+def _mkt_funnel_8w(mkt_df, aia_df, last_n=8):
+    """Weekly demo funnel — trailing `last_n` Mon–Sun weeks through the current
+    week: Spend, Leads, CPL, DS, DS Rate, DC, Cost per DC, DC Rate, DC (PS≥60),
+    Cost per PS≥60, Effective No-Show. In-period (each metric counted by its own
+    date), mirroring the Marketing Tracker 'Weekly Summary (8W)' sheet."""
+    freq = "W"
+    aa = aia_df
+    def _wk(col, mask=None):
+        if col not in aa.columns:
+            return pd.Series(dtype=float)
+        sub = aa[aa[col].notna() & mask] if mask is not None else aa[aa[col].notna()]
+        return sub.groupby(sub[col].dt.to_period(freq))["record_id"].nunique() if len(sub) else pd.Series(dtype=float)
+    spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
+                if "day" in mkt_df.columns and len(mkt_df) else pd.Series(dtype=float))
+    leads_by = _wk("create_date")
+    ds_by    = _wk("ds_date")
+    dc_by    = _wk("dc_date")
+    ps_mask  = (aa["prospect_score"] >= 60) if "prospect_score" in aa.columns else None
+    dcps_by  = _wk("dc_date", ps_mask)
+    # Effective No-Show: deal_stage == "Demo No-Show", counted by ds_for week when
+    # set, else falling back to the ds_date week.
+    if "deal_stage" in aa.columns:
+        ns = aa[aa["deal_stage"] == "Demo No-Show"].copy()
+        dsfor = pd.to_datetime(ns["ds_for"], errors="coerce") if "ds_for" in ns.columns else pd.Series(pd.NaT, index=ns.index)
+        eff = dsfor.where(dsfor.notna(), ns.get("ds_date", pd.Series(pd.NaT, index=ns.index)))
+        ns = ns.assign(_eff=eff).dropna(subset=["_eff"])
+        noshow_by = ns.groupby(ns["_eff"].dt.to_period(freq))["record_id"].nunique() if len(ns) else pd.Series(dtype=float)
+    else:
+        noshow_by = pd.Series(dtype=float)
+
+    today_p = pd.Timestamp(date.today()).to_period(freq)
+    idxs = [s.index for s in [spend_by, leads_by, ds_by, dc_by] if len(s)]
+    if not idxs:
+        return pd.DataFrame()
+    lo = min(i.min() for i in idxs)
+    hi = max(max(i.max() for i in idxs), today_p)
+    full = pd.period_range(lo, hi, freq=freq)[-last_n:]
+    if len(full) == 0:
+        return pd.DataFrame()
+    g = lambda s: s.reindex(full, fill_value=0)
+    spend, leads, ds, dc, dcps, noshow = (g(spend_by), g(leads_by), g(ds_by),
+                                          g(dc_by), g(dcps_by), g(noshow_by))
+    _pct = lambda n, d: (f"{n/d*100:.1f}%" if d else "0.0%")
+
+    def _row(lbl, sp, ld, d_s, d_c, d_p, ns_):
+        return {"Week": lbl, "Spend (₹)": sp, "Leads": ld,
+                "CPL": round(sp / ld) if ld else 0,
+                "DS": d_s, "DS Rate": _pct(d_s, ld),
+                "DC": d_c, "Cost per DC": round(sp / d_c) if d_c else 0,
+                "DC Rate": _pct(d_c, d_s),
+                "DC (PS≥60)": d_p, "Cost per PS≥60": round(sp / d_p) if d_p else 0,
+                "Effective No-Show": ns_}
+    rows = [_row(p.start_time.strftime("%d-%b"), int(spend[p]), int(leads[p]),
+                 int(ds[p]), int(dc[p]), int(dcps[p]), int(noshow[p])) for p in full]
+    rows.append(_row("Total", int(spend.sum()), int(leads.sum()), int(ds.sum()),
+                     int(dc.sum()), int(dcps.sum()), int(noshow.sum())))
     return pd.DataFrame(rows)
 
 
@@ -1412,6 +1495,12 @@ def _prep_li(raw):
     freq_map = {"monthly":1,"bi_monthly":2,"quarterly":3,"per_six_months":6,"annually":12}
     df["mrr_divisor"] = df["billing_frequency"].map(freq_map).fillna(1)
     df["mrr"] = df["unit_price"] / df["mrr_divisor"].replace(0,1)
+    # total_price = full amount for the line item. Monthly deals with a multi-month
+    # term bill term × unit_price; every other frequency already prices the full
+    # commitment in unit_price. Mirrors the Marketing Tracker sheet's total_price.
+    _is_monthly = df["billing_frequency"].astype(str).str.lower().eq("monthly")
+    df["total_price"] = np.where(_is_monthly & (df["term"] != 1),
+                                 df["term"] * df["unit_price"], df["unit_price"])
     fp = df.groupby("record_id")["date_paid"].min().reset_index()
     fp.columns = ["record_id","first_purchase_date"]
     df = df.merge(fp, on="record_id", how="left")
@@ -2780,15 +2869,21 @@ def _sig_band_card(title, value_txt, date_txt, lo, med, hi, value, is_money, hig
         f'<div class="dsig-scale"><span>{fmt(lo)}</span><span>{fmt(med)}</span><span>{fmt(hi)}</span></div>'
         '</div>')
 
-def _daily_signals_html():
-    """Build the 6 'Daily signals' cards. Funnel cards (LP traffic-to-lead, First-touch,
-    DS follow-up, WhatsApp delivered) are for TODAY (IST); the two Google band cards
-    (spend, leads) are for YESTERDAY with a trailing-28-day median ± MAD band. aia_live
-    (Neon) joins to Conversations (Supabase) on the last-10-digit phone; POC history for
-    the first-touch template gate is bounded to the 45-day Conversations pull."""
+def _daily_signals_html(day=None):
+    """Build the 6 'Daily signals' cards, ALL for a single selected `day` (a
+    date/Timestamp). Defaults to — and is capped at — yesterday (IST): today is
+    never selectable because that day's data isn't fetched until the next day.
+    The selected date is shown once, in the panel header; individual cards carry
+    no date stamp. aia_live (Neon) joins to Conversations (Supabase) on the
+    last-10-digit phone; POC history for the first-touch template gate is bounded
+    to the 45-day Conversations pull, so days older than that under-report the
+    messaging cards."""
     now_ist = datetime.now(_IST)
     today = pd.Timestamp(now_ist.date())
-    yday  = today - pd.Timedelta(days=1)
+    yday  = today - pd.Timedelta(days=1)          # latest day with complete data
+    lo_day = today - pd.Timedelta(days=45)        # oldest day the cards can cover
+    day = (min(max(pd.Timestamp(day).normalize(), lo_day), yday)
+           if day is not None else yday)
     aia, conv, ga, mkt = _AIA, _CONV, _GA, _MKT
 
     def _live(df):
@@ -2800,8 +2895,8 @@ def _daily_signals_html():
         cout = conv[conv["direction"] == "outbound"]
         by_phone = {p: g for p, g in cout.groupby("p10") if p}
 
-    # Card 2 — First-touch sent (today's created deals)
-    dt = _live(_rng(aia, "create_date", today, today)).copy()
+    # Card 2 — First-touch sent (selected day's created deals)
+    dt = _live(_rng(aia, "create_date", day, day)).copy()
     ft_den = int(dt["record_id"].nunique()) if len(dt) else 0
     ft_num = 0
     deliver_flags = []           # one per first-touch deal -> feeds the delivered card
@@ -2827,8 +2922,8 @@ def _daily_signals_html():
     del_num = int(sum(deliver_flags))
     del_rate = (100.0 * del_num / del_den) if del_den else 0.0
 
-    # Card 3 — DS follow-up sent (today's demos booked)
-    ds = _live(_rng(aia, "ds_date", today, today)).copy()
+    # Card 3 — DS follow-up sent (selected day's demos booked)
+    ds = _live(_rng(aia, "ds_date", day, day)).copy()
     ds_den = int(ds["record_id"].nunique()) if len(ds) else 0
     ds_num = 0
     if len(ds):
@@ -2852,53 +2947,51 @@ def _daily_signals_html():
     gl = _gads_live(aia).copy()
     gl["_d"] = pd.to_datetime(gl["create_date"], errors="coerce").dt.normalize()
 
-    ydtxt = yday.strftime("%d %b")
-
-    # Card 1 — LP traffic-to-lead (YESTERDAY): gads leads / paid gads sessions.
-    # Yesterday (not today) because GA sessions land ~a day late.
+    # Card 1 — LP traffic-to-lead (selected day): gads leads / paid gads sessions.
     lp_den = 0
     if len(ga):
         g = ga.copy()
         g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
-        sel = g[(g["_d"] == yday)
+        sel = g[(g["_d"] == day)
                 & (g["hostname"].astype(str) == "www.aiaccountant.com")
                 & (g["landing_page"].astype(str).str.contains("gads", case=False, na=False))]
         lp_den = int(pd.to_numeric(sel["sessions"], errors="coerce").fillna(0).sum())
-    lp_num = int(gl[gl["_d"] == yday]["record_id"].nunique())
+    lp_num = int(gl[gl["_d"] == day]["record_id"].nunique())
     lp_rate = (100.0 * lp_num / lp_den) if lp_den else 0.0
 
-    # Band = the last 7 days PREVIOUS TO yesterday (yesterday itself excluded), so
-    # yesterday is judged against the past week of clean history — a genuine spike/drop
-    # yesterday isn't diluted by being counted in its own band. So if yesterday's leads
-    # jump to 54 while the prior 7 days top out at 49, it reads OUT of band (dot right, red).
+    # Band = the 7 days PREVIOUS TO the selected day (the day itself excluded), so
+    # the day is judged against the past week of clean history — a genuine spike/drop
+    # isn't diluted by being counted in its own band. So if the day's leads jump to
+    # 54 while the prior 7 days top out at 49, it reads OUT of band (dot right, red).
     _BAND_DAYS = 7
-    band_start = yday - pd.Timedelta(days=_BAND_DAYS)  # yday-7 .. yday-1  (7 days)
-    band_end   = yday - pd.Timedelta(days=1)
+    band_start = day - pd.Timedelta(days=_BAND_DAYS)  # day-7 .. day-1  (7 days)
+    band_end   = day - pd.Timedelta(days=1)
     band_idx   = pd.date_range(band_start, band_end, freq="D")
 
-    # Card 6 — Google leads: yesterday's value vs the prior-28-day band
-    leads_val = int(gl[gl["_d"] == yday]["record_id"].nunique())
+    # Card 6 — Google leads: the day's value vs the prior 7-day band
+    leads_val = int(gl[gl["_d"] == day]["record_id"].nunique())
     ld = gl[(gl["_d"] >= band_start) & (gl["_d"] <= band_end)]
     ld_daily = ld.groupby("_d")["record_id"].nunique().reindex(band_idx, fill_value=0)
     l_med, l_lo, l_hi = _mad_band(ld_daily.values)
 
-    # Card 5 — Google spend: yesterday's value vs the prior-28-day band
+    # Card 5 — Google spend: the day's value vs the prior 7-day band
     gs = mkt.copy()
     if "channel" in gs.columns:
         gs = gs[gs["channel"] == "Google Ads"]
     spend_val = 0.0; s_med = s_lo = s_hi = 0.0
     if {"day", "cost"}.issubset(gs.columns) and len(gs):
         gs["_d"] = pd.to_datetime(gs["day"], errors="coerce").dt.normalize()
-        spend_val = float(gs.loc[gs["_d"] == yday, "cost"].sum())
+        spend_val = float(gs.loc[gs["_d"] == day, "cost"].sum())
         spb = gs[(gs["_d"] >= band_start) & (gs["_d"] <= band_end)]
         sp_daily = spb.groupby("_d")["cost"].sum().reindex(band_idx, fill_value=0.0)
         s_med, s_lo, s_hi = _mad_band(sp_daily.values)
-    spend_date = ydtxt
 
+    # Every card is for the same selected day, so no per-card date stamp — the date
+    # is shown once in the header below.
     cards = [
         _sig_rate_card("LP Traffic-to-Deal (Google)", f"{lp_rate:.2f}", "%",
                        f"{lp_num} of {_grp(lp_den)} sessions", lp_rate,
-                       _rate_color(lp_rate, 0.8, 0.4), ydtxt),
+                       _rate_color(lp_rate, 0.8, 0.4)),
         _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
                        f"{ft_num} of {ft_den} deals", ft_rate,
                        _rate_color(ft_rate, 90, 75)),
@@ -2908,39 +3001,68 @@ def _daily_signals_html():
         _sig_rate_card("WhatsApp delivered", f"{del_rate:.1f}", "%",
                        f"{del_num} of {del_den} sent", del_rate,
                        _rate_color(del_rate, 90, 75)),
-        _sig_band_card("Google spend", "₹" + _grp(spend_val), spend_date,
+        _sig_band_card("Google spend", "₹" + _grp(spend_val), "",
                        s_lo, s_med, s_hi, spend_val, True, higher_good=False),
-        _sig_band_card("Google leads", str(leads_val), ydtxt,
+        _sig_band_card("Google leads", str(leads_val), "",
                        l_lo, l_med, l_hi, leads_val, False, higher_good=True),
     ]
     head = (f'<div class="dsig-head">Daily signals '
-            f'<span>{today.strftime("%d %b %Y")}</span></div>')
+            f'<span>{day.strftime("%d %b %Y")}</span></div>')
     return ('<div class="dsig-panel">' + head
             + '<div class="dsig-grid">' + "".join(cards) + '</div></div>')
 
 
-def _mkt_refresh(state):
+def _daily_signals_refresh(state):
     try:
-        state.mkt_signals_html = _daily_signals_html()
+        state.mkt_signals_html = _daily_signals_html(pd.Timestamp(state.mkt_sig_date))
     except Exception as ex:
         print(f"[WARN] daily signals failed: {ex}")
         state.mkt_signals_html = ""
+
+def on_mkt_sig_date(state):
+    """Daily-signals date picker changed — clamp to the valid window (45 days ago →
+    yesterday) and re-render just the 6 cards for that day (the rest of the
+    Marketing page is all-time)."""
+    d = state.mkt_sig_date
+    if isinstance(d, datetime):
+        d = d.date()
+    if d is not None:
+        lo = date.today() - timedelta(days=45)
+        hi = date.today() - timedelta(days=1)
+        cd = min(max(d, lo), hi)
+        if cd != d:                       # snap the picker back into range
+            state.mkt_sig_date = cd
+    _daily_signals_refresh(state)
+
+def _mkt_refresh(state):
+    _daily_signals_refresh(state)
     s = pd.Timestamp(state.mkt_start_date)
     e = pd.Timestamp(state.mkt_end_date)
     mkt_all = _MKT[(_MKT["day"]>=s)&(_MKT["day"]<=e)] if "day" in _MKT.columns else _MKT
 
-    # channel cross-filter (set by clicking a pie). Spend filters _MKT.channel,
-    # leads/conversions filter _AIA.deal_source_group with the same label.
-    cf = state.mkt_channel_filter
-    state.mkt_filter_label = (f"Channel: {cf}  (click pie again or Show All to clear)"
-                              if cf != "All" else "")
+    # Top-nav filters: Channel (also toggled by clicking a pie) + UTM Campaign.
+    # Channel filters spend (_MKT.channel) and leads/conversions
+    # (_AIA.deal_source_group); Campaign filters leads/conversions (_AIA.utm_campaign)
+    # — spend carries no utm attribution, so a campaign filter leaves Spend/CAC at
+    # the channel level. Both act on every table, KPI and chart below.
+    _ch  = _sel(state.mkt_selected_channel)
+    _cmp = _sel(state.mkt_selected_campaign)
+    _dl  = _sel(state.mkt_selected_deal)
+    _lbl = []
+    if _ch:  _lbl.append("Channel: "  + ", ".join(_ch))
+    if _cmp: _lbl.append("Campaign: " + ", ".join(_cmp))
+    if _dl:  _lbl.append("Deal: " + (", ".join(_dl) if len(_dl) <= 2 else f"{len(_dl)} selected"))
+    state.mkt_filter_label = "   ·   ".join(_lbl)
     mkt = mkt_all
     aia_base = _AIA
-    if cf != "All":
-        if "channel" in mkt.columns:
-            mkt = mkt[mkt["channel"] == cf]
-        if "deal_source_group" in _AIA.columns:
-            aia_base = _AIA[_AIA["deal_source_group"] == cf]
+    if _ch and "channel" in mkt.columns:
+        mkt = mkt[mkt["channel"].isin(_ch)]
+    if _ch and "deal_source_group" in aia_base.columns:
+        aia_base = aia_base[aia_base["deal_source_group"].isin(_ch)]
+    if _cmp and "utm_campaign" in aia_base.columns:
+        aia_base = aia_base[aia_base["utm_campaign"].isin(_cmp)]
+    if _dl and "deal_name" in aia_base.columns:
+        aia_base = aia_base[aia_base["deal_name"].isin(_dl)]
 
     total_spend  = int(mkt["cost"].sum()) if "cost" in mkt.columns else 0
     state.mkt_kpi_spend = _fmt(total_spend)
@@ -2971,9 +3093,9 @@ def _mkt_refresh(state):
     arpu_v = total_mrr//paid_ch   if paid_ch else 0
     state.mkt_kpi_payback = f"{round(cac_v/arpu_v)} mo" if arpu_v else "—"
 
-    _mkt_full = _MKT[_MKT["channel"]==cf] if (cf!="All" and "channel" in _MKT.columns) else _MKT
+    _mkt_full = _MKT[_MKT["channel"].isin(_ch)] if (_ch and "channel" in _MKT.columns) else _MKT
     li_full = _AIA_LI
-    if cf != "All" and "deal_source_group" in _AIA.columns:
+    if _ch or _cmp or _dl:
         li_full = _AIA_LI[_AIA_LI["record_id"].isin(aia_base["record_id"])]
     _heat_mkt = {"MRR": "green", "ARPU": "green", "CAC": "red"}
 
@@ -2985,12 +3107,11 @@ def _mkt_refresh(state):
                               bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
                               if len(mdf) else grid_payload_b64(pd.DataFrame()))
 
-    # Weekly Breakdown — same structure, by week
-    wdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "W", "Week",
-                         lambda p: p.start_time.strftime("%d %b %y"), last_n=8)
+    # Weekly Funnel (8W) — demo funnel, trailing 8 weeks through the current week
+    wdf = _mkt_funnel_8w(_mkt_full, aia_base, last_n=8)
     state.mkt_weekly_json = (grid_payload_b64(wdf, total_id_col="Week", no_sort=True,
                              sortable=False, center_all=True, bar_cols=["Spend (₹)"],
-                             bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
+                             bar_color="#7fb3e0", autosize=True)
                              if len(wdf) else grid_payload_b64(pd.DataFrame()))
 
     # charts (trend) — derive from the monthly breakdown
@@ -3562,6 +3683,18 @@ mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_df
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""
 mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_click_last=""
+# Top-nav multi-select filters (Channel + UTM Campaign) — act on every table/KPI/chart.
+# Channel options are the union of spend channels and lead source-groups (same labels).
+mkt_channel_list  = sorted(set(_AIA["deal_source_group"].dropna().unique().tolist())
+                           | (set(_MKT["channel"].dropna().unique().tolist()) if "channel" in _MKT.columns else set()))
+mkt_campaign_list = sorted(_AIA["utm_campaign"].dropna().unique().tolist()) if "utm_campaign" in _AIA.columns else []
+mkt_deal_list     = sorted(_AIA["deal_name"].dropna().unique().tolist()) if "deal_name" in _AIA.columns else []
+mkt_selected_channel=[]; mkt_selected_campaign=[]; mkt_selected_deal=[]
+# Daily-signals date picker: default (and max) = yesterday (today's data isn't in
+# yet); min = 45 days back (older days lack the Conversations history the cards need).
+mkt_sig_date = _today - timedelta(days=1)
+mkt_sig_max  = _today - timedelta(days=1)
+mkt_sig_min  = _today - timedelta(days=45)
 
 # Page 4
 va_start_date = _month_start;  va_end_date = _month_end
@@ -3599,6 +3732,9 @@ aia_owner_ms      = _ms_json(aia_owner_list,    [])
 aia_campaign_ms   = _ms_json(aia_campaign_list, [])
 va_owner_ms       = _ms_json(va_owner_list,     [])
 va_campaign_ms    = _ms_json(va_campaign_list,  [])
+mkt_channel_ms    = _ms_json(mkt_channel_list,  [])
+mkt_campaign_ms   = _ms_json(mkt_campaign_list, [])
+mkt_deal_ms       = _ms_json(mkt_deal_list,     [])
 cs_owner_ms       = _ms_json(cs_owner_list,     [])
 cs_deal_ms        = _ms_json(cs_deal_list,      [])
 cs_rectype_ms     = _ms_json(cs_rectype_list,   [])
@@ -3705,6 +3841,9 @@ _MS_DISPATCH = {
     "aia_campaign":   ("aia_selected_campaign",  "aia"),
     "va_owner":       ("va_selected_owner",      "va"),
     "va_campaign":    ("va_selected_campaign",   "va"),
+    "mkt_channel":    ("mkt_selected_channel",   "mkt"),
+    "mkt_campaign":   ("mkt_selected_campaign",  "mkt"),
+    "mkt_deal":       ("mkt_selected_deal",      "mkt"),
     "cs_owner":       ("cs_selected_owner",      "cs"),
     "cs_deal":        ("cs_selected_deal",       "cs"),
     "cs_rectype":     ("cs_selected_rectype",    "cs"),
@@ -3740,6 +3879,22 @@ def _sync_ms(state):
     state.aia_campaign_ms   = _ms_json(aia_campaign_list, state.aia_selected_campaign)
     state.va_owner_ms       = _ms_json(va_owner_list,     state.va_selected_owner)
     state.va_campaign_ms    = _ms_json(va_campaign_list,  state.va_selected_campaign)
+    # Marketing filters cascade: Channel → Campaign → Deal Name (each option list
+    # narrows to what's available given the higher-level selections).
+    _mch  = _sel(state.mkt_selected_channel)
+    _mcmp = _sel(state.mkt_selected_campaign)
+    _md = _AIA
+    if _mch and "deal_source_group" in _md.columns:
+        _md = _md[_md["deal_source_group"].isin(_mch)]
+    mkt_camp_lov = (sorted(_md["utm_campaign"].dropna().unique().tolist())
+                    if "utm_campaign" in _md.columns else mkt_campaign_list)
+    if _mcmp and "utm_campaign" in _md.columns:
+        _md = _md[_md["utm_campaign"].isin(_mcmp)]
+    mkt_deal_lov = (sorted(_md["deal_name"].dropna().unique().tolist())
+                    if "deal_name" in _md.columns else mkt_deal_list)
+    state.mkt_channel_ms    = _ms_json(mkt_channel_list,  state.mkt_selected_channel)
+    state.mkt_campaign_ms   = _ms_json(mkt_camp_lov,      state.mkt_selected_campaign)
+    state.mkt_deal_ms       = _ms_json(mkt_deal_lov,      state.mkt_selected_deal)
     state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
     state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
     # Customer Activity Cohort: Deal Name / Deal Stage / CSM cross-filter each
@@ -3856,6 +4011,7 @@ def on_ms_change(state):
     setattr(state, var, sel)
     if scope == "aia":     on_aia_filter_change(state)
     elif scope == "va":    on_va_filter_change(state)
+    elif scope == "mkt":   _mkt_refresh(state)
     elif scope == "cs":    _cs_refresh(state)
     elif scope == "usage": _apply_usage_filter(state)
     elif scope == "activity": _build_cohort_tables(state)
@@ -3901,16 +4057,22 @@ def on_va_channel_reset(state):
     state.va_channel_filter = "All"
     _va_ops_refresh(state)
 
+def _mkt_toggle_channel(state, ch):
+    """Add/remove a channel in the nav Channel multi-select (the single source of
+    truth) so pie clicks and the dropdown stay in sync."""
+    cur = list(_sel(state.mkt_selected_channel))
+    if ch in cur: cur.remove(ch)
+    else:         cur.append(ch)
+    state.mkt_selected_channel = cur
+    _mkt_refresh(state); _sync_ms(state)
+
 def on_mkt_channel_click(state):
     raw = state.mkt_channel_click
     if not raw or raw == state.mkt_channel_click_last:
         return
     state.mkt_channel_click_last = raw
     ch = _bridge_channel(raw)
-    if not ch:
-        return
-    state.mkt_channel_filter = "All" if ch == state.mkt_channel_filter else ch
-    _mkt_refresh(state)
+    if ch: _mkt_toggle_channel(state, ch)
 
 def on_mkt_leads_click(state):
     raw = state.mkt_leads_click
@@ -3918,14 +4080,11 @@ def on_mkt_leads_click(state):
         return
     state.mkt_leads_click_last = raw
     ch = _bridge_channel(raw)
-    if not ch:
-        return
-    state.mkt_channel_filter = "All" if ch == state.mkt_channel_filter else ch
-    _mkt_refresh(state)
+    if ch: _mkt_toggle_channel(state, ch)
 
 def on_mkt_channel_reset(state):
-    state.mkt_channel_filter = "All"
-    _mkt_refresh(state)
+    state.mkt_selected_channel = []; state.mkt_selected_campaign = []; state.mkt_selected_deal = []
+    _mkt_refresh(state); _sync_ms(state)
 
 
 def on_reset_filters(state, *_):
@@ -3946,6 +4105,7 @@ def on_reset_filters(state, *_):
     state.cs_usage_deal = []; state.cs_usage_csm = []; state.cs_usage_stage = []; state.cs_usage_owner = []; state.cs_usage_cadence = []; state.cs_usage_status = []
     state.cs_activity_event = []; state.cs_activity_deal = []; state.cs_activity_stage = []; state.cs_activity_csm = []
     # Marketing
+    state.mkt_selected_channel = []; state.mkt_selected_campaign = []; state.mkt_selected_deal = []
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
     # VA Finance
     state.vaf_selected_deal  = []; state.vaf_selected_line_item = []; state.vaf_selected_rectype = []
@@ -3983,6 +4143,14 @@ def _refresh_all(state):
 
 def on_init(state):
     navigate(state, "aia")
+    # The daily-signals date window is time-sensitive but its module-level defaults
+    # were frozen at server start. Recompute per session so a fresh load always
+    # defaults to the real "yesterday" (and the 45-day min stays current) even after
+    # the server has been running for days.
+    _yday = date.today() - timedelta(days=1)
+    state.mkt_sig_min  = date.today() - timedelta(days=45)
+    state.mkt_sig_max  = _yday
+    state.mkt_sig_date = _yday
     _refresh_all(state)
 
 def _broadcast_refresh(state):

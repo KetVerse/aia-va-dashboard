@@ -559,6 +559,17 @@ table.taipy-table thead tr th,
    injection script (see _DSIG_SCRIPT) swaps in the real cards. */
 .dsig-holder .taipy-text-raw { display: none !important; }
 
+/* Daily-signals date picker — docked into the panel's header row (right side), on the
+   same line as the "Daily signals dd mmm yyyy" title. The header row is tall enough
+   (see .dsig-head) for the compact picker to sit next to the title without touching
+   the cards below. */
+.dsig-holder { position: relative; }
+.dsig-datebar { position: absolute; top: 10px; right: 20px; z-index: 6; margin: 0; }
+.dsig-datebar .taipy-date { max-width: 150px; margin: 0 !important; }
+.dsig-datebar .MuiInputBase-root { background: #ffffff !important; }
+.dsig-datebar .MuiInputBase-input { padding: 4px 8px !important; font-size: 12px !important; }
+.dsig-datebar .MuiOutlinedInput-notchedOutline { border-color: #cbd5e1 !important; }
+
 .dsig-panel {
     background: #ffffff;
     border-radius: 12px;
@@ -571,6 +582,9 @@ table.taipy-table thead tr th,
     font-weight: 700;
     color: #1e293b;
     margin-bottom: 14px;
+    min-height: 30px;          /* header row tall enough for the inline date picker */
+    line-height: 30px;
+    padding-right: 170px;      /* reserve space so the title never runs under the picker */
 }
 .dsig-head span {
     font-size: 12px;
