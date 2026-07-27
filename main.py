@@ -441,7 +441,7 @@ _DC_LEGEND_SCRIPT = """
 // (navy = Qualified box; white/dark-orange = DC number). Scoped to trend plots (DS bar).
 (function(){
   var DARK = '#9c4a0f', NAVY = 'rgb(31,78,121)';
-  function isTrend(gd){ try { return (gd.data||[]).some(function(t){return t.name==='DS';}); } catch(e){ return false; } }
+  function isTrend(gd){ try { return (gd.data||[]).some(function(t){return t.name==='DS'||t.name==='DB';}); } catch(e){ return false; } }
   function vis(gd, name){
     var t = (gd.data||[]).find(function(x){ return x.name===name; });
     if(!t) return 'absent';
@@ -452,7 +452,7 @@ _DC_LEGEND_SCRIPT = """
     return f.replace(/\\s+/g, '').toLowerCase();
   }
   function sync(gd){
-    var dsOff = vis(gd,'DS')==='off', dcOff = vis(gd,'DC')==='off', qOff = vis(gd,'Qualified')==='off';
+    var dsOff = vis(gd,'DS')==='off' || vis(gd,'DB')==='off', dcOff = vis(gd,'DC')==='off', qOff = vis(gd,'Qualified')==='off';
     gd.querySelectorAll('.infolayer text.annotation-text').forEach(function(t){
       var grp = (t.closest && t.closest('.annotation')) || t.parentNode;
       var f = fillOf(t);
@@ -572,7 +572,7 @@ def _make_funnel(stages, values, labels):
     return fig
 
 
-def _make_trend(labels, ds, dc, qual=None):
+def _make_trend(labels, ds, dc, qual=None, ds_name="DS"):
     """Overlay column + optional line (Power BI style): DS as blue bars in the BACK
     and DC as orange bars in FRONT, both on the 0 baseline (so DC reads as a portion
     of DS, not added to it); Qualified — when given — as a navy spline with boxed
@@ -582,7 +582,7 @@ def _make_trend(labels, ds, dc, qual=None):
     ds_c, dc_c, line_c = "#1a7fc4", "#ed7d31", "#1f4e79"   # DS blue, DC orange, line navy
     fig = go.Figure()
     # DS behind (full-height bar) — the only bars that carry value labels
-    fig.add_bar(x=xb, y=ds, name="DS", marker_color=ds_c, marker_line_width=0,
+    fig.add_bar(x=xb, y=ds, name=ds_name, marker_color=ds_c, marker_line_width=0,
                 text=[f"<b>{v}</b>" if v else "" for v in ds], textposition="outside",
                 textfont={"size": 10, "color": "#1a3a6b", "family": "Inter,sans-serif"},
                 cliponaxis=False)
@@ -1994,7 +1994,8 @@ def _aia_ops_refresh(state):
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
     trend = trend.astype({"DS":int,"DC":int,"Qualified":int})
     state.aia_trend_fig = _make_trend(trend["date_label"].tolist(), trend["DS"].tolist(),
-                                      trend["DC"].tolist(), trend["Qualified"].tolist())
+                                      trend["DC"].tolist(), trend["Qualified"].tolist(),
+                                      ds_name="DB")   # Demos Booked (by ds_for)
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
     ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
