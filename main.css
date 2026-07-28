@@ -638,8 +638,34 @@ table.taipy-table thead tr th,
     padding: 11px 12px 13px 12px;
     min-height: 96px;
 }
+/* 7-day trend sparkline (bottom of each card); last dot = selected day. height:auto
+   lets the viewBox keep its aspect so dots stay circular while the line spans the
+   full card/progress-bar width (first & last dot align to the bar's edges). */
+.dsig-spark {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin-top: 9px;
+    overflow: visible;
+}
+.dsig-hit { cursor: pointer; }
+/* fast JS tooltip for sparkline dots */
+.dsig-tip {
+    position: fixed;
+    transform: translate(-50%, -118%);
+    background: #1e293b;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 7px;
+    border-radius: 5px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 9999;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+}
 .dsig-green { border-top-color: #16a34a; }
-.dsig-amber { border-top-color: #f59e0b; }
+.dsig-amber { border-top-color: #d97706; }
 .dsig-red   { border-top-color: #dc2626; }
 /* band cards carry a direction-aware status class (dsig-green / dsig-red) that colours
    the top strip; the neutral fallback below only applies if no status is set */
@@ -674,7 +700,7 @@ table.taipy-table thead tr th,
     white-space: nowrap;
 }
 .dsig-val-green { color: #16a34a; }
-.dsig-val-amber { color: #b45309; }
+.dsig-val-amber { color: #d97706; }
 .dsig-val-red   { color: #dc2626; }
 .dsig-unit {
     font-size: 13px;
@@ -701,7 +727,7 @@ table.taipy-table thead tr th,
     background: #cbd5e1;
 }
 .dsig-fill-green { background: #16a34a; }
-.dsig-fill-amber { background: #f59e0b; }
+.dsig-fill-amber { background: #d97706; }
 .dsig-fill-red   { background: #dc2626; }
 
 /* band-slider cards (spend / leads) */

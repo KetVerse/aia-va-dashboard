@@ -531,6 +531,41 @@ _DSIG_SCRIPT = """
 </script>
 """
 
+# Fast custom tooltip for the daily-signals sparkline dots. The dots carry data-tip;
+# a single delegated listener shows a floating div on hover (instant, unlike the
+# browser's native <title> which has a ~1s delay). Works for injected SVG too.
+_SPARK_TIP_SCRIPT = """
+<script id="dsig-spark-tip">
+(function(){
+  var tip = null;
+  function box(){
+    if(!tip){
+      tip = document.createElement('div');
+      tip.className = 'dsig-tip';
+      tip.style.display = 'none';
+      document.body.appendChild(tip);
+    }
+    return tip;
+  }
+  function place(el){
+    var b = box(), r = el.getBoundingClientRect();
+    b.textContent = el.getAttribute('data-tip') || '';
+    b.style.display = 'block';
+    b.style.left = (r.left + r.width/2) + 'px';
+    b.style.top  = (r.top) + 'px';
+  }
+  document.addEventListener('mouseover', function(e){
+    var t = e.target;
+    if(t && t.getAttribute && t.getAttribute('data-tip')) place(t);
+  }, true);
+  document.addEventListener('mouseout', function(e){
+    var t = e.target;
+    if(tip && t && t.getAttribute && t.getAttribute('data-tip')) tip.style.display = 'none';
+  }, true);
+})();
+</script>
+"""
+
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
@@ -541,7 +576,8 @@ def _inject_zoom_lock(resp):
                     "</body>",
                     _ZOOM_LOCK_SCRIPT + _PAGE_NAV_SCRIPT + _MULTISELECT_SCRIPT
                     + _SNAPSHOT_SCRIPT + _COPYBTN_SCRIPT + _DATERANGE_SCRIPT
-                    + _CHART_KEYS_SCRIPT + _DC_LEGEND_SCRIPT + _DSIG_SCRIPT + "</body>"))
+                    + _CHART_KEYS_SCRIPT + _DC_LEGEND_SCRIPT + _DSIG_SCRIPT
+                    + _SPARK_TIP_SCRIPT + "</body>"))
                 resp.headers["Content-Length"] = str(len(resp.get_data()))
     except Exception:
         pass
@@ -885,34 +921,34 @@ def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=Non
 
 
 def _mkt_funnel_8w(mkt_df, aia_df, last_n=8):
-    """Weekly demo funnel — trailing `last_n` Mon–Sun weeks through the current
-    week: Spend, Leads, CPL, DS, DS Rate, DC, Cost per DC, DC Rate, DC (PS≥60),
-    Cost per PS≥60, Effective No-Show. In-period (each metric counted by its own
-    date), mirroring the Marketing Tracker 'Weekly Summary (8W)' sheet."""
+    """Weekly demo funnel on a LEAD-CREATE-WEEK COHORT basis — trailing `last_n`
+    Mon–Sun weeks through the current week. Each row = leads CREATED that week, and
+    DS / DC / DC(PS≥60) / No-Show count how many of *those* leads reached each stage
+    (whenever it happened), so every rate is a true conversion ≤ 100%. Trade-off:
+    recent weeks lag — their leads may not have booked/conducted their demos yet.
+    Columns: Spend, Leads, CPL, DS, DS Rate, DC, Cost per DC, DC Rate, DC (PS≥60),
+    Cost per PS≥60, Effective No-Show."""
     freq = "W"
     aa = aia_df
-    def _wk(col, mask=None):
-        if col not in aa.columns:
-            return pd.Series(dtype=float)
-        sub = aa[aa[col].notna() & mask] if mask is not None else aa[aa[col].notna()]
-        return sub.groupby(sub[col].dt.to_period(freq))["record_id"].nunique() if len(sub) else pd.Series(dtype=float)
+    if "create_date" not in aa.columns:
+        return pd.DataFrame()
+    aa = aa.dropna(subset=["create_date"]).copy()
+    aa["cperiod"] = aa["create_date"].dt.to_period(freq)      # the lead's create week
+    # Spend stays in-period — attributed to the week the money was actually spent.
     spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
                 if "day" in mkt_df.columns and len(mkt_df) else pd.Series(dtype=float))
-    leads_by = _wk("create_date")
-    ds_by    = _wk("ds_date")
-    dc_by    = _wk("dc_date")
-    ps_mask  = (aa["prospect_score"] >= 60) if "prospect_score" in aa.columns else None
-    dcps_by  = _wk("dc_date", ps_mask)
-    # Effective No-Show: deal_stage == "Demo No-Show", counted by ds_for week when
-    # set, else falling back to the ds_date week.
-    if "deal_stage" in aa.columns:
-        ns = aa[aa["deal_stage"] == "Demo No-Show"].copy()
-        dsfor = pd.to_datetime(ns["ds_for"], errors="coerce") if "ds_for" in ns.columns else pd.Series(pd.NaT, index=ns.index)
-        eff = dsfor.where(dsfor.notna(), ns.get("ds_date", pd.Series(pd.NaT, index=ns.index)))
-        ns = ns.assign(_eff=eff).dropna(subset=["_eff"])
-        noshow_by = ns.groupby(ns["_eff"].dt.to_period(freq))["record_id"].nunique() if len(ns) else pd.Series(dtype=float)
-    else:
-        noshow_by = pd.Series(dtype=float)
+    leads_by = aa.groupby("cperiod")["record_id"].nunique()
+    def _coh(mask):
+        # of each create-week's leads, how many satisfy `mask` (reached that stage)
+        sub = aa[mask]
+        return sub.groupby("cperiod")["record_id"].nunique() if len(sub) else pd.Series(dtype=float)
+    ds_by   = _coh(aa["ds_date"].notna()) if "ds_date" in aa.columns else pd.Series(dtype=float)
+    dc_by   = _coh(aa["dc_date"].notna()) if "dc_date" in aa.columns else pd.Series(dtype=float)
+    dcps_by = (_coh(aa["dc_date"].notna() & (aa["prospect_score"] >= 60))
+               if {"dc_date", "prospect_score"}.issubset(aa.columns) else pd.Series(dtype=float))
+    # Effective No-Show: leads whose current stage is "Demo No-Show" (demo booked but
+    # not attended), counted against their create week.
+    noshow_by = _coh(aa["deal_stage"] == "Demo No-Show") if "deal_stage" in aa.columns else pd.Series(dtype=float)
 
     today_p = pd.Timestamp(date.today()).to_period(freq)
     idxs = [s.index for s in [spend_by, leads_by, ds_by, dc_by] if len(s)]
@@ -2844,7 +2880,7 @@ def _mad_band(vals):
 def _rate_color(v, good, ok):
     return "green" if v >= good else ("amber" if v >= ok else "red")
 
-def _sig_rate_card(title, value_txt, unit, sub, pct, color, date_txt=""):
+def _sig_rate_card(title, value_txt, unit, sub, pct, color, date_txt="", spark=""):
     pct = max(0.0, min(100.0, float(pct)))
     date_html = f'<span class="dsig-date">{date_txt}</span>' if date_txt else ""
     return (
@@ -2853,20 +2889,24 @@ def _sig_rate_card(title, value_txt, unit, sub, pct, color, date_txt=""):
         f'<div class="dsig-val dsig-val-{color}">{value_txt}<span class="dsig-unit">{unit}</span></div>'
         f'<div class="dsig-sub">{sub}</div>'
         f'<div class="dsig-bar"><div class="dsig-bar-fill dsig-fill-{color}" style="width:{pct:.2f}%"></div></div>'
+        f'{spark}'
         f'</div>')
 
-def _sig_band_card(title, value_txt, date_txt, lo, med, hi, value, is_money, higher_good=True):
+def _band_status(lo, hi, value, higher_good=True):
+    """green when in band, else green if the move was the helpful way (leads up /
+    spend down) and red otherwise. Shared by the band card and its sparkline colour."""
+    lo = max(0.0, float(lo)); hi = float(hi); value = float(value)
+    if lo <= value <= hi:
+        return "green"
+    return "green" if ((value > hi) == bool(higher_good)) else "red"
+
+def _sig_band_card(title, value_txt, date_txt, lo, med, hi, value, is_money, higher_good=True, spark=""):
     # Colour is direction-aware, not just "in/out of band": red means a BAD surprise, not
     # merely an unusual one. In band -> green (normal). Out of band -> good if it moved the
     # helpful way (leads up / spend down) = green, else red. So a lead spike reads green,
     # a lead drought or a spend blow-out reads red.
     lo = max(0.0, float(lo)); hi = float(hi); med = float(med); value = float(value)
-    in_band = (lo <= value <= hi)
-    if in_band:
-        status = "green"
-    else:
-        good = (value > hi) == bool(higher_good)   # above & higher-good, or below & lower-good
-        status = "green" if good else "red"
+    status = _band_status(lo, hi, value, higher_good)
     width = (hi - lo) if hi > lo else 1.0
     clamp = lambda x: max(0.0, min(100.0, x))
     pos     = clamp((value - lo) / width * 100.0)
@@ -2883,7 +2923,60 @@ def _sig_band_card(title, value_txt, date_txt, lo, med, hi, value, is_money, hig
         f'<div class="dsig-dot dsig-dot-{status}" style="left:{pos:.2f}%"></div>'
         '</div>'
         f'<div class="dsig-scale"><span>{fmt(lo)}</span><span>{fmt(med)}</span><span>{fmt(hi)}</span></div>'
+        f'{spark}'
         '</div>')
+
+_SPARK_HEX = {"green": "#16a34a", "amber": "#d97706", "red": "#dc2626"}
+def _spark_hex(c):
+    return _SPARK_HEX.get(c, "#94a3b8")
+
+def _sparkline(pts, hexc):
+    """Inline SVG 7-point sparkline. `pts` = list of {'v': float|None, 'size': float,
+    'tip': str} (oldest→newest; None = no data that day). y auto-scales to the series'
+    own min..max; each dot's radius scales with 'size' (volume/confidence) so a rate
+    from a thin day reads as a small dot; the last point (the selected day) gets a
+    ring. Native <title> tooltips — no JS. Returns '' if there's nothing to plot."""
+    W, H, padx, pady = 132.0, 26.0, 0.0, 4.0   # padx 0 → first/last dot align to the progress bar's edges
+    n = len(pts)
+    if n == 0:
+        return ""
+    xs = [padx + (W - 2 * padx) * (i / (n - 1) if n > 1 else 0.5) for i in range(n)]
+    vals = [p["v"] for p in pts if p["v"] is not None]
+    if not vals:
+        return ""
+    vmin, vmax = min(vals), max(vals)
+    rng = (vmax - vmin) or 1.0
+    yof = lambda v: pady + (H - 2 * pady) * (1 - (v - vmin) / rng)
+    szs = [p.get("size") or 0 for p in pts]
+    smax = max(szs) if szs else 0
+    rof = lambda s: (0.5 + 1 * (min(s, smax) / smax)) if smax > 0 else 1.6
+    # polyline(s), broken across missing days
+    segs, cur = [], []
+    for i, p in enumerate(pts):
+        if p["v"] is None:
+            if len(cur) > 1: segs.append(cur)
+            cur = []
+        else:
+            cur.append(f"{xs[i]:.1f},{yof(p['v']):.1f}")
+    if len(cur) > 1: segs.append(cur)
+    poly = "".join(
+        f'<polyline points="{" ".join(s)}" fill="none" stroke="{hexc}" stroke-width="1.0" '
+        f'stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>' for s in segs)
+    last = max((i for i, p in enumerate(pts) if p["v"] is not None), default=-1)
+    dots = []
+    for i, p in enumerate(pts):
+        if p["v"] is None:
+            continue
+        cx, cy, rr = xs[i], yof(p["v"]), rof(p.get("size") or 0)
+        if i == last:
+            dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rr + 1.0:.1f}" fill="none" '
+                        f'stroke="{hexc}" stroke-width="0.9" opacity="0.5"/>')
+        dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rr:.1f}" fill="{hexc}"/>')
+        # invisible larger hit-target carries the tooltip text (JS reads data-tip)
+        dots.append(f'<circle class="dsig-hit" cx="{cx:.1f}" cy="{cy:.1f}" r="7" '
+                    f'fill="transparent" pointer-events="all" data-tip="{p.get("tip", "")}"/>')
+    return (f'<svg class="dsig-spark" viewBox="0 0 {W:.0f} {H:.0f}" '
+            f'preserveAspectRatio="none">{poly}{"".join(dots)}</svg>')
 
 # ── Daily-signals CHANNEL filter — maps the panel's Channel dropdown to each
 #    source. "All" = every source combined (no restriction). ──────────────────
@@ -3027,34 +3120,133 @@ def _daily_signals_html(day=None, channel="All"):
         sp_daily = spb.groupby("_d")["cost"].sum().reindex(band_idx, fill_value=0.0)
         s_med, s_lo, s_hi = _mad_band(sp_daily.values)
 
+    # ── 7-day sparkline series (window ENDS at the selected day) ─────────────
+    # Same numbers as each card's headline, one point per day; the selected day is
+    # the last dot. Dots on rate cards are sized by that day's denominator so a
+    # rate off a thin day reads as a small dot.
+    spark_idx = pd.date_range(day - pd.Timedelta(days=6), day, freq="D")
+    w0, w1 = spark_idx[0], spark_idx[-1]
+    deals_daily = (gl[(gl["_d"] >= w0) & (gl["_d"] <= w1)]
+                   .groupby("_d")["record_id"].nunique().reindex(spark_idx, fill_value=0))
+    if len(cts_ch) and "create_date" in cts_ch.columns:
+        _cd = pd.to_datetime(cts_ch["create_date"], errors="coerce").dt.normalize()
+        contacts_daily = _cd[_cd.notna()].value_counts().reindex(spark_idx, fill_value=0)
+    else:
+        contacts_daily = pd.Series(0, index=spark_idx)
+    if len(ga) and channel not in ("Meta", "LinkedIn"):
+        _g = ga.copy(); _g["_d"] = pd.to_datetime(_g["date"], errors="coerce").dt.normalize()
+        _m = _g["_d"].between(w0, w1) & (_g["hostname"].astype(str) == "www.aiaccountant.com")
+        if channel == "Google":
+            _m = _m & _g["landing_page"].astype(str).str.contains("gads", case=False, na=False)
+        sessions_daily = (pd.to_numeric(_g.loc[_m, "sessions"], errors="coerce").fillna(0)
+                          .groupby(_g.loc[_m, "_d"]).sum().reindex(spark_idx, fill_value=0))
+    else:
+        sessions_daily = pd.Series(0.0, index=spark_idx)
+    if {"day", "cost"}.issubset(gs.columns) and len(gs):
+        spend_daily = (gs[(gs["_d"] >= w0) & (gs["_d"] <= w1)]
+                       .groupby("_d")["cost"].sum().reindex(spark_idx, fill_value=0.0))
+    else:
+        spend_daily = pd.Series(0.0, index=spark_idx)
+    # messaging series — one pass over the window's deals / demos (cheap: ~7 days)
+    ftN, ftD, dlN, dlD = {}, {}, {}, {}
+    _dtw = _rng(aia_ch, "create_date", w0, w1).copy()
+    if len(_dtw):
+        _dtw["p10"] = _dtw["poc_number"].apply(_phone10) if "poc_number" in _dtw.columns else ""
+        for _, r in _dtw.iterrows():
+            cdate = r["create_date"]
+            if pd.isna(cdate):
+                continue
+            k = cdate.normalize(); ftD[k] = ftD.get(k, 0) + 1
+            pf = by_phone.get(r["p10"])
+            if pf is None:
+                continue
+            outs = pf[pf["msg_date"] >= cdate]
+            is_repeat = len(pf[pf["msg_date"] < cdate]) > 0
+            cand = outs if is_repeat else outs[outs["template_name"].isin(_FT_TEMPLATES)]
+            if len(cand):
+                ftN[k] = ftN.get(k, 0) + 1
+                first = cand.sort_values("timestamp").iloc[0]
+                dlD[k] = dlD.get(k, 0) + 1
+                if str(first["delivery_status"]) in _DELIVERED_STATUS:
+                    dlN[k] = dlN.get(k, 0) + 1
+    dsN, dsD = {}, {}
+    _dsw = _rng(aia_ch, "ds_date", w0, w1).copy()
+    if len(_dsw):
+        _dsw["p10"] = _dsw["poc_number"].apply(_phone10) if "poc_number" in _dsw.columns else ""
+        for _, r in _dsw.iterrows():
+            bdate = r["ds_date"]
+            if pd.isna(bdate):
+                continue
+            k = bdate.normalize(); dsD[k] = dsD.get(k, 0) + 1
+            pf = by_phone.get(r["p10"])
+            if pf is not None and len(pf[(pf["msg_date"] >= bdate)
+                                        & (pf["template_name"].isin(_DS_TEMPLATES))]):
+                dsN[k] = dsN.get(k, 0) + 1
+
+    def _rate_pts(numf, denf, lbl):
+        out = []
+        for d in spark_idx:
+            den = float(denf(d)); num = float(numf(d))
+            rate = (100.0 * num / den) if den else None
+            tip = (f"{d.strftime('%d %b')} · {rate:.1f}% ({int(num)}/{int(den)})"
+                   if rate is not None else f"{d.strftime('%d %b')} · no {lbl}")
+            out.append({"v": rate, "size": den, "tip": tip})
+        return out
+    def _val_pts(series, money=False):
+        out = []
+        for d in spark_idx:
+            v = float(series.get(d, 0))
+            out.append({"v": v, "size": 1,
+                        "tip": f"{d.strftime('%d %b')} · " + (("₹" + _grp(v)) if money else _grp(v))})
+        return out
+
+    lp_spark    = _sparkline(_rate_pts(lambda d: int(contacts_daily.get(d, 0)),
+                             lambda d: float(sessions_daily.get(d, 0)), "LP traffic"),
+                             _spark_hex(_rate_color(lp2_rate, 2.0, 1.0)))
+    mql_spark   = _sparkline(_rate_pts(lambda d: int(deals_daily.get(d, 0)),
+                             lambda d: int(contacts_daily.get(d, 0)), "contacts"),
+                             _spark_hex(_rate_color(mql_rate, 50, 25)))
+    ft_spark    = _sparkline(_rate_pts(lambda d: ftN.get(d, 0), lambda d: ftD.get(d, 0), "deals"),
+                             _spark_hex(_rate_color(ft_rate, 90, 75)))
+    ds_spark    = _sparkline(_rate_pts(lambda d: dsN.get(d, 0), lambda d: dsD.get(d, 0), "demos"),
+                             _spark_hex(_rate_color(ds_rate, 90, 75)))
+    wa_spark    = _sparkline(_rate_pts(lambda d: dlN.get(d, 0), lambda d: dlD.get(d, 0), "sent"),
+                             _spark_hex(_rate_color(del_rate, 90, 75)))
+    # band-card sparklines take the card's own status colour (green in-band / good,
+    # red on a bad surprise) — same rule as the card's top strip.
+    spend_spark = _sparkline(_val_pts(spend_daily, money=True),
+                             _spark_hex(_band_status(s_lo, s_hi, spend_val, higher_good=False)))
+    leads_spark = _sparkline(_val_pts(deals_daily),
+                             _spark_hex(_band_status(l_lo, l_hi, leads_val, higher_good=True)))
+
     # LP Traffic-to-Leads — dash when the channel has no LP sessions (Meta/LinkedIn)
     if lp_den:
         _lp_card = _sig_rate_card("LP Traffic-to-Leads", f"{lp2_rate:.2f}", "%",
                                   f"{lp2_num} of {_grp(lp_den)} sessions", lp2_rate,
-                                  _rate_color(lp2_rate, 2.0, 1.0))
+                                  _rate_color(lp2_rate, 2.0, 1.0), spark=lp_spark)
     else:
         _lp_card = _sig_rate_card("LP Traffic-to-Leads", "—", "",
-                                  f"{lp2_num} contacts · no LP traffic", 0, "#94a3b8")
+                                  f"{lp2_num} contacts · no LP traffic", 0, "#94a3b8", spark=lp_spark)
 
     # Every card is for the same selected day + channel, so no per-card date stamp.
     cards = [
         _lp_card,
         _sig_rate_card("Leads to MQL", f"{mql_rate:.1f}", "%",
-                       f"{lp_num} out of {lp2_num} contacts", mql_rate,
-                       _rate_color(mql_rate, 50, 25)),
+                       f"{lp_num} Deals out of {lp2_num} contacts", mql_rate,
+                       _rate_color(mql_rate, 50, 25), spark=mql_spark),
         _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
                        f"{ft_num} of {ft_den} deals", ft_rate,
-                       _rate_color(ft_rate, 90, 75)),
+                       _rate_color(ft_rate, 90, 75), spark=ft_spark),
         _sig_rate_card("DS follow-up sent", f"{ds_rate:.1f}", "%",
                        f"{ds_num} of {ds_den} demos", ds_rate,
-                       _rate_color(ds_rate, 90, 75)),
+                       _rate_color(ds_rate, 90, 75), spark=ds_spark),
         _sig_rate_card("WhatsApp delivered", f"{del_rate:.1f}", "%",
                        f"{del_num} of {del_den} sent", del_rate,
-                       _rate_color(del_rate, 90, 75)),
+                       _rate_color(del_rate, 90, 75), spark=wa_spark),
         _sig_band_card("Spend", "₹" + _grp(spend_val), "",
-                       s_lo, s_med, s_hi, spend_val, True, higher_good=False),
+                       s_lo, s_med, s_hi, spend_val, True, higher_good=False, spark=spend_spark),
         _sig_band_card("Leads", str(leads_val), "",
-                       l_lo, l_med, l_hi, leads_val, False, higher_good=True),
+                       l_lo, l_med, l_hi, leads_val, False, higher_good=True, spark=leads_spark),
     ]
     head = (f'<div class="dsig-head">Daily signals '
             f'<span>{day.strftime("%d %b %Y")}</span></div>')
