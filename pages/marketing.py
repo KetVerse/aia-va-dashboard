@@ -28,6 +28,9 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=dsig-holder|
+<|part|class_name=dsig-channelbar|
+<|{mkt_sig_channel}|selector|lov={mkt_sig_channels}|dropdown|on_change=on_mkt_sig_channel|>
+|>
 <|part|class_name=dsig-datebar|
 <|{mkt_sig_date}|date|on_change=on_mkt_sig_date|format=dd/MM/yyyy|min={mkt_sig_min}|max={mkt_sig_max}|editable=True|>
 |>

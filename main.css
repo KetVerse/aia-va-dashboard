@@ -559,15 +559,45 @@ table.taipy-table thead tr th,
    injection script (see _DSIG_SCRIPT) swaps in the real cards. */
 .dsig-holder .taipy-text-raw { display: none !important; }
 
-/* Daily-signals date picker — docked into the panel's header row (right side), on the
-   same line as the "Daily signals dd mmm yyyy" title. The header row is tall enough
-   (see .dsig-head) for the compact picker to sit next to the title without touching
-   the cards below. */
+/* Daily-signals date picker — docked into the panel's header row on the LEFT, with the
+   "Daily signals dd mmm yyyy" title sitting just to its right. The header row is tall
+   enough (see .dsig-head) for the compact picker to sit next to the title without
+   touching the cards below. */
 .dsig-holder { position: relative; }
-.dsig-datebar { position: absolute; top: 10px; right: 20px; z-index: 6; margin: 0; }
-.dsig-datebar .taipy-date { max-width: 150px; margin: 0 !important; }
-.dsig-datebar .MuiInputBase-root { background: #ffffff !important; }
-.dsig-datebar .MuiInputBase-input { padding: 4px 8px !important; font-size: 12px !important; }
+/* Channel dropdown — exactly the picker's size, sitting to its LEFT. */
+.dsig-channelbar { position: absolute; top: 33px; left: 20px; transform: translateY(-50%); z-index: 6; margin: 0; }
+.dsig-channelbar .taipy-selector,
+.dsig-channelbar .MuiFormControl-root { margin: 0 !important; width: 132px !important; min-width: 132px !important; }
+.dsig-channelbar .MuiInputBase-root,
+.dsig-channelbar .MuiOutlinedInput-root { background: #fff !important; height: 36px !important; min-height: 36px !important; width: 132px !important; }
+.dsig-channelbar .MuiSelect-select { padding: 0 8px !important; font-size: 12px !important; display: flex !important; align-items: center; height: 36px !important; box-sizing: border-box; }
+.dsig-channelbar .MuiOutlinedInput-notchedOutline { border-color: #cbd5e1 !important; }
+
+/* Center the picker's MIDDLE at y=33px regardless of its rendered height
+   (translateY(-50%) makes `top` the vertical CENTRE, not the top edge) — this
+   lines it up with the header text centre no matter what height MUI renders.
+   Sits just RIGHT of the channel dropdown. */
+.dsig-datebar { position: absolute; top: 33px; left: 164px; transform: translateY(-50%); z-index: 6; margin: 0; }
+/* Compact, FIXED 36px picker: pin height on every MUI wrapper (incl. the calendar
+   icon button) so the default-tall box can't push the header to its top line or
+   crowd the cards; trim the width so there's no blank gap before the icon. */
+.dsig-datebar .taipy-date,
+.dsig-datebar .MuiFormControl-root { width: 132px !important; max-width: 132px !important; margin: 0 !important; }
+.dsig-datebar .MuiInputBase-root,
+.dsig-datebar .MuiOutlinedInput-root {
+    background: #ffffff !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    width: 132px !important;
+    max-width: 132px !important;
+}
+.dsig-datebar input {
+    padding: 0 6px !important;
+    height: 34px !important;
+    box-sizing: border-box;
+    font-size: 12px !important;
+}
+.dsig-datebar .MuiIconButton-root { padding: 3px !important; }
 .dsig-datebar .MuiOutlinedInput-notchedOutline { border-color: #cbd5e1 !important; }
 
 .dsig-panel {
@@ -578,13 +608,16 @@ table.taipy-table thead tr th,
     margin: 4px 3px 16px 3px;
 }
 .dsig-head {
+    display: flex;             /* one row, vertically centred to line up with the picker */
+    align-items: center;
     font-size: 15px;
     font-weight: 700;
     color: #1e293b;
-    margin-bottom: 14px;
-    min-height: 30px;          /* header row tall enough for the inline date picker */
-    line-height: 30px;
-    padding-right: 170px;      /* reserve space so the title never runs under the picker */
+    margin-top: 0;             /* title centre now meets the picker's */
+    margin-bottom: 22px;       /* room so the picker never touches the cards */
+    min-height: 36px;          /* == the picker height, so their centres coincide */
+    padding-left: 310px;       /* reserve space for the channel dropdown + date picker */
+    padding-right: 0;
 }
 .dsig-head span {
     font-size: 12px;
@@ -594,7 +627,7 @@ table.taipy-table thead tr th,
 }
 .dsig-grid {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(7, 1fr);
     gap: 10px;
 }
 .dsig-card {

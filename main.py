@@ -1327,6 +1327,7 @@ def _load_signals():
     ga = pd.DataFrame(columns=["date", "hostname", "landing_page", "sessions"])
     conv = pd.DataFrame(columns=["lead_phone", "deal_id", "direction",
                                  "template_name", "delivery_status", "timestamp"])
+    contacts = pd.DataFrame(columns=["create_date", "contact_source"])
     try:
         ga = _q(SUPABASE_URL,
             "SELECT date, hostname, landing_page, sessions FROM public.ga_daily "
@@ -1342,7 +1343,18 @@ def _load_signals():
             statement_timeout_ms=20000)
     except Exception as ex:
         print(f"[WARN] AI SDR conversations load failed: {ex} -- using empty frame")
-    return ga, conv
+    try:
+        # HubSpot contacts — only the two columns the Daily-signals card needs, bounded
+        # to a rolling 46-day window (large table). create_date is a UTC timestamptz;
+        # convert to the IST calendar date so it lines up with the panel's selected day.
+        contacts = _q(SUPABASE_URL,
+            "SELECT (create_date AT TIME ZONE 'Asia/Kolkata')::date AS create_date, "
+            "contact_source FROM public.contacts_hs "
+            "WHERE create_date >= now() - interval '46 days'",
+            statement_timeout_ms=20000)
+    except Exception as ex:
+        print(f"[WARN] contacts_hs load failed: {ex} -- using empty frame")
+    return ga, conv, contacts
 
 def _load_all():
     try:
@@ -1516,10 +1528,11 @@ def _phone10(v):
     d = re.sub(r"\D", "", str(v or ""))
     return d[-10:] if len(d) >= 10 else ""
 
-def _prep_signals(ga, conv):
+def _prep_signals(ga, conv, contacts=None):
     """Normalise the Daily-signals inputs. GA: date -> midnight, sessions numeric.
     Conversations: timestamptz -> naive IST, a msg_date day column, a last-10-digit
-    phone key, and lower-cased direction/template/status for clean matching."""
+    phone key, and lower-cased direction/template/status for clean matching.
+    Contacts: create_date (already IST date) -> midnight for day matching."""
     ga = ga.copy() if ga is not None else pd.DataFrame()
     if len(ga):
         if "date" in ga.columns:
@@ -1535,10 +1548,13 @@ def _prep_signals(ga, conv):
         for cc in ("direction", "template_name", "delivery_status"):
             if cc in conv.columns:
                 conv[cc] = conv[cc].astype(str).str.strip().str.lower()
-    return ga, conv
+    contacts = contacts.copy() if contacts is not None else pd.DataFrame()
+    if len(contacts) and "create_date" in contacts.columns:
+        contacts["create_date"] = pd.to_datetime(contacts["create_date"], errors="coerce").dt.normalize()
+    return ga, conv, contacts
 
-_RAW_GA, _RAW_CONV = _load_signals()
-_GA, _CONV = _prep_signals(_RAW_GA, _RAW_CONV)
+_RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
+_GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -1721,10 +1737,10 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL
-    global _RAW_GA, _RAW_CONV, _GA, _CONV
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
-    _RAW_GA, _RAW_CONV = _load_signals()
-    _GA, _CONV = _prep_signals(_RAW_GA, _RAW_CONV)
+    _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
+    _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -2869,10 +2885,45 @@ def _sig_band_card(title, value_txt, date_txt, lo, med, hi, value, is_money, hig
         f'<div class="dsig-scale"><span>{fmt(lo)}</span><span>{fmt(med)}</span><span>{fmt(hi)}</span></div>'
         '</div>')
 
-def _daily_signals_html(day=None):
-    """Build the 6 'Daily signals' cards, ALL for a single selected `day` (a
-    date/Timestamp). Defaults to — and is capped at — yesterday (IST): today is
-    never selectable because that day's data isn't fetched until the next day.
+# ── Daily-signals CHANNEL filter — maps the panel's Channel dropdown to each
+#    source. "All" = every source combined (no restriction). ──────────────────
+_SIG_CH_GROUP   = {"Google": "Google Ads", "Meta": "Meta Ads", "LinkedIn": "LinkedIn Ads"}
+_SIG_CH_CONTACT = {"Google": "tally automation|pmax|gads", "Meta": "meta", "LinkedIn": "linkedin"}
+
+def _sig_deals(aia, channel):
+    """Non-deleted AIA deals for the selected channel (All = every source)."""
+    d = aia[aia["is_deleted"] != "Yes"] if "is_deleted" in aia.columns else aia
+    grp = _SIG_CH_GROUP.get(channel)
+    return d[d["deal_source_group"] == grp] if (grp and "deal_source_group" in d.columns) else d
+
+def _sig_contacts(cts, channel):
+    """contacts_hs rows for the selected channel (All = every contact)."""
+    pat = _SIG_CH_CONTACT.get(channel)
+    if not pat or "contact_source" not in cts.columns:
+        return cts
+    return cts[cts["contact_source"].astype(str).str.contains(pat, case=False, na=False)]
+
+def _sig_sessions(ga, day, channel):
+    """LP sessions for the channel on `day`. All = whole site; Google = /gads/ pages;
+    Meta/LinkedIn = 0 (ga_daily has no Meta/LinkedIn landing-page traffic)."""
+    if not len(ga) or channel in ("Meta", "LinkedIn"):
+        return 0
+    g = ga.copy(); g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
+    m = (g["_d"] == day) & (g["hostname"].astype(str) == "www.aiaccountant.com")
+    if channel == "Google":
+        m = m & g["landing_page"].astype(str).str.contains("gads", case=False, na=False)
+    return int(pd.to_numeric(g[m]["sessions"], errors="coerce").fillna(0).sum())
+
+def _sig_spend(mkt, channel):
+    """marketing_spends for the selected channel (All = every channel)."""
+    ch = _SIG_CH_GROUP.get(channel)
+    return mkt[mkt["channel"] == ch] if (ch and "channel" in mkt.columns) else mkt
+
+def _daily_signals_html(day=None, channel="All"):
+    """Build the 7 'Daily signals' cards, ALL for a single selected `day` (a
+    date/Timestamp) and `channel` (All / Google / Meta / LinkedIn). Defaults to —
+    and is capped at — yesterday (IST): today is never selectable because that
+    day's data isn't fetched until the next day.
     The selected date is shown once, in the panel header; individual cards carry
     no date stamp. aia_live (Neon) joins to Conversations (Supabase) on the
     last-10-digit phone; POC history for the first-touch template gate is bounded
@@ -2884,10 +2935,10 @@ def _daily_signals_html(day=None):
     lo_day = today - pd.Timedelta(days=45)        # oldest day the cards can cover
     day = (min(max(pd.Timestamp(day).normalize(), lo_day), yday)
            if day is not None else yday)
-    aia, conv, ga, mkt = _AIA, _CONV, _GA, _MKT
-
-    def _live(df):
-        return df[df["is_deleted"] != "Yes"] if "is_deleted" in df.columns else df
+    aia, conv, ga, mkt, cts = _AIA, _CONV, _GA, _MKT, _CONTACTS
+    channel = channel if channel in ("All", "Google", "Meta", "LinkedIn") else "All"
+    aia_ch = _sig_deals(aia, channel)          # channel-filtered, non-deleted deals
+    cts_ch = _sig_contacts(cts, channel)       # channel-filtered contacts
 
     # outbound messages grouped by last-10 phone (for the three messaging cards)
     by_phone = {}
@@ -2895,8 +2946,8 @@ def _daily_signals_html(day=None):
         cout = conv[conv["direction"] == "outbound"]
         by_phone = {p: g for p, g in cout.groupby("p10") if p}
 
-    # Card 2 — First-touch sent (selected day's created deals)
-    dt = _live(_rng(aia, "create_date", day, day)).copy()
+    # Card — First-touch sent (selected day's created deals, this channel)
+    dt = _rng(aia_ch, "create_date", day, day).copy()
     ft_den = int(dt["record_id"].nunique()) if len(dt) else 0
     ft_num = 0
     deliver_flags = []           # one per first-touch deal -> feeds the delivered card
@@ -2917,13 +2968,13 @@ def _daily_signals_html(day=None):
                 deliver_flags.append(str(first["delivery_status"]) in _DELIVERED_STATUS)
     ft_rate = (100.0 * ft_num / ft_den) if ft_den else 0.0
 
-    # Card 4 — WhatsApp delivered (of the first-touch messages that went out)
+    # Card — WhatsApp delivered (of the first-touch messages that went out)
     del_den = len(deliver_flags)
     del_num = int(sum(deliver_flags))
     del_rate = (100.0 * del_num / del_den) if del_den else 0.0
 
-    # Card 3 — DS follow-up sent (selected day's demos booked)
-    ds = _live(_rng(aia, "ds_date", day, day)).copy()
+    # Card — DS follow-up sent (selected day's demos booked, this channel)
+    ds = _rng(aia_ch, "ds_date", day, day).copy()
     ds_den = int(ds["record_id"].nunique()) if len(ds) else 0
     ds_num = 0
     if len(ds):
@@ -2938,46 +2989,36 @@ def _daily_signals_html(day=None):
                 ds_num += 1
     ds_rate = (100.0 * ds_num / ds_den) if ds_den else 0.0
 
-    # gads leads (deal_source contains GAds/Google), non-deleted, dated
-    def _gads_live(df):
-        d = _live(df)
-        if "deal_source" in d.columns:
-            d = d[d["deal_source"].astype(str).str.contains("gads|google", case=False, na=False)]
-        return d
-    gl = _gads_live(aia).copy()
+    # channel deals created, keyed by day — feeds the MQL numerator + Leads card
+    gl = aia_ch.copy()
     gl["_d"] = pd.to_datetime(gl["create_date"], errors="coerce").dt.normalize()
 
-    # Card 1 — LP traffic-to-lead (selected day): gads leads / paid gads sessions.
-    lp_den = 0
-    if len(ga):
-        g = ga.copy()
-        g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
-        sel = g[(g["_d"] == day)
-                & (g["hostname"].astype(str) == "www.aiaccountant.com")
-                & (g["landing_page"].astype(str).str.contains("gads", case=False, na=False))]
-        lp_den = int(pd.to_numeric(sel["sessions"], errors="coerce").fillna(0).sum())
-    lp_num = int(gl[gl["_d"] == day]["record_id"].nunique())
-    lp_rate = (100.0 * lp_num / lp_den) if lp_den else 0.0
+    # Card — LP Traffic-to-Leads: channel CONTACTS created / channel LP sessions.
+    # (Meta/LinkedIn have no LP-session tracking -> lp_den 0 -> card shows a dash.)
+    lp_den  = _sig_sessions(ga, day, channel)
+    lp2_num = (int((cts_ch["create_date"] == day).sum())
+               if len(cts_ch) and "create_date" in cts_ch.columns else 0)
+    lp2_rate = (100.0 * lp2_num / lp_den) if lp_den else 0.0
+
+    # Card — Leads to MQL: channel DEALS created / channel contacts (same-day).
+    lp_num  = int(gl[gl["_d"] == day]["record_id"].nunique())
+    mql_rate = (100.0 * lp_num / lp2_num) if lp2_num else 0.0
 
     # Band = the 7 days PREVIOUS TO the selected day (the day itself excluded), so
-    # the day is judged against the past week of clean history — a genuine spike/drop
-    # isn't diluted by being counted in its own band. So if the day's leads jump to
-    # 54 while the prior 7 days top out at 49, it reads OUT of band (dot right, red).
+    # the day is judged against the past week of clean history.
     _BAND_DAYS = 7
     band_start = day - pd.Timedelta(days=_BAND_DAYS)  # day-7 .. day-1  (7 days)
     band_end   = day - pd.Timedelta(days=1)
     band_idx   = pd.date_range(band_start, band_end, freq="D")
 
-    # Card 6 — Google leads: the day's value vs the prior 7-day band
-    leads_val = int(gl[gl["_d"] == day]["record_id"].nunique())
+    # Card — Leads (channel deals created): the day's value vs the prior 7-day band
+    leads_val = lp_num
     ld = gl[(gl["_d"] >= band_start) & (gl["_d"] <= band_end)]
     ld_daily = ld.groupby("_d")["record_id"].nunique().reindex(band_idx, fill_value=0)
     l_med, l_lo, l_hi = _mad_band(ld_daily.values)
 
-    # Card 5 — Google spend: the day's value vs the prior 7-day band
-    gs = mkt.copy()
-    if "channel" in gs.columns:
-        gs = gs[gs["channel"] == "Google Ads"]
+    # Card — Spend (channel): the day's value vs the prior 7-day band
+    gs = _sig_spend(mkt, channel).copy()
     spend_val = 0.0; s_med = s_lo = s_hi = 0.0
     if {"day", "cost"}.issubset(gs.columns) and len(gs):
         gs["_d"] = pd.to_datetime(gs["day"], errors="coerce").dt.normalize()
@@ -2986,12 +3027,21 @@ def _daily_signals_html(day=None):
         sp_daily = spb.groupby("_d")["cost"].sum().reindex(band_idx, fill_value=0.0)
         s_med, s_lo, s_hi = _mad_band(sp_daily.values)
 
-    # Every card is for the same selected day, so no per-card date stamp — the date
-    # is shown once in the header below.
+    # LP Traffic-to-Leads — dash when the channel has no LP sessions (Meta/LinkedIn)
+    if lp_den:
+        _lp_card = _sig_rate_card("LP Traffic-to-Leads", f"{lp2_rate:.2f}", "%",
+                                  f"{lp2_num} of {_grp(lp_den)} sessions", lp2_rate,
+                                  _rate_color(lp2_rate, 2.0, 1.0))
+    else:
+        _lp_card = _sig_rate_card("LP Traffic-to-Leads", "—", "",
+                                  f"{lp2_num} contacts · no LP traffic", 0, "#94a3b8")
+
+    # Every card is for the same selected day + channel, so no per-card date stamp.
     cards = [
-        _sig_rate_card("LP Traffic-to-Deal (Google)", f"{lp_rate:.2f}", "%",
-                       f"{lp_num} of {_grp(lp_den)} sessions", lp_rate,
-                       _rate_color(lp_rate, 0.8, 0.4)),
+        _lp_card,
+        _sig_rate_card("Leads to MQL", f"{mql_rate:.1f}", "%",
+                       f"{lp_num} out of {lp2_num} contacts", mql_rate,
+                       _rate_color(mql_rate, 50, 25)),
         _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
                        f"{ft_num} of {ft_den} deals", ft_rate,
                        _rate_color(ft_rate, 90, 75)),
@@ -3001,9 +3051,9 @@ def _daily_signals_html(day=None):
         _sig_rate_card("WhatsApp delivered", f"{del_rate:.1f}", "%",
                        f"{del_num} of {del_den} sent", del_rate,
                        _rate_color(del_rate, 90, 75)),
-        _sig_band_card("Google spend", "₹" + _grp(spend_val), "",
+        _sig_band_card("Spend", "₹" + _grp(spend_val), "",
                        s_lo, s_med, s_hi, spend_val, True, higher_good=False),
-        _sig_band_card("Google leads", str(leads_val), "",
+        _sig_band_card("Leads", str(leads_val), "",
                        l_lo, l_med, l_hi, leads_val, False, higher_good=True),
     ]
     head = (f'<div class="dsig-head">Daily signals '
@@ -3014,10 +3064,15 @@ def _daily_signals_html(day=None):
 
 def _daily_signals_refresh(state):
     try:
-        state.mkt_signals_html = _daily_signals_html(pd.Timestamp(state.mkt_sig_date))
+        state.mkt_signals_html = _daily_signals_html(pd.Timestamp(state.mkt_sig_date),
+                                                     state.mkt_sig_channel)
     except Exception as ex:
         print(f"[WARN] daily signals failed: {ex}")
         state.mkt_signals_html = ""
+
+def on_mkt_sig_channel(state):
+    """Daily-signals Channel dropdown changed — re-render the 7 cards for the day."""
+    _daily_signals_refresh(state)
 
 def on_mkt_sig_date(state):
     """Daily-signals date picker changed — clamp to the valid window (45 days ago →
@@ -3679,6 +3734,8 @@ mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Mar
 mkt_kpi_spend="₹0"; mkt_kpi_leads="0"; mkt_kpi_cpl="₹0"; mkt_kpi_cac="₹0"
 mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
 mkt_signals_html=""
+mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn"]   # Daily-signals channel filter
+mkt_sig_channel  = "All"
 mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_df=pd.DataFrame()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""
