@@ -2968,10 +2968,11 @@ def _sparkline(pts, hexc):
         if p["v"] is None:
             continue
         cx, cy, rr = xs[i], yof(p["v"]), rof(p.get("size") or 0)
+        dc = p.get("color") or hexc          # per-day dot colour; the LINE stays hexc
         if i == last:
             dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rr + 1.0:.1f}" fill="none" '
-                        f'stroke="{hexc}" stroke-width="0.9" opacity="0.5"/>')
-        dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rr:.1f}" fill="{hexc}"/>')
+                        f'stroke="{dc}" stroke-width="0.9" opacity="0.5"/>')
+        dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{rr:.1f}" fill="{dc}"/>')
         # invisible larger hit-target carries the tooltip text (JS reads data-tip)
         dots.append(f'<circle class="dsig-hit" cx="{cx:.1f}" cy="{cy:.1f}" r="7" '
                     f'fill="transparent" pointer-events="all" data-tip="{p.get("tip", "")}"/>')
@@ -3183,40 +3184,44 @@ def _daily_signals_html(day=None, channel="All"):
                                         & (pf["template_name"].isin(_DS_TEMPLATES))]):
                 dsN[k] = dsN.get(k, 0) + 1
 
-    def _rate_pts(numf, denf, lbl):
+    def _rate_pts(numf, denf, lbl, good, ok):
+        # each dot coloured by that day's rate vs the card's own thresholds
         out = []
         for d in spark_idx:
             den = float(denf(d)); num = float(numf(d))
             rate = (100.0 * num / den) if den else None
             tip = (f"{d.strftime('%d %b')} · {rate:.1f}% ({int(num)}/{int(den)})"
                    if rate is not None else f"{d.strftime('%d %b')} · no {lbl}")
-            out.append({"v": rate, "size": den, "tip": tip})
+            color = _spark_hex(_rate_color(rate, good, ok)) if rate is not None else None
+            out.append({"v": rate, "size": den, "tip": tip, "color": color})
         return out
-    def _val_pts(series, money=False):
+    def _val_pts(series, lo, hi, higher_good, money=False):
+        # each dot coloured by that day's value vs the card's band
         out = []
         for d in spark_idx:
             v = float(series.get(d, 0))
-            out.append({"v": v, "size": 1,
+            color = _spark_hex(_band_status(lo, hi, v, higher_good))
+            out.append({"v": v, "size": 1, "color": color,
                         "tip": f"{d.strftime('%d %b')} · " + (("₹" + _grp(v)) if money else _grp(v))})
         return out
 
     lp_spark    = _sparkline(_rate_pts(lambda d: int(contacts_daily.get(d, 0)),
-                             lambda d: float(sessions_daily.get(d, 0)), "LP traffic"),
+                             lambda d: float(sessions_daily.get(d, 0)), "LP traffic", 2.0, 1.0),
                              _spark_hex(_rate_color(lp2_rate, 2.0, 1.0)))
     mql_spark   = _sparkline(_rate_pts(lambda d: int(deals_daily.get(d, 0)),
-                             lambda d: int(contacts_daily.get(d, 0)), "contacts"),
-                             _spark_hex(_rate_color(mql_rate, 50, 25)))
-    ft_spark    = _sparkline(_rate_pts(lambda d: ftN.get(d, 0), lambda d: ftD.get(d, 0), "deals"),
+                             lambda d: int(contacts_daily.get(d, 0)), "contacts", 70, 40),
+                             _spark_hex(_rate_color(mql_rate, 70, 40)))
+    ft_spark    = _sparkline(_rate_pts(lambda d: ftN.get(d, 0), lambda d: ftD.get(d, 0), "deals", 90, 75),
                              _spark_hex(_rate_color(ft_rate, 90, 75)))
-    ds_spark    = _sparkline(_rate_pts(lambda d: dsN.get(d, 0), lambda d: dsD.get(d, 0), "demos"),
+    ds_spark    = _sparkline(_rate_pts(lambda d: dsN.get(d, 0), lambda d: dsD.get(d, 0), "demos", 90, 75),
                              _spark_hex(_rate_color(ds_rate, 90, 75)))
-    wa_spark    = _sparkline(_rate_pts(lambda d: dlN.get(d, 0), lambda d: dlD.get(d, 0), "sent"),
+    wa_spark    = _sparkline(_rate_pts(lambda d: dlN.get(d, 0), lambda d: dlD.get(d, 0), "sent", 90, 75),
                              _spark_hex(_rate_color(del_rate, 90, 75)))
-    # band-card sparklines take the card's own status colour (green in-band / good,
-    # red on a bad surprise) — same rule as the card's top strip.
-    spend_spark = _sparkline(_val_pts(spend_daily, money=True),
+    # band-card sparklines: the LINE takes the card's status colour; each dot is
+    # coloured by that day's value vs the band (same rule as the card).
+    spend_spark = _sparkline(_val_pts(spend_daily, s_lo, s_hi, False, money=True),
                              _spark_hex(_band_status(s_lo, s_hi, spend_val, higher_good=False)))
-    leads_spark = _sparkline(_val_pts(deals_daily),
+    leads_spark = _sparkline(_val_pts(deals_daily, l_lo, l_hi, True),
                              _spark_hex(_band_status(l_lo, l_hi, leads_val, higher_good=True)))
 
     # LP Traffic-to-Leads — dash when the channel has no LP sessions (Meta/LinkedIn)
@@ -3233,7 +3238,7 @@ def _daily_signals_html(day=None, channel="All"):
         _lp_card,
         _sig_rate_card("Leads to MQL", f"{mql_rate:.1f}", "%",
                        f"{lp_num} Deals out of {lp2_num} contacts", mql_rate,
-                       _rate_color(mql_rate, 50, 25), spark=mql_spark),
+                       _rate_color(mql_rate, 70, 40), spark=mql_spark),
         _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
                        f"{ft_num} of {ft_den} deals", ft_rate,
                        _rate_color(ft_rate, 90, 75), spark=ft_spark),
@@ -3346,13 +3351,32 @@ def _mkt_refresh(state):
         li_full = _AIA_LI[_AIA_LI["record_id"].isin(aia_base["record_id"])]
     _heat_mkt = {"MRR": "green", "ARPU": "green", "CAC": "red"}
 
-    # Monthly Performance — all months, expanding, with Total
+    # Monthly Performance — trailing 12 months (rolling window ending this month)
     mdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "M", "Month",
-                         lambda p: p.strftime("%b %y"), drop_zero_spend=True)
-    state.mkt_monthly_json = (grid_payload_b64(mdf, total_id_col="Month", no_sort=True,
+                         lambda p: p.strftime("%b %y"), last_n=12)
+
+    # Trend chart — CPL vs Cost Per DC (Spend ÷ demos conducted). Built from mdf
+    # BEFORE the table renames Leads/CPL. Cost Per DC is chart-only (not in the table).
+    if len(mdf):
+        chart = mdf[mdf["Month"] != "Total"].rename(columns={"Spend (₹)": "Spend"}).copy()
+        _dc = aia_base[aia_base["dc_date"].notna()] if "dc_date" in aia_base.columns else aia_base.iloc[0:0]
+        _dc_by = (_dc.groupby(_dc["dc_date"].dt.to_period("M"))["record_id"].nunique()
+                  if len(_dc) else pd.Series(dtype=float))
+        def _cpd(row):
+            p = pd.Period(pd.to_datetime(row["Month"], format="%b %y"), freq="M")
+            dc = int(_dc_by.get(p, 0))
+            return round(row["Spend"] / dc) if dc else 0
+        chart["Cost Per DC"] = chart.apply(_cpd, axis=1)
+        state.mkt_cpl_df = chart[["Month", "CPL", "Cost Per DC"]].rename(columns={"Month": "YearMonth"})
+    else:
+        state.mkt_cpl_df = pd.DataFrame()
+
+    # Table — rename Leads->Deals and CPL->CPD (both are deal-based, not lead-based)
+    mdf_tbl = mdf.rename(columns={"Leads": "Deals", "CPL": "CPD"}) if len(mdf) else mdf
+    state.mkt_monthly_json = (grid_payload_b64(mdf_tbl, total_id_col="Month", no_sort=True,
                               sortable=False, center_all=True, bar_cols=["Spend (₹)"],
                               bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
-                              if len(mdf) else grid_payload_b64(pd.DataFrame()))
+                              if len(mdf_tbl) else grid_payload_b64(pd.DataFrame()))
 
     # Weekly Funnel (8W) — demo funnel, trailing 8 weeks through the current week
     wdf = _mkt_funnel_8w(_mkt_full, aia_base, last_n=8)
@@ -3360,14 +3384,6 @@ def _mkt_refresh(state):
                              sortable=False, center_all=True, bar_cols=["Spend (₹)"],
                              bar_color="#7fb3e0", autosize=True)
                              if len(wdf) else grid_payload_b64(pd.DataFrame()))
-
-    # charts (trend) — derive from the monthly breakdown
-    if len(mdf):
-        chart = mdf[mdf["Month"] != "Total"].rename(columns={"Spend (₹)": "Spend"})
-        state.mkt_spend_df = chart[["Month","Spend","Leads"]].rename(columns={"Month":"YearMonth"})
-        state.mkt_cpl_df   = chart[["Month","CPL","CAC"]].rename(columns={"Month":"YearMonth"})
-    else:
-        state.mkt_spend_df = pd.DataFrame(); state.mkt_cpl_df = pd.DataFrame()
 
     # Channel pies — always show ALL channels (from the channel-unfiltered data)
     # so a different slice can be clicked.
@@ -3378,10 +3394,11 @@ def _mkt_refresh(state):
     else:
         state.mkt_channel_spend_json = pie_payload_b64(pd.DataFrame())
 
+    # Deals by channel (distinct deal records by create_date) — this counts DEALS.
     cl = _rng(_AIA,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
-    cl.columns = ["Channel","Leads"]
-    cl = cl.sort_values("Leads", ascending=False, ignore_index=True)
-    state.mkt_channel_leads_json = pie_payload_b64(cl, "Channel", "Leads")
+    cl.columns = ["Channel","Deals"]
+    cl = cl.sort_values("Deals", ascending=False, ignore_index=True)
+    state.mkt_channel_leads_json = pie_payload_b64(cl, "Channel", "Deals")
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 4 — VA OPS

@@ -37,39 +37,6 @@ MARKETING_PAGE = """
 <|{mkt_signals_html}|text|mode=raw|>
 |>
 
-<|layout|columns=1 1 1 1 1 1|gap=8px|
-<|part|class_name=kpi-card kpi-blue|
-Total Spend
-
-<|{mkt_kpi_spend}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-blue|
-Total Leads
-
-<|{mkt_kpi_leads}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Avg CPL
-
-<|{mkt_kpi_cpl}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-Avg CAC
-
-<|{mkt_kpi_cac}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-green|
-ARPU
-
-<|{mkt_kpi_arpu}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-green|
-Payback Period
-
-<|{mkt_kpi_payback}|text|class_name=kpi-value|>
-|>
-|>
-
 <|part|class_name=chart-card|
 **Monthly Performance**
 
@@ -88,17 +55,10 @@ Payback Period
 <iframe src="/grid/mkt_weekly" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
 |>
 
-<|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
-**Spend vs Leads Trend**
+**CPL vs Cost Per DC Trend**
 
-<|{mkt_spend_df}|chart|type=bar|x=YearMonth|y[1]=Spend|y[2]=Leads|layout={mkt_trend_layout}|plot_config={chart_config}|>
-|>
-<|part|class_name=chart-card|
-**CPL vs CAC Trend**
-
-<|{mkt_cpl_df}|chart|type=line|x=YearMonth|y[1]=CPL|y[2]=CAC|layout={mkt_cpl_layout}|plot_config={chart_config}|>
-|>
+<|{mkt_cpl_df}|chart|type=line|x=YearMonth|y[1]=CPL|y[2]=Cost Per DC|layout={mkt_cpl_layout}|plot_config={chart_config}|>
 |>
 
 <|part|class_name=piebridge piebridge-mkt_channel|
@@ -122,7 +82,7 @@ Payback Period
 <iframe src="/pie/mkt_channel" class="grid-frame" style="width:100%;height:430px;border:none;"></iframe>
 |>
 <|part|class_name=chart-card|
-**Channel Distribution — Leads**  (click a slice to filter)
+**Channel Distribution — Deals**  (click a slice to filter)
 
 <|part|class_name=gridholder pieholder-mkt_leads|
 <|{mkt_channel_leads_json}|text|mode=raw|>
