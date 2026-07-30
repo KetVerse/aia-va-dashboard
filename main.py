@@ -3242,12 +3242,12 @@ def _daily_signals_html(day=None, channel="All"):
         _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
                        f"{ft_num} of {ft_den} deals", ft_rate,
                        _rate_color(ft_rate, 90, 75), spark=ft_spark),
-        _sig_rate_card("DS follow-up sent", f"{ds_rate:.1f}", "%",
-                       f"{ds_num} of {ds_den} demos", ds_rate,
-                       _rate_color(ds_rate, 90, 75), spark=ds_spark),
         _sig_rate_card("WhatsApp delivered", f"{del_rate:.1f}", "%",
                        f"{del_num} of {del_den} sent", del_rate,
                        _rate_color(del_rate, 90, 75), spark=wa_spark),
+        _sig_rate_card("DS follow-up sent", f"{ds_rate:.1f}", "%",
+                       f"{ds_num} of {ds_den} demos", ds_rate,
+                       _rate_color(ds_rate, 90, 75), spark=ds_spark),
         _sig_band_card("Spend", "₹" + _grp(spend_val), "",
                        s_lo, s_med, s_hi, spend_val, True, higher_good=False, spark=spend_spark),
         _sig_band_card("Leads", str(leads_val), "",
@@ -3279,12 +3279,53 @@ def on_mkt_sig_date(state):
     if isinstance(d, datetime):
         d = d.date()
     if d is not None:
-        lo = date.today() - timedelta(days=45)
-        hi = date.today() - timedelta(days=1)
+        lo = _ist_today() - timedelta(days=45)
+        hi = _ist_today() - timedelta(days=1)
         cd = min(max(d, lo), hi)
         if cd != d:                       # snap the picker back into range
             state.mkt_sig_date = cd
     _daily_signals_refresh(state)
+
+def _make_cpd_trend(df):
+    """Monthly CPD (Cost per Deal = Spend/Deals) and Cost per DC (Spend/DC) as two lines.
+    Each point carries a rounded-₹ data label; hovering a dot shows the month and the
+    ₹spend ÷ count (deals for CPD, demos-conducted for Cost per DC) that produced it."""
+    x     = df["Month"].tolist()
+    spend = [int(v) for v in df["Spend"].tolist()]
+    deals = [int(v) for v in df["Leads"].tolist()]
+    dcn   = [int(v) for v in df["DCn"].tolist()]
+    cpd   = [int(v) for v in df["CPL"].tolist()]
+    cpdc  = [int(v) for v in df["Cost Per DC"].tolist()]
+    fig = go.Figure()
+    fig.add_scatter(
+        x=x, y=cpd, name="CPD", mode="lines+markers+text", cliponaxis=False,
+        line={"color": "#1a7fc4", "width": 2}, marker={"size": 7, "color": "#1a7fc4"},
+        text=[f"{_grp(v)}" for v in cpd], textposition="top center",
+        textfont={"size": 10, "color": "#000000", "family": "Inter,sans-serif"},
+        customdata=[[f"₹{_grp(s)}", f"{_grp(d)} deals", f"₹{_grp(v)}"]
+                    for s, d, v in zip(spend, deals, cpd)],
+        hovertemplate="<b>%{x}</b><br>%{customdata[0]} ÷ %{customdata[1]} = %{customdata[2]}<extra>CPD</extra>",
+    )
+    fig.add_scatter(
+        x=x, y=cpdc, name="Cost Per DC", mode="lines+markers+text", cliponaxis=False,
+        line={"color": "#ed7d31", "width": 2}, marker={"size": 7, "color": "#ed7d31"},
+        text=[f"{_grp(v)}" for v in cpdc], textposition="top center",
+        textfont={"size": 10, "color": "#000000", "family": "Inter,sans-serif"},
+        customdata=[[f"₹{_grp(s)}", f"{_grp(d)} dc", f"₹{_grp(v)}"]
+                    for s, d, v in zip(spend, dcn, cpdc)],
+        hovertemplate="<b>%{x}</b><br>%{customdata[0]} ÷ %{customdata[1]} = %{customdata[2]}<extra>Cost Per DC</extra>",
+    )
+    fig.update_layout(
+        margin={"l": 44, "r": 20, "t": 28, "b": 60}, height=300,
+        legend={"orientation": "h", "y": -0.3, "x": 0},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter,sans-serif", "size": 12},
+        xaxis={"tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#1a3a6b"}},
+        yaxis={"showgrid": True, "gridcolor": "#eef2f7", "tickprefix": "₹", "rangemode": "tozero",
+               "tickfont": {"size": 11, "family": "Inter,sans-serif"}},
+    )
+    return fig
+
 
 def _mkt_refresh(state):
     _daily_signals_refresh(state)
@@ -3362,14 +3403,15 @@ def _mkt_refresh(state):
         _dc = aia_base[aia_base["dc_date"].notna()] if "dc_date" in aia_base.columns else aia_base.iloc[0:0]
         _dc_by = (_dc.groupby(_dc["dc_date"].dt.to_period("M"))["record_id"].nunique()
                   if len(_dc) else pd.Series(dtype=float))
-        def _cpd(row):
+        def _dcn(row):
             p = pd.Period(pd.to_datetime(row["Month"], format="%b %y"), freq="M")
-            dc = int(_dc_by.get(p, 0))
-            return round(row["Spend"] / dc) if dc else 0
-        chart["Cost Per DC"] = chart.apply(_cpd, axis=1)
-        state.mkt_cpl_df = chart[["Month", "CPL", "Cost Per DC"]].rename(columns={"Month": "YearMonth"})
+            return int(_dc_by.get(p, 0))
+        chart["DCn"] = chart.apply(_dcn, axis=1)
+        chart["Cost Per DC"] = chart.apply(
+            lambda r: round(r["Spend"] / r["DCn"]) if r["DCn"] else 0, axis=1)
+        state.mkt_cpl_fig = _make_cpd_trend(chart)
     else:
-        state.mkt_cpl_df = pd.DataFrame()
+        state.mkt_cpl_fig = go.Figure()
 
     # Table — rename Leads->Deals and CPL->CPD (both are deal-based, not lead-based)
     mdf_tbl = mdf.rename(columns={"Leads": "Deals", "CPL": "CPD"}) if len(mdf) else mdf
@@ -3853,6 +3895,11 @@ def _vaf_refresh(state):
 
 import calendar as _calendar
 _today       = date.today()
+def _ist_today():
+    """IST calendar date. Use for the Daily-signals date window so the picker's
+    'yesterday' matches the IST sync stamp — the container clock may be UTC/behind,
+    which would otherwise disable the real (IST) yesterday in the picker."""
+    return datetime.now(_IST).date()
 _month_start = date(_today.year, _today.month, 1)
 _month_end   = date(_today.year, _today.month,
                     _calendar.monthrange(_today.year, _today.month)[1])
@@ -3945,7 +3992,7 @@ mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
 mkt_signals_html=""
 mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn"]   # Daily-signals channel filter
 mkt_sig_channel  = "All"
-mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_df=pd.DataFrame()
+mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""
 mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_click_last=""
@@ -3958,9 +4005,10 @@ mkt_deal_list     = sorted(_AIA["deal_name"].dropna().unique().tolist()) if "dea
 mkt_selected_channel=[]; mkt_selected_campaign=[]; mkt_selected_deal=[]
 # Daily-signals date picker: default (and max) = yesterday (today's data isn't in
 # yet); min = 45 days back (older days lack the Conversations history the cards need).
-mkt_sig_date = _today - timedelta(days=1)
-mkt_sig_max  = _today - timedelta(days=1)
-mkt_sig_min  = _today - timedelta(days=45)
+_sig_today   = _ist_today()
+mkt_sig_date = _sig_today - timedelta(days=1)
+mkt_sig_max  = _sig_today - timedelta(days=1)
+mkt_sig_min  = _sig_today - timedelta(days=45)
 
 # Page 4
 va_start_date = _month_start;  va_end_date = _month_end
@@ -4413,8 +4461,9 @@ def on_init(state):
     # were frozen at server start. Recompute per session so a fresh load always
     # defaults to the real "yesterday" (and the 45-day min stays current) even after
     # the server has been running for days.
-    _yday = date.today() - timedelta(days=1)
-    state.mkt_sig_min  = date.today() - timedelta(days=45)
+    _ist_now = _ist_today()
+    _yday = _ist_now - timedelta(days=1)
+    state.mkt_sig_min  = _ist_now - timedelta(days=45)
     state.mkt_sig_max  = _yday
     state.mkt_sig_date = _yday
     _refresh_all(state)

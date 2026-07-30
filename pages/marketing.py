@@ -56,9 +56,9 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
-**CPL vs Cost Per DC Trend**
+**CPD vs Cost Per DC Trend**
 
-<|{mkt_cpl_df}|chart|type=line|x=YearMonth|y[1]=CPL|y[2]=Cost Per DC|layout={mkt_cpl_layout}|plot_config={chart_config}|>
+<|chart|figure={mkt_cpl_fig}|plot_config={chart_config}|>
 |>
 
 <|part|class_name=piebridge piebridge-mkt_channel|
