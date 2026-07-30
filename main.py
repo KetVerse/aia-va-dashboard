@@ -23,7 +23,7 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 import psycopg2
 import plotly.graph_objects as go
-from flask import Flask
+from flask import Flask, request
 from taipy.gui import Gui, navigate
 
 _IST = timezone(timedelta(hours=5, minutes=30))
@@ -569,6 +569,13 @@ _SPARK_TIP_SCRIPT = """
 @flask_app.after_request
 def _inject_zoom_lock(resp):
     try:
+        # The /grid/ and /pie/ iframes are self-contained pages with their own JS and
+        # CSS. Injecting the main-page scripts there is wrong — e.g. the sparkline
+        # tooltip (.dsig-tip) is unstyled inside the iframe (main.css isn't loaded), so
+        # it renders inline at the bottom as a stray caption when a grid cell tooltip
+        # fires. Skip injection for those iframe responses.
+        if request.path.startswith(("/grid/", "/pie/")):
+            return resp
         if resp.headers.get("Content-Type", "").startswith("text/html"):
             html = resp.get_data(as_text=True)
             if "</body>" in html and 'id="zoom-lock"' not in html:
@@ -1383,10 +1390,13 @@ def _load_signals():
         # HubSpot contacts — only the two columns the Daily-signals card needs, bounded
         # to a rolling 46-day window (large table). create_date is a UTC timestamptz;
         # convert to the IST calendar date so it lines up with the panel's selected day.
+        # Exclude deleted contacts (is_deleted='Yes') the same way aia_live does, so the
+        # Leads-to-MQL denominator counts only live contacts.
         contacts = _q(SUPABASE_URL,
             "SELECT (create_date AT TIME ZONE 'Asia/Kolkata')::date AS create_date, "
             "contact_source FROM public.contacts_hs "
-            "WHERE create_date >= now() - interval '46 days'",
+            "WHERE create_date >= now() - interval '46 days' "
+            "AND is_deleted IS DISTINCT FROM 'Yes'",
             statement_timeout_ms=20000)
     except Exception as ex:
         print(f"[WARN] contacts_hs load failed: {ex} -- using empty frame")
@@ -3250,7 +3260,7 @@ def _daily_signals_html(day=None, channel="All"):
                        _rate_color(ds_rate, 90, 75), spark=ds_spark),
         _sig_band_card("Spend", "₹" + _grp(spend_val), "",
                        s_lo, s_med, s_hi, spend_val, True, higher_good=False, spark=spend_spark),
-        _sig_band_card("Leads", str(leads_val), "",
+        _sig_band_card("Deals", str(leads_val), "",
                        l_lo, l_med, l_hi, leads_val, False, higher_good=True, spark=leads_spark),
     ]
     head = (f'<div class="dsig-head">Daily signals '
@@ -3420,12 +3430,14 @@ def _mkt_refresh(state):
                               bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
                               if len(mdf_tbl) else grid_payload_b64(pd.DataFrame()))
 
-    # Weekly Funnel (8W) — demo funnel, trailing 8 weeks through the current week
+    # Weekly Funnel (8W) — demo funnel, trailing 8 weeks through the current week.
+    # Rename Leads->Deals and CPL->CPD (deal-based, matching the monthly table).
     wdf = _mkt_funnel_8w(_mkt_full, aia_base, last_n=8)
-    state.mkt_weekly_json = (grid_payload_b64(wdf, total_id_col="Week", no_sort=True,
+    wdf_tbl = wdf.rename(columns={"Leads": "Deals", "CPL": "CPD"}) if len(wdf) else wdf
+    state.mkt_weekly_json = (grid_payload_b64(wdf_tbl, total_id_col="Week", no_sort=True,
                              sortable=False, center_all=True, bar_cols=["Spend (₹)"],
                              bar_color="#7fb3e0", autosize=True)
-                             if len(wdf) else grid_payload_b64(pd.DataFrame()))
+                             if len(wdf_tbl) else grid_payload_b64(pd.DataFrame()))
 
     # Channel pies — always show ALL channels (from the channel-unfiltered data)
     # so a different slice can be clicked.
@@ -3718,8 +3730,12 @@ def _ar_refresh(state):
             "Due Status": d["Due Status"].values,
             "Next Due Date": d["Next Due Date"].apply(_dt).values,
         })
+        # Sl no: running serial over the CURRENT (filtered) view — re-numbered 1..N in
+        # display order by the grid (rownum_col), so it stays pinned top-to-bottom and
+        # the last row = how many rows survived the filters.
+        disp.insert(0, "Sl no", range(1, len(disp) + 1))
         state.vaf_ar_json = grid_payload_b64(
-            disp, no_sort=True, autosize=True, max_height=560,
+            disp, no_sort=True, autosize=True, max_height=560, rownum_col="Sl no",
             center_cols=["1st Payment Date", "Pending Dues (Months)", "Outstanding Amount",
                          "Due Status", "Next Due Date"],
             status_cols=["Due Status"], date_cols=["1st Payment Date", "Next Due Date"],
@@ -3793,42 +3809,88 @@ def _vaf_refresh(state):
     _va_mrr = _matrix_current_mrr(_vrev, today, exclude_onetime=True)
     state.vaf_kpi_mrr = _fmt2(_va_mrr)
     state.vaf_kpi_mrr_exact = f"{_inr(_va_mrr)} · Excludes One-time amount & Refunds"
-    # Re-lay-out for display: cohorts, then the recurring Total (renamed), then the
-    # cash memo rows, then a Collected total that sums ONLY the three cash rows.
-    #   revenue  : "Total MRR"       + "Total Collected"    (₹)
-    #   retention: "Total Recurring" + "Total Transactions" (counts)
-    def _finalize_va_matrix(m, total_label, collected_label, collected_values=None):
+    # Pending Collections: renewal cash due but not yet collected. A subscription is
+    # covered billing_start_date .. +term; the month coverage ENDS is when its renewal
+    # is due. Take each deal's LATEST coverage-end (a renewal auto-extends it), keep
+    # recurring only (New/Renewal, never One-time), and if that end month has arrived
+    # (<= current month) it's pending. Cash = the cycle's full payment (total_price).
+    _cur_per = pd.Period(today, freq="M")
+    def _tm(r):                                   # term length in months for this cycle
+        term = r.get("term"); term = 1 if (pd.isna(term) or term <= 0) else int(term)
+        f = str(r.get("billing_frequency") or "").strip().lower()
+        return {"monthly": term, "bi_monthly": 2, "quarterly": 3,
+                "per_six_months": 6, "annually": 12}.get(f, term)
+    def _cov_end(r):
+        sd = r.get("billing_start_date")
+        if pd.isna(sd):
+            return pd.NaT
+        de = r.get("days_extended"); de = 0 if pd.isna(de) else int(de)
+        return sd + relativedelta(months=_tm(r)) + pd.Timedelta(days=de)
+    _pend = li.copy()
+    if "recurring_type" in _pend.columns:
+        _pend = _pend[_pend["recurring_type"].isin(["New", "Renewal"])]
+    if _v_refund_map is not None:
+        _pend = _pend[~_pend["record_id"].map(_v_refund_map).eq("Yes")]
+    _pend = _pend.dropna(subset=["record_id", "billing_start_date"]).copy()
+    if len(_pend):
+        _pend["_ce"] = _pend.apply(_cov_end, axis=1)
+        _pend = _pend.dropna(subset=["_ce"])
+        _pend = _pend.sort_values("_ce").groupby("record_id", as_index=False).last()  # latest cycle
+        _pend["_per"] = _pend["_ce"].apply(lambda d: pd.Period(d, freq="M"))
+        _pend = _pend[_pend["_per"] <= _cur_per]              # due/overdue, not future
+        _pend["_m"] = _pend["_per"].apply(lambda p: p.strftime("%b %y"))
+        _pend["_termm"] = _pend.apply(_tm, axis=1)
+    # per-month hover tip for the Pending row: "₹amt due for (dd-mmm, Nm) Deal"
+    _pend_tips = {}
+    if len(_pend):
+        for _mk, _grp in _pend.sort_values("total_price", ascending=False).groupby("_m"):
+            _pend_tips[_mk] = "\n".join(
+                f"₹{int(round(_r['total_price'] or 0)):,} due for "
+                f"{_r['_ce'].strftime('%d-%b')} ({int(_r['_termm'])}m) {_r.get('deal_name', '')}"
+                for _, _r in _grp.iterrows())
+    _mcols = [c for c in _vrev.columns if c != "Cohort"]
+    def _pending_row(count=False):
+        row = {"Cohort": "Pending Collections"}
+        for c in _mcols:
+            sub = _pend[_pend["_m"] == c] if len(_pend) else _pend
+            row[c] = (int(sub["record_id"].nunique()) if count
+                      else int(round(pd.to_numeric(sub.get("total_price"), errors="coerce").fillna(0).sum())))
+        return row
+
+    # Re-lay-out for display: cohorts, then the recurring Total (renamed), then the new
+    # Pending Collections row. (New Collection / Fresh Renewals / One-time / Total
+    # Collected / Total Payments removed per request.)
+    def _finalize_va_matrix(m, total_label, pending_row):
         if m is None or not len(m):
             return m
-        _memo = ["New Collection", "Fresh Renewals", "One-time"]
-        _cols = [c for c in m.columns if c != "Cohort"]
-        cohorts = m[~m["Cohort"].isin(_memo + ["Total"])].copy()
+        _drop = ["New Collection", "Fresh Renewals", "One-time"]
+        cohorts = m[~m["Cohort"].isin(_drop + ["Total"])].copy()
         totrow  = m[m["Cohort"] == "Total"].copy()
-        totrow["Cohort"] = total_label                       # rename recurring Total
-        memo    = m[m["Cohort"].isin(_memo)].copy()
-        coll = {"Cohort": collected_label}
-        for c in _cols:
-            # revenue → sum the cash rows (₹). retention → distinct payers, so a
-            # customer paying two types in a month counts once (collected_values).
-            coll[c] = (int(collected_values.get(c, 0)) if collected_values is not None
-                       else int(pd.to_numeric(memo[c], errors="coerce").fillna(0).sum()))
-        return pd.concat([cohorts, totrow, memo, pd.DataFrame([coll])], ignore_index=True)
-    _vrev = _finalize_va_matrix(_vrev, "Total MRR", "Total Collected")
-    _ret_cols = [c for c in _vret.columns if c != "Cohort"] if len(_vret) else []
-    _vret_distinct = _distinct_payers_by_month(li, _v_refund_map, _ret_cols)
-    _vret = _finalize_va_matrix(_vret, "Total Recurring", "Total Payments",
-                                collected_values=_vret_distinct)
+        totrow["Cohort"] = total_label
+        return pd.concat([cohorts, totrow, pd.DataFrame([pending_row])], ignore_index=True)
+    _vrev = _finalize_va_matrix(_vrev, "Total MRR", _pending_row(count=False))
+    _vret = _finalize_va_matrix(_vret, "Total Recurring", _pending_row(count=True))
     _vrev_heat = {c: "green" for c in _vrev.columns if c != "Cohort"} if len(_vrev) else {}
     _vret_heat = {c: "green" for c in _vret.columns if c != "Cohort"} if len(_vret) else {}
+    # Per-month hidden tip columns — the Pending Collections row's cells hover-list the
+    # deals due that month ("₹amt due for (dd-mmm, Nm) Deal"); every other row is blank.
+    _tip_cols = {}
+    for _c in _mcols:
+        _tc = _c + " tip"
+        _tip_cols[_c] = _tc
+        for _mtx in (_vrev, _vret):
+            if len(_mtx):
+                _mtx[_tc] = [_pend_tips.get(_c, "") if v == "Pending Collections" else ""
+                             for v in _mtx["Cohort"]]
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
-                                       autosize=True, heat_cols=_vrev_heat, row_heat_cols=_MATRIX_ROW_HEAT,
-                                       heat_by_row=True, total_inline=True)
+                                       autosize=True, heat_cols=_vrev_heat, row_heat_cols={"Pending Collections": "amber"},
+                                       heat_by_row=True, total_inline=True, tip_cols=_tip_cols)
                                        if len(_vrev) else grid_payload_b64(pd.DataFrame()))
     state.vaf_retention_matrix_json = (grid_payload_b64(_vret, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
-                                       autosize=True, heat_cols=_vret_heat, row_heat_cols=_MATRIX_ROW_HEAT,
-                                       heat_by_row=True, total_inline=True)
+                                       autosize=True, heat_cols=_vret_heat, row_heat_cols={"Pending Collections": "amber"},
+                                       heat_by_row=True, total_inline=True, tip_cols=_tip_cols)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
 
     # Parked / Churned reason breakdowns — paid customers only (payment_date
