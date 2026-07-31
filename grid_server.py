@@ -363,7 +363,10 @@ _GRID_HTML = r"""<!DOCTYPE html>
   /* col_w: cap a column by clipping its content — an inner block with a max-width
      bounds the cell's max-content, which is what auto-layout sizes the column to.
      Overlong values ellipsize and keep the full text in a hover title. */
-  .clip{ display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* inline-block (not block) so a clipped cell still obeys the cell's text-align:
+     centered columns (matrices) stay centered, left columns (Deal Name) stay left. */
+  .clip{ display:inline-block; vertical-align:middle; max-width:100%;
+         overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   tfoot td{
     position:sticky; bottom:0; z-index:2;
     background:var(--tot); color:var(--tottxt); font-weight:700;

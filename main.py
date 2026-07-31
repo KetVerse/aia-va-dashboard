@@ -2613,15 +2613,22 @@ def _cs_refresh(state):
     state.cs_kpi_mrr_exact = f"{_inr(_cs_mrr)} · (Refunds Excluded)"
     _rev_heat = {c: "green" for c in _rev_m.columns if c != "Cohort"} if len(_rev_m) else {}
     _ret_heat = {c: "green" for c in _ret_m.columns if c != "Cohort"} if len(_ret_m) else {}
+    # Identical column widths on BOTH matrices so the month columns line up vertically
+    # for cohort-vs-cohort comparison (Cohort wide enough for the "Fresh Renewals" label;
+    # every month column equal). Same col_w on both => identical rendered widths.
+    _cs_mx_cw = {"Cohort": 185}
+    for _c in list(_rev_m.columns) + list(_ret_m.columns):
+        if _c != "Cohort":
+            _cs_mx_cw.setdefault(_c, 120)
     state.cs_revenue_matrix_json = (grid_payload_b64(_rev_m, total_id_col="Cohort",
                                     blank_zeros=True, no_sort=True, sortable=False, center_all=True,
                                     autosize=True, heat_cols=_rev_heat, row_heat_cols=_MATRIX_ROW_HEAT,
-                                    heat_by_row=True)
+                                    heat_by_row=True, col_w=_cs_mx_cw)
                                     if len(_rev_m) else grid_payload_b64(pd.DataFrame()))
     state.cs_retention_matrix_json = (grid_payload_b64(_ret_m, total_id_col="Cohort",
                                       blank_zeros=True, no_sort=True, sortable=False, center_all=True,
                                       autosize=True, heat_cols=_ret_heat, row_heat_cols=_MATRIX_ROW_HEAT,
-                                      heat_by_row=True)
+                                      heat_by_row=True, col_w=_cs_mx_cw)
                                       if len(_ret_m) else grid_payload_b64(pd.DataFrame()))
 
     # ── Three stacked CSM Performance tables ────────────────────────────────
@@ -3750,6 +3757,7 @@ def _ar_refresh(state):
             center_cols=["1st Payment Date", "Pending Dues (Months)", "Outstanding Amount",
                          "Due Status", "Next Due Date"],
             status_cols=["Due Status"], date_cols=["1st Payment Date", "Next Due Date"],
+            col_w={"Sl no": 90, "Deal Name": 328},   # match the TAT Tracker's Sl no + Deal Name widths
             link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
     else:
         state.vaf_ar_json = grid_payload_b64(pd.DataFrame())
@@ -3810,6 +3818,10 @@ def _tat_build():
             "AM": (r.get("am_owner", "") or "—"),
             "Deal Owner": (r.get("deal_owner", "") or "—"),
             "Deal Stage": stg,
+            "1st Payment Date": (pd.Timestamp(r.get("payment_date")).strftime("%d-%b-%y")
+                                 if pd.notna(r.get("payment_date")) else ""),
+            "RFR Date": (pd.Timestamp(r.get("rfr_date")).strftime("%d-%b-%y")
+                         if pd.notna(r.get("rfr_date")) else ""),
             "Expected TAT (median)": expected, "TAT Status": status or "—",
             "TAT Due In": ("—" if due_num is None else f"{due_num} d"),
             "_due_sort": (due_num if due_num is not None else 9999),
@@ -3839,8 +3851,8 @@ def _tat_refresh(state):
     disp.insert(0, "Sl no", range(1, len(disp) + 1))
     state.vaf_tat_json = (grid_payload_b64(
         disp, no_sort=True, autosize=True, max_height=520, rownum_col="Sl no",
-        center_cols=["Deal Stage", "Expected TAT (median)", "TAT Status", "TAT Due In"],
-        status_cols=["TAT Status"],
+        center_cols=["Deal Stage", "1st Payment Date", "RFR Date", "Expected TAT (median)", "TAT Status", "TAT Due In"],
+        status_cols=["TAT Status"], date_cols=["1st Payment Date", "RFR Date"], col_w={"Sl no": 90, "Deal Name": 328},
         heat_cols={"TAT Due In": "amber"}, heat_from={"TAT Due In": "_tat_urgency"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
         if len(disp) else grid_payload_b64(pd.DataFrame()))
@@ -3984,15 +3996,22 @@ def _vaf_refresh(state):
             if len(_mtx):
                 _mtx[_tc] = [_pend_tips.get(_c, "") if v == "Pending Collections" else ""
                              for v in _mtx["Cohort"]]
+    # Identical column widths on BOTH matrices so the month columns line up vertically
+    # for cohort-vs-cohort comparison. Cohort wide enough for the "Pending Collections"
+    # label; every month column equal. Auto-layout (table width:100%) distributes the
+    # slack proportionally, so the same col_w on both tables => identical rendered widths.
+    _mx_cw = {"Cohort": 185}
+    for _c in _mcols:
+        _mx_cw[_c] = 120
     state.vaf_revenue_matrix_json   = (grid_payload_b64(_vrev, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
                                        autosize=True, heat_cols=_vrev_heat, row_heat_cols={"Pending Collections": "amber"},
-                                       heat_by_row=True, total_inline=True, tip_cols=_tip_cols)
+                                       heat_by_row=True, total_inline=True, tip_cols=_tip_cols, col_w=_mx_cw)
                                        if len(_vrev) else grid_payload_b64(pd.DataFrame()))
     state.vaf_retention_matrix_json = (grid_payload_b64(_vret, total_id_col="Cohort",
                                        blank_zeros=True, no_sort=True, sortable=False, center_all=True,
                                        autosize=True, heat_cols=_vret_heat, row_heat_cols={"Pending Collections": "amber"},
-                                       heat_by_row=True, total_inline=True, tip_cols=_tip_cols)
+                                       heat_by_row=True, total_inline=True, tip_cols=_tip_cols, col_w=_mx_cw)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
 
     # TAT Tracker — turnaround through the renewal journey (below the retention matrix).
@@ -4154,14 +4173,12 @@ cs_usage_tip = ("Usage Streak — last 28 days\n"
                 "Hover a dot for that day's event counts.")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
-               "• Fresh Renewals: Monthly cash collected\n"
-               "• Total MRR: Sum of MRR + one-time revenue (excludes Fresh Renewals)\n"
-               "• Total Collected: New + Fresh Renewals + One-time (all cash collected)")
+               "• Total MRR: Sum of MRR + one-time revenue\n"
+               "• Pending Collections: Renewal cash due that month, not yet collected (coverage ended, not renewed; one-time excluded)")
 vaf_ret_tip = ("Customer Retention Matrix\n"
                "• Cohort Spread: Based on recurring + one-time customers\n"
-               "• Fresh Renewals: Customers who paid that month (includes one-time)\n"
                "• Total Recurring: Sum of recurring + one-time customers\n"
-               "• Total Payments: distinct customers who paid that month")
+               "• Pending Collections: Customers with a renewal due that month, not yet renewed (one-time excluded)")
 
 # Page 3
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)
