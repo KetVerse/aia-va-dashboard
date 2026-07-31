@@ -2991,8 +2991,18 @@ def _sparkline(pts, hexc):
 
 # ── Daily-signals CHANNEL filter — maps the panel's Channel dropdown to each
 #    source. "All" = every source combined (no restriction). ──────────────────
-_SIG_CH_GROUP   = {"Google": "Google Ads", "Meta": "Meta Ads", "LinkedIn": "LinkedIn Ads"}
-_SIG_CH_CONTACT = {"Google": "tally automation|pmax|gads", "Meta": "meta", "LinkedIn": "linkedin"}
+_SIG_CH_GROUP = {"Google": "Google Ads", "Meta": "Meta Ads",
+                 "LinkedIn": "LinkedIn Ads", "Organic": "Organic"}
+
+def _sig_contact_channel(src):
+    """Bucket a contact_source into exactly ONE channel (first match wins, so
+    'Tally Automation - meta' counts as Meta, not Google). 'Other' = untracked."""
+    s = str(src).lower()
+    if "meta" in s:                                                          return "Meta"
+    if "linkedin" in s:                                                      return "LinkedIn"
+    if any(k in s for k in ("tally automation", "pmax", "gads", "suvit")):   return "Google"
+    if "homepage" in s:                                                      return "Organic"
+    return "Other"
 
 def _sig_deals(aia, channel):
     """Non-deleted AIA deals for the selected channel (All = every source)."""
@@ -3001,16 +3011,17 @@ def _sig_deals(aia, channel):
     return d[d["deal_source_group"] == grp] if (grp and "deal_source_group" in d.columns) else d
 
 def _sig_contacts(cts, channel):
-    """contacts_hs rows for the selected channel (All = every contact)."""
-    pat = _SIG_CH_CONTACT.get(channel)
-    if not pat or "contact_source" not in cts.columns:
+    """contacts_hs rows for the selected channel (All = every contact). Each contact
+    maps to a single channel via _sig_contact_channel, so channels never double-count
+    an overlapping source."""
+    if channel == "All" or "contact_source" not in cts.columns:
         return cts
-    return cts[cts["contact_source"].astype(str).str.contains(pat, case=False, na=False)]
+    return cts[cts["contact_source"].map(_sig_contact_channel) == channel]
 
 def _sig_sessions(ga, day, channel):
     """LP sessions for the channel on `day`. All = whole site; Google = /gads/ pages;
-    Meta/LinkedIn = 0 (ga_daily has no Meta/LinkedIn landing-page traffic)."""
-    if not len(ga) or channel in ("Meta", "LinkedIn"):
+    Meta / LinkedIn / Organic = 0 (ga_daily has no dedicated landing-page traffic)."""
+    if not len(ga) or channel in ("Meta", "LinkedIn", "Organic"):
         return 0
     g = ga.copy(); g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
     m = (g["_d"] == day) & (g["hostname"].astype(str) == "www.aiaccountant.com")
@@ -3040,7 +3051,7 @@ def _daily_signals_html(day=None, channel="All"):
     day = (min(max(pd.Timestamp(day).normalize(), lo_day), yday)
            if day is not None else yday)
     aia, conv, ga, mkt, cts = _AIA, _CONV, _GA, _MKT, _CONTACTS
-    channel = channel if channel in ("All", "Google", "Meta", "LinkedIn") else "All"
+    channel = channel if channel in ("All", "Google", "Meta", "LinkedIn", "Organic") else "All"
     aia_ch = _sig_deals(aia, channel)          # channel-filtered, non-deleted deals
     cts_ch = _sig_contacts(cts, channel)       # channel-filtered contacts
 
@@ -4157,7 +4168,7 @@ mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Mar
 mkt_kpi_spend="₹0"; mkt_kpi_leads="0"; mkt_kpi_cpl="₹0"; mkt_kpi_cac="₹0"
 mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
 mkt_signals_html=""
-mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn"]   # Daily-signals channel filter
+mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn", "Organic"]   # Daily-signals channel filter
 mkt_sig_channel  = "All"
 mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
