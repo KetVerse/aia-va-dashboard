@@ -676,9 +676,10 @@ function body(){
       } else if(stat[i]){
         const sv=String(v);
         const SMAP={"Active":"st-active","Collected":"st-active",
-                    "Risk of Churn":"st-risk","Pending":"st-risk",
+                    "On Track":"st-active","Renewed":"st-active",
+                    "Risk of Churn":"st-risk","Pending":"st-risk","Due Soon":"st-risk",
                     "Inactive":"st-inactive","Overdue":"st-inactive",
-                    "Upcoming":"st-black","Churned":"st-churned"};
+                    "Upcoming":"st-black","Churned":"st-churned","Parked":"st-churned"};
         const c=SMAP[sv]||"";
         html+='<td class="'+cls(i)+'"><span class="'+c+'">'+fmt(v,num[i])+'</span></td>';
       } else if(bars[i] && typeof v==="number" && v>0 && maxes[i]>0){

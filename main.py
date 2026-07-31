@@ -3743,6 +3743,97 @@ def _ar_refresh(state):
     else:
         state.vaf_ar_json = grid_payload_b64(pd.DataFrame())
 
+_TAT_JOURNEY = {"Payment Done", "Ready for Renewal", "Renewal Done", "Parked", "AM Parked", "Churned"}
+_TAT_RANK = {"Overdue": 0, "Due Soon": 1, "On Track": 2, "Renewed": 3, "Parked": 4, "Churned": 5}
+
+def _tat_build():
+    """VA TAT Tracker — one row per PAID VA deal in the renewal journey.
+      T1 = Payment Done      -> Ready for Renewal  (rfr_date - payment_date)
+      T2 = Ready for Renewal -> Renewal Done       (renewed_date - rfr_date)
+    Benchmark = the MEDIAN TAT per transition (robust to outliers). Each active
+    deal shows its stage's median as 'Expected TAT', a 'TAT Due In' countdown
+    (median minus days in the current stage; negative once breached) and a status.
+    Finished / terminal deals show Renewed / Parked / Churned. Returns
+    (df, median_T1, median_T2)."""
+    va = _VA
+    if va is None or len(va) == 0 or "payment_date" not in va.columns:
+        return pd.DataFrame(), 0, 0
+    d = va[va["payment_date"].notna()].copy()
+    for c in ("rfr_date", "renewed_date", "am_parked_date", "parked_date", "churned_date"):
+        if c in d.columns:
+            d[c] = pd.to_datetime(d[c], errors="coerce")
+    today = pd.Timestamp(date.today()).normalize()
+    _t1 = ((d["rfr_date"] - d["payment_date"]).dt.days
+           if "rfr_date" in d.columns else pd.Series(dtype=float))
+    _t2 = ((d["renewed_date"] - d["rfr_date"]).dt.days
+           if {"renewed_date", "rfr_date"}.issubset(d.columns) else pd.Series(dtype=float))
+    med1 = float(_t1[_t1 >= 0].median()) if _t1.notna().any() else 0.0
+    med2 = float(_t2[_t2 >= 0].median()) if _t2.notna().any() else 0.0
+    med1 = 0.0 if pd.isna(med1) else med1
+    med2 = 0.0 if pd.isna(med2) else med2
+    rows = []
+    for _, r in d.iterrows():
+        stg = str(r.get("deal_stage", "") or "")
+        if stg not in _TAT_JOURNEY:
+            continue
+        expected, status, due_num, urgency = "—", "", None, 0.0
+        if stg == "Churned":
+            status = "Churned"
+        elif stg in ("Parked", "AM Parked"):
+            status = "Parked"
+        elif stg == "Renewal Done":
+            status = "Renewed"
+            expected = f"{round(med2)} d" if med2 else "—"
+        else:                                        # active transition (T1 or T2)
+            med   = med1 if stg == "Payment Done" else med2
+            start = r.get("payment_date") if stg == "Payment Done" else r.get("rfr_date")
+            if med and pd.notna(start):
+                elapsed = (today - pd.Timestamp(start).normalize()).days
+                due_num = round(med) - elapsed        # days left; < 0 = overdue
+                N = max(2, round(0.25 * med))         # amber window = 25% of the median
+                status = "Overdue" if due_num < 0 else ("Due Soon" if due_num <= N else "On Track")
+                expected = f"{round(med)} d"
+                urgency = float(max(0, elapsed))
+        rows.append({
+            "Deal Name": r.get("deal_name", "") or "", "record_id": r.get("record_id", ""),
+            "AM": (r.get("am_owner", "") or "—"),
+            "Deal Owner": (r.get("deal_owner", "") or "—"),
+            "Deal Stage": stg,
+            "Expected TAT (median)": expected, "TAT Status": status or "—",
+            "TAT Due In": ("—" if due_num is None else f"{due_num} d"),
+            "_due_sort": (due_num if due_num is not None else 9999),
+            "_tat_urgency": urgency,
+        })
+    df = pd.DataFrame(rows)
+    if len(df):
+        df["_rank"] = df["TAT Status"].map(_TAT_RANK).fillna(9)
+        df = (df.sort_values(["_rank", "_due_sort"])
+                .drop(columns=["_rank", "_due_sort"]).reset_index(drop=True))
+    return df, round(med1), round(med2)
+
+def _tat_refresh(state):
+    """Render the TAT Tracker from its base (state.vaf_tat_all), applying the panel's
+    Deal Name / Deal Stage / AM / Deal Owner / TAT Status filters."""
+    d = state.vaf_tat_all
+    if d is None or len(d) == 0:
+        state.vaf_tat_json = grid_payload_b64(pd.DataFrame())
+        return
+    for col, sv in (("Deal Name", state.vaf_tat_deal), ("Deal Stage", state.vaf_tat_stage),
+                    ("AM", state.vaf_tat_am), ("Deal Owner", state.vaf_tat_owner),
+                    ("TAT Status", state.vaf_tat_status)):
+        s = _sel(sv)
+        if s and col in d.columns:
+            d = d[d[col].isin(s)]
+    disp = d.copy()
+    disp.insert(0, "Sl no", range(1, len(disp) + 1))
+    state.vaf_tat_json = (grid_payload_b64(
+        disp, no_sort=True, autosize=True, max_height=520, rownum_col="Sl no",
+        center_cols=["Deal Stage", "Expected TAT (median)", "TAT Status", "TAT Due In"],
+        status_cols=["TAT Status"],
+        heat_cols={"TAT Due In": "amber"}, heat_from={"TAT Due In": "_tat_urgency"},
+        link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
+        if len(disp) else grid_payload_b64(pd.DataFrame()))
+
 def _vaf_refresh(state):
     today = pd.Timestamp(date.today())
     df = _VA.copy()
@@ -3892,6 +3983,20 @@ def _vaf_refresh(state):
                                        autosize=True, heat_cols=_vret_heat, row_heat_cols={"Pending Collections": "amber"},
                                        heat_by_row=True, total_inline=True, tip_cols=_tip_cols)
                                        if len(_vret) else grid_payload_b64(pd.DataFrame()))
+
+    # TAT Tracker — turnaround through the renewal journey (below the retention matrix).
+    # Build the base once, then render through _tat_refresh so its own filter row works.
+    _tat_df, _tat_m1, _tat_m2 = _tat_build()
+    state.vaf_tat_all = _tat_df
+    _tat_refresh(state)
+    state.vaf_tat_tip = (
+        "TAT Tracker — turnaround time through the renewal journey\n"
+        f"• T1: Payment Done → Ready for Renewal (median {_tat_m1} d)\n"
+        f"• T2: Ready for Renewal → Renewal Done (median {_tat_m2} d)\n"
+        "• Expected TAT (median) = the benchmark for the deal's current transition\n"
+        "• TAT Due In = median − days already in the current stage (negative = overdue)\n"
+        "• Status: On Track / Due Soon (last 25% of the median) / Overdue; "
+        "Renewed = completed, Parked / Churned = terminal")
 
     # Parked / Churned reason breakdowns — paid customers only (payment_date
     # known), independent of the page filters (these are deal-stage roll-ups of
@@ -4096,6 +4201,11 @@ vaf_kpi_active=0; vaf_kpi_refunds=0; vaf_kpi_revenue="₹0"; vaf_kpi_revenue_exa
 vaf_revenue_matrix_json=""; vaf_retention_matrix_json=""
 vaf_revenue_trend_df=pd.DataFrame(); vaf_renewal_json=""
 vaf_parked_json=""; vaf_churned_json=""
+vaf_tat_json=""; vaf_tat_tip=""
+# TAT Tracker — its own 5 cross-filtering dropdowns (Deal Name / Deal Stage / AM /
+# Deal Owner / TAT Status), same pattern as the AR Tracker below.
+vaf_tat_all=pd.DataFrame()
+vaf_tat_deal=[]; vaf_tat_stage=[]; vaf_tat_am=[]; vaf_tat_owner=[]; vaf_tat_status=[]
 # Accounts Receivable Tracker — its own 5 cross-filtering dropdowns, independent
 # of the page's top filter bar (mirrors the CS Usage & Health table pattern).
 vaf_ar_all=pd.DataFrame(); vaf_ar_json=""
@@ -4133,6 +4243,11 @@ vaf_ar_stage_ms   = _ms_json([], [])
 vaf_ar_am_ms      = _ms_json([], [])
 vaf_ar_owner_ms   = _ms_json([], [])
 vaf_ar_status_ms  = _ms_json([], [])
+vaf_tat_deal_ms   = _ms_json([], [])
+vaf_tat_stage_ms  = _ms_json([], [])
+vaf_tat_am_ms     = _ms_json([], [])
+vaf_tat_owner_ms  = _ms_json([], [])
+vaf_tat_status_ms = _ms_json([], [])
 
 # ── Chart configs ──────────────────────────────────────────────────
 chart_config = {
@@ -4242,6 +4357,11 @@ _MS_DISPATCH = {
     "vaf_ar_am":      ("vaf_ar_am",              "ar"),
     "vaf_ar_owner":   ("vaf_ar_owner",           "ar"),
     "vaf_ar_status":  ("vaf_ar_status",          "ar"),
+    "vaf_tat_deal":   ("vaf_tat_deal",           "tat"),
+    "vaf_tat_stage":  ("vaf_tat_stage",          "tat"),
+    "vaf_tat_am":     ("vaf_tat_am",             "tat"),
+    "vaf_tat_owner":  ("vaf_tat_owner",          "tat"),
+    "vaf_tat_status": ("vaf_tat_status",         "tat"),
 }
 
 def _sync_ms(state):
@@ -4366,6 +4486,27 @@ def _sync_ms(state):
     state.vaf_ar_owner_ms  = _ms_json(_arlov("Deal Owner"), state.vaf_ar_owner)
     state.vaf_ar_status_ms = _ms_json(_arlov("Due Status"), state.vaf_ar_status)
 
+    # TAT Tracker: Deal Name / Deal Stage / AM / Deal Owner / TAT Status cross-filter.
+    _tat = state.vaf_tat_all
+    def _tatlov(target):
+        d = _tat
+        if d is None or len(d) == 0:
+            return []
+        for col, sv in (("Deal Name", state.vaf_tat_deal), ("Deal Stage", state.vaf_tat_stage),
+                        ("AM", state.vaf_tat_am), ("Deal Owner", state.vaf_tat_owner),
+                        ("TAT Status", state.vaf_tat_status)):
+            if col == target:
+                continue
+            s = _sel(sv)
+            if s:
+                d = d[d[col].isin(s)]
+        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
+    state.vaf_tat_deal_ms   = _ms_json(_tatlov("Deal Name"),  state.vaf_tat_deal)
+    state.vaf_tat_stage_ms  = _ms_json(_tatlov("Deal Stage"), state.vaf_tat_stage)
+    state.vaf_tat_am_ms     = _ms_json(_tatlov("AM"),         state.vaf_tat_am)
+    state.vaf_tat_owner_ms  = _ms_json(_tatlov("Deal Owner"), state.vaf_tat_owner)
+    state.vaf_tat_status_ms = _ms_json(_tatlov("TAT Status"), state.vaf_tat_status)
+
 def on_ms_change(state):
     """One shared handler for every custom multi-select. The JS writes
     '<key>|<json-list>||<counter>' into the hidden ms_bridge input."""
@@ -4393,6 +4534,7 @@ def on_ms_change(state):
     elif scope == "activity": _build_cohort_tables(state)
     elif scope == "vaf":   _vaf_refresh(state)
     elif scope == "ar":    _ar_refresh(state)
+    elif scope == "tat":   _tat_refresh(state)
     _sync_ms(state)
 
 
@@ -4485,6 +4627,7 @@ def on_reset_filters(state, *_):
     state.mkt_channel_filter = "All"; state.mkt_filter_label = ""
     # VA Finance
     state.vaf_selected_deal  = []; state.vaf_selected_line_item = []; state.vaf_selected_rectype = []
+    state.vaf_tat_deal = []; state.vaf_tat_stage = []; state.vaf_tat_am = []; state.vaf_tat_owner = []; state.vaf_tat_status = []
     _refresh_all(state)
 
 def on_manual_refresh(state, *_):

@@ -73,24 +73,36 @@ Due ±14 Days
 <iframe src="/grid/vaf_retention" class="grid-frame" style="width:100%;height:480px;border:none;"></iframe>
 |>
 
-<|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
-**Parked Customers — Reason × AM**
+**TAT Tracker** <|ⓘ|text|hover_text={vaf_tat_tip}|class_name=info-ico|>
 
-<|part|class_name=gridholder gridholder-vaf_parked|
-<|{vaf_parked_json}|text|mode=raw|>
+<|layout|columns=1 1 1 1 1|gap=12px|
+<|part|
+<div class="msc wide" data-key="vaf_tat_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_tat_deal_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_tat_deal|>
 |>
-<iframe src="/grid/vaf_parked" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
+<|part|
+<div class="msc" data-key="vaf_tat_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_tat_stage_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_tat_stage|>
+|>
+<|part|
+<div class="msc" data-key="vaf_tat_am"><div class="msc-cap">AM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_tat_am_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_tat_am|>
+|>
+<|part|
+<div class="msc" data-key="vaf_tat_owner"><div class="msc-cap">Deal Owner</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_tat_owner_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_tat_owner|>
+|>
+<|part|
+<div class="msc" data-key="vaf_tat_status"><div class="msc-cap">TAT Status</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{vaf_tat_status_ms}|text|mode=raw|class_name=msc-data msc-data-vaf_tat_status|>
+|>
 |>
 
-<|part|class_name=chart-card|
-**Churned Customers — Reason × AM**
-
-<|part|class_name=gridholder gridholder-vaf_churned|
-<|{vaf_churned_json}|text|mode=raw|>
+<|part|class_name=gridholder gridholder-vaf_tat|
+<|{vaf_tat_json}|text|mode=raw|>
 |>
-<iframe src="/grid/vaf_churned" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
-|>
+<iframe src="/grid/vaf_tat" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|
@@ -123,6 +135,26 @@ Due ±14 Days
 <|{vaf_ar_json}|text|mode=raw|>
 |>
 <iframe src="/grid/vaf_ar" class="grid-frame" style="width:100%;height:560px;border:none;"></iframe>
+|>
+
+<|layout|columns=1 1|gap=16px|
+<|part|class_name=chart-card|
+**Parked Customers — Reason × AM**
+
+<|part|class_name=gridholder gridholder-vaf_parked|
+<|{vaf_parked_json}|text|mode=raw|>
+|>
+<iframe src="/grid/vaf_parked" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**Churned Customers — Reason × AM**
+
+<|part|class_name=gridholder gridholder-vaf_churned|
+<|{vaf_churned_json}|text|mode=raw|>
+|>
+<iframe src="/grid/vaf_churned" class="grid-frame" style="width:100%;height:360px;border:none;"></iframe>
+|>
 |>
 
 <|part|class_name=chart-card|
