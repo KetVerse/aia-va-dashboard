@@ -139,7 +139,7 @@ Due ±14 Days
 
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
-**Parked Customers — Reason × AM**
+**Parked Customers – Reasons × AM**
 
 <|part|class_name=gridholder gridholder-vaf_parked|
 <|{vaf_parked_json}|text|mode=raw|>
@@ -148,7 +148,7 @@ Due ±14 Days
 |>
 
 <|part|class_name=chart-card|
-**Churned Customers — Reason × AM**
+**Churned Customers – Reasons × AM**
 
 <|part|class_name=gridholder gridholder-vaf_churned|
 <|{vaf_churned_json}|text|mode=raw|>

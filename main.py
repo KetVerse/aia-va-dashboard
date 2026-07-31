@@ -4018,8 +4018,8 @@ def _vaf_refresh(state):
         g.insert(0, "Reason", g["ReasonFull"].map(
             lambda x: x if len(x) <= 40 else x[:39].rstrip() + "…"))
         return g[["Reason", "ReasonFull", "AM", count_name]]
-    _parked  = _reason_tbl("parked",  "va_parked_reason", "Parked")
-    _churned = _reason_tbl("churned", "churned_reason",   "Churned")
+    _parked  = _reason_tbl("am parked", "am_parked_reason", "Parked")
+    _churned = _reason_tbl("churned",   "churned_reason",   "Churned")
     state.vaf_parked_json  = (grid_payload_b64(_parked, no_sort=True,
                               center_cols=["AM", "Parked"], tip_cols={"Reason": "ReasonFull"})
                               if len(_parked) else grid_payload_b64(pd.DataFrame()))
