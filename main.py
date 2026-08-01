@@ -1389,11 +1389,14 @@ def _load_signals():
     try:
         # HubSpot contacts — only the two columns the Daily-signals card needs, bounded
         # to a rolling 46-day window (large table). create_date is a UTC timestamptz;
-        # convert to the IST calendar date so it lines up with the panel's selected day.
+        # take its UTC calendar date as-is (no IST shift) so the day-count matches
+        # HubSpot's own "Create Date" column for that day. Pinned to 'UTC' explicitly
+        # (not a bare ::date cast) so this doesn't depend on the connection's default
+        # TimeZone setting.
         # Exclude deleted contacts (is_deleted='Yes') the same way aia_live does, so the
         # Leads-to-MQL denominator counts only live contacts.
         contacts = _q(SUPABASE_URL,
-            "SELECT (create_date AT TIME ZONE 'Asia/Kolkata')::date AS create_date, "
+            "SELECT (create_date AT TIME ZONE 'UTC')::date AS create_date, "
             "contact_source FROM public.contacts_hs "
             "WHERE create_date >= now() - interval '46 days' "
             "AND is_deleted IS DISTINCT FROM 'Yes'",
@@ -1404,6 +1407,11 @@ def _load_signals():
 
 def _load_all():
     try:
+        # aia_live / va_live date columns (create_date, ds_date, dc_date, payment_date, ...)
+        # are stored as naive IST wall-clock (no tz) -- NOT UTC. Never apply a timezone
+        # shift/AT TIME ZONE to them; read them as-is. (Confirmed against the source
+        # pipeline; contrast with contacts_hs.create_date, which IS UTC timestamptz and
+        # needs the AT TIME ZONE 'Asia/Kolkata' conversion done in _load_signals().)
         aia = _q(NEON_URL, "SELECT * FROM public.aia_live WHERE is_deleted IS NULL")
         va  = _q(NEON_URL, "SELECT * FROM public.va_live WHERE is_deleted IS NULL")
         li  = _q(NEON_URL, "SELECT * FROM public.line_items WHERE deleted IS NULL")
@@ -1578,7 +1586,7 @@ def _prep_signals(ga, conv, contacts=None):
     """Normalise the Daily-signals inputs. GA: date -> midnight, sessions numeric.
     Conversations: timestamptz -> naive IST, a msg_date day column, a last-10-digit
     phone key, and lower-cased direction/template/status for clean matching.
-    Contacts: create_date (already IST date) -> midnight for day matching."""
+    Contacts: create_date (already a UTC calendar date) -> midnight for day matching."""
     ga = ga.copy() if ga is not None else pd.DataFrame()
     if len(ga):
         if "date" in ga.columns:
