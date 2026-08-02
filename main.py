@@ -4696,22 +4696,40 @@ def _refresh_all(state):
     _ar_refresh(state)
     _sync_ms(state)
 
+def _refresh_signal_date_bounds(state):
+    """Keep the Daily-signals date picker's min/max window current.
+
+    Module-level defaults are frozen at server start, and on_init only recomputes
+    them once, when a browser tab first opens its session. A tab left open across
+    a midnight rollover never re-runs on_init, so its max ("yesterday") silently
+    goes one day stale for every day it stays open, until the tab is reloaded.
+    Called from on_init (new sessions) AND from every scheduled/manual broadcast
+    refresh (already-open sessions) so both self-correct without a reload or a
+    container rebuild. Only auto-advances the selected date when it was still
+    sitting on the previous default (max), so a user who manually picked an older
+    day to review isn't overridden.
+    """
+    _ist_now = _ist_today()
+    new_max = _ist_now - timedelta(days=1)
+    new_min = _ist_now - timedelta(days=45)
+    d, m = state.mkt_sig_date, state.mkt_sig_max
+    if isinstance(d, datetime): d = d.date()
+    if isinstance(m, datetime): m = m.date()
+    at_default = (d == m)
+    state.mkt_sig_min = new_min
+    state.mkt_sig_max = new_max
+    if at_default:
+        state.mkt_sig_date = new_max
+
 def on_init(state):
     navigate(state, "aia")
-    # The daily-signals date window is time-sensitive but its module-level defaults
-    # were frozen at server start. Recompute per session so a fresh load always
-    # defaults to the real "yesterday" (and the 45-day min stays current) even after
-    # the server has been running for days.
-    _ist_now = _ist_today()
-    _yday = _ist_now - timedelta(days=1)
-    state.mkt_sig_min  = _ist_now - timedelta(days=45)
-    state.mkt_sig_max  = _yday
-    state.mkt_sig_date = _yday
+    _refresh_signal_date_bounds(state)
     _refresh_all(state)
 
 def _broadcast_refresh(state):
     """Re-run every page's compute for an already-connected client (no navigation)."""
     try:
+        _refresh_signal_date_bounds(state)
         _refresh_all(state)
     except Exception:
         pass
