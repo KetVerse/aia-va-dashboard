@@ -37,9 +37,14 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 HS_BASE = "https://app-na2.hubspot.com/contacts/39668252/record/0-3/"
-STAGES   = ["Integration Done", "Product Blocked", "Renewal Done",
-            "Ready for Renewal", "CS Parked", "Churned"]
-STATUSES = ["Active", "Risk of Churn", "Inactive"]
+# Canonical row order for the Overall pivots. These are kept even when they
+# count zero, so the table shape stays stable month to month -- but they are NOT
+# the whole list: any other value present in the data is appended (see pivot()),
+# because a stage missing from here would otherwise vanish from the table while
+# still being part of the cohort, silently under-counting the Total.
+STAGE_ORDER  = ["Integration Done", "Product Blocked", "Renewal Done",
+                "Ready for Renewal", "CS Parked", "Churned"]
+STATUS_ORDER = ["Active", "Risk of Churn", "Inactive"]
 YELLOW     = "FFFF00"
 TOTAL_FILL = "D9E1F2"
 HEADER_FILL = "1B2430"
@@ -93,12 +98,28 @@ def build_rows(cohort, ev_lu, scores, today):
     return pd.DataFrame(rows, columns=ROW_COLS)
 
 
-def pivot(df_rows, label_col, cats, split_col):
-    csms = sorted(df_rows["CSM"].dropna().unique()) if len(df_rows) else []
+def pivot(df_rows, label_col, preferred, split_col, blank_label):
+    """Counts of `split_col` per CSM, with a Total row.
+
+    Rows = `preferred` (always shown, even at zero, so the table shape is stable
+    month to month) + every OTHER value actually present in the data + a
+    `blank_label` row when the field is empty. Deriving the tail from the data
+    matters: a fixed list silently dropped whole categories -- 11 'Payment Done'
+    and 2 'DNP' customers disappeared from the Jul-26 stage table while still
+    belonging to the cohort, so its Total read 26 instead of 39."""
+    if not len(df_rows):
+        return pd.DataFrame({label_col: list(preferred) + ["Total"]})
+    vals = (df_rows[split_col].fillna("").astype(str).str.strip()
+            .replace("", blank_label))
+    extras = sorted(set(vals) - set(preferred) - {blank_label})
+    cats = list(preferred) + extras
+    if (vals == blank_label).any():
+        cats.append(blank_label)          # keep the "unknown" bucket last
+    csms = sorted(df_rows["CSM"].dropna().unique())
     tbl = pd.DataFrame({label_col: cats})
     for csm in csms:
-        sub = df_rows[df_rows["CSM"] == csm]
-        tbl[csm] = [int((sub[split_col] == c).sum()) for c in cats]
+        sub = vals[df_rows["CSM"] == csm]
+        tbl[csm] = [int((sub == c).sum()) for c in cats]
     tbl.loc[len(tbl)] = ["Total"] + [int(tbl[c].sum()) for c in csms]
     return tbl
 
@@ -211,8 +232,13 @@ def main_run():
     m1_rows = build_rows(month_cohort(aia, m1_start), ev_lu, scores, today)
     m2_rows = build_rows(month_cohort(aia, m2_start), ev_lu, scores, today)
 
-    m1_stage,  m1_status = pivot(m1_rows, "Stage", STAGES, "Deal Stage"), pivot(m1_rows, "Activity Status", STATUSES, "Activity Stage")
-    m2_stage,  m2_status = pivot(m2_rows, "Stage", STAGES, "Deal Stage"), pivot(m2_rows, "Activity Status", STATUSES, "Activity Stage")
+    # "Not Integrated" = no integration_done_date yet, so there's no basis to
+    # compute an activity status. Shown as its own row rather than dropped, so
+    # the Activity Status total reconciles with the Stage total above it.
+    m1_stage  = pivot(m1_rows, "Stage", STAGE_ORDER, "Deal Stage", "No Stage")
+    m1_status = pivot(m1_rows, "Activity Status", STATUS_ORDER, "Activity Stage", "Not Integrated")
+    m2_stage  = pivot(m2_rows, "Stage", STAGE_ORDER, "Deal Stage", "No Stage")
+    m2_status = pivot(m2_rows, "Activity Status", STATUS_ORDER, "Activity Stage", "Not Integrated")
 
     wb = Workbook()
     wb.remove(wb.active)
