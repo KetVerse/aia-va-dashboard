@@ -9,6 +9,12 @@ services:
       - "8080"
     env_file:
       - .env
+    volumes:
+      # Generated spreadsheets (monthly_cs_report.py, run via `docker exec`) are
+      # written to /app/exports INSIDE the container. n8n's SSH "download file"
+      # node reads the HOST filesystem, so without this bind mount it could never
+      # see them. Same pattern as run_snapshot.sh's /out mount for the PDFs.
+      - ./exports:/app/exports
     restart: unless-stopped
     healthcheck:
       # use python (curl isn't in the image); allow time for the initial DB load

@@ -56,3 +56,9 @@ htmlcov/
 # Data exports (generated spreadsheets — never commit)
 exports/
 *.xlsx
+
+# n8n workflow exports — never commit. This repo is PUBLIC, and these files
+# embed recipients' email addresses, n8n credential IDs and the VPS/server
+# names. They're one-time import artifacts: once imported, n8n itself is the
+# source of truth, so nothing is lost by keeping them off GitHub.
+n8n_*.json
