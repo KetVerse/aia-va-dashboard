@@ -713,6 +713,12 @@ table.taipy-table thead tr th,
     color: #64748b;
     margin: 5px 0 9px 0;
 }
+/* "N sessions" in the LP card — hoverable: its title lists the landing pages
+   making up the denominator. Dotted underline signals there's something to hover. */
+.dsig-lp {
+    border-bottom: 1px dotted #94a3b8;
+    cursor: help;
+}
 
 /* progress-bar rate cards */
 .dsig-bar {

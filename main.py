@@ -9,6 +9,7 @@ import math
 import json
 import base64
 import unicodedata
+import html as _html
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -3009,6 +3010,37 @@ def _sparkline(pts, hexc):
 _SIG_CH_GROUP = {"Google": "Google Ads", "Meta": "Meta Ads",
                  "LinkedIn": "LinkedIn Ads", "Organic": "Organic"}
 
+# Paid channels each land on their own path prefix (/gads/..., /meta/...), keyed
+# here by the FIRST path segment of ga_daily.landing_page. Everything else on the
+# site -- the homepage '/', /blog/..., /resources/..., /case-studies/... -- is
+# earned traffic and counts as Organic, defined as the complement so new pages
+# are picked up automatically instead of needing to be enumerated here.
+_SIG_LP_PAID = {"Google": "gads", "Meta": "meta"}
+# GA's placeholder for sessions it couldn't attribute to a landing page. Kept OUT
+# of Organic: it's unknown traffic, not earned traffic, and at ~7.7k sessions per
+# 45 days it would dominate the denominator and understate the organic rate.
+_SIG_LP_UNKNOWN = "(not set)"
+
+def _sig_has_lp(channel):
+    """True when the channel has landing-page traffic we can attribute at all.
+    LinkedIn has no pages of its own, so its LP card shows a dash instead of a
+    rate computed off the wrong denominator."""
+    return channel == "All" or channel == "Organic" or channel in _SIG_LP_PAID
+
+def _sig_lp_mask(g, channel):
+    """Row mask selecting `channel`'s landing pages in a ga_daily frame, or None
+    when the channel has none. Paid channels match their first path segment
+    EXACTLY, not as a substring, so /blog/what-gads-costs is never miscounted as
+    paid Google."""
+    lp  = g["landing_page"].astype(str).str.strip()
+    seg = lp.str.lstrip("/").str.split("/").str[0].str.lower()
+    if channel in _SIG_LP_PAID:
+        return seg == _SIG_LP_PAID[channel]
+    if channel == "Organic":
+        return (~seg.isin(list(_SIG_LP_PAID.values()))
+                & (lp.str.lower() != _SIG_LP_UNKNOWN))
+    return None
+
 def _sig_contact_channel(src):
     """Bucket a contact_source into exactly ONE channel (first match wins, so
     'Tally Automation - meta' counts as Meta, not Google). 'Other' = untracked."""
@@ -3034,15 +3066,50 @@ def _sig_contacts(cts, channel):
     return cts[cts["contact_source"].map(_sig_contact_channel) == channel]
 
 def _sig_sessions(ga, day, channel):
-    """LP sessions for the channel on `day`. All = whole site; Google = /gads/ pages;
-    Meta / LinkedIn / Organic = 0 (ga_daily has no dedicated landing-page traffic)."""
-    if not len(ga) or channel in ("Meta", "LinkedIn", "Organic"):
+    """LP sessions for the channel on `day`. All = the whole site; paid channels =
+    their own prefix; Organic = everything that isn't paid (see _sig_lp_mask).
+    Channels with no landing pages return 0, which makes the card show a dash."""
+    if not len(ga):
         return 0
     g = ga.copy(); g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
     m = (g["_d"] == day) & (g["hostname"].astype(str) == "www.aiaccountant.com")
-    if channel == "Google":
-        m = m & g["landing_page"].astype(str).str.contains("gads", case=False, na=False)
+    if channel != "All":
+        lp = _sig_lp_mask(g, channel)
+        if lp is None:
+            return 0
+        m = m & lp
     return int(pd.to_numeric(g[m]["sessions"], errors="coerce").fillna(0).sum())
+
+def _sig_lp_tip(ga, day, channel, limit=14):
+    """Hover text listing the landing pages behind the LP-sessions denominator:
+    one '/segment  sessions' line each, biggest first.
+
+    Grouped at the FIRST path segment -- the same level the channel rule works at
+    -- so the tooltip shows exactly why a page counts toward this channel, and
+    stays readable for Organic, where a single day spans many blog URLs."""
+    if not len(ga) or not _sig_has_lp(channel):
+        return ""
+    g = ga.copy()
+    g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
+    m = (g["_d"] == day) & (g["hostname"].astype(str) == "www.aiaccountant.com")
+    if channel != "All":
+        lp = _sig_lp_mask(g, channel)
+        if lp is None:
+            return ""
+        m = m & lp
+    sub = g[m]
+    if not len(sub):
+        return ""
+    raw = sub["landing_page"].astype(str).str.strip()
+    seg = raw.str.lstrip("/").str.split("/").str[0].str.lower()
+    label = pd.Series(np.where(raw.str.lower() == _SIG_LP_UNKNOWN, _SIG_LP_UNKNOWN,
+                      np.where(seg == "", "/", "/" + seg)), index=sub.index)
+    tot = (pd.to_numeric(sub["sessions"], errors="coerce").fillna(0)
+             .groupby(label).sum().sort_values(ascending=False))
+    lines = [f"{k}   {_grp(int(v))}" for k, v in tot.items()][:limit]
+    if len(tot) > limit:
+        lines.append(f"+{len(tot) - limit} more")
+    return "Landing pages counted\n" + "\n".join(lines)
 
 def _sig_spend(mkt, channel):
     """marketing_spends for the selected channel (All = every channel)."""
@@ -3170,11 +3237,14 @@ def _daily_signals_html(day=None, channel="All"):
         contacts_daily = _cd[_cd.notna()].value_counts().reindex(spark_idx, fill_value=0)
     else:
         contacts_daily = pd.Series(0, index=spark_idx)
-    if len(ga) and channel not in ("Meta", "LinkedIn"):
+    # Same channel rule as _sig_sessions above, so the sparkline always plots the
+    # series the headline is computed from. (It previously excluded only
+    # Meta/LinkedIn, so Organic drew whole-site traffic under a dashed card.)
+    if len(ga) and _sig_has_lp(channel):
         _g = ga.copy(); _g["_d"] = pd.to_datetime(_g["date"], errors="coerce").dt.normalize()
         _m = _g["_d"].between(w0, w1) & (_g["hostname"].astype(str) == "www.aiaccountant.com")
-        if channel == "Google":
-            _m = _m & _g["landing_page"].astype(str).str.contains("gads", case=False, na=False)
+        if channel != "All":
+            _m = _m & _sig_lp_mask(_g, channel)
         sessions_daily = (pd.to_numeric(_g.loc[_m, "sessions"], errors="coerce").fillna(0)
                           .groupby(_g.loc[_m, "_d"]).sum().reindex(spark_idx, fill_value=0))
     else:
@@ -3260,10 +3330,15 @@ def _daily_signals_html(day=None, channel="All"):
     leads_spark = _sparkline(_val_pts(deals_daily, l_lo, l_hi, True),
                              _spark_hex(_band_status(l_lo, l_hi, leads_val, higher_good=True)))
 
-    # LP Traffic-to-Leads — dash when the channel has no LP sessions (Meta/LinkedIn)
+    # LP Traffic-to-Leads — dash when the channel has no LP sessions (LinkedIn).
+    # "N sessions" carries a hover listing the landing pages behind it, so the
+    # denominator is inspectable instead of guesswork.
     if lp_den:
+        _tip = _sig_lp_tip(ga, day, channel)
+        _sess = (f'<span class="dsig-lp" title="{_html.escape(_tip, quote=True)}">'
+                 f'{_grp(lp_den)} sessions</span>') if _tip else f"{_grp(lp_den)} sessions"
         _lp_card = _sig_rate_card("LP Traffic-to-Leads", f"{lp2_rate:.2f}", "%",
-                                  f"{lp2_num} of {_grp(lp_den)} sessions", lp2_rate,
+                                  f"{lp2_num} of {_sess}", lp2_rate,
                                   _rate_color(lp2_rate, 2.0, 1.0), spark=lp_spark)
     else:
         _lp_card = _sig_rate_card("LP Traffic-to-Leads", "—", "",
