@@ -37,6 +37,106 @@ SETTLE_MS    = 9000     # wait for data load + grid expansion after each page lo
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
+# ── PDF-only row filters ────────────────────────────────────────────────────
+# The daily PDF is a review document, so it drops rows nobody acts on: dormant
+# customers and deals already parked/churned. These apply to the SNAPSHOT ONLY —
+# the live dashboard keeps every row, since it has filter dropdowns for this.
+#
+# Applied by rewriting the base64 payload in each `.gridholder-<name>` element
+# rather than hiding <tr>s: the grid iframe polls that element once a second and
+# re-renders whenever it changes, so a DOM edit would be silently reverted while
+# a payload edit is picked up as a normal update (and keeps the Total row, the
+# row numbering and the frame auto-height all consistent with what's shown).
+GRID_FILTERS = {
+    # name: (column header, mode, values)   mode: "drop" | "keep"
+    "cs_usage": ("Usage Active Days (28d)", "drop", ["0"]),
+    "vaf_tat":  ("TAT Status",              "drop", ["Parked", "Churned"]),
+    "vaf_ar":   ("Due Status",              "drop", ["Churned"]),
+}
+
+_FILTER_JS = """
+(filters) => {
+  const out = [];
+  for (const [name, [col, mode, values]] of Object.entries(filters)) {
+    const el = document.querySelector('.gridholder-' + name);
+    if (!el) continue;               // grid lives on another page — not an error
+    const raw = (el.textContent || '').trim();
+    if (!raw) { out.push(name + ': empty payload'); continue; }
+    let d;
+    try { d = JSON.parse(atob(raw)); }
+    catch (e) { out.push(name + ': undecodable'); continue; }
+    const i = (d.columns || []).indexOf(col);
+    if (i < 0) { out.push(name + ': no column "' + col + '"'); continue; }
+    const want = values.map(v => String(v).trim().toLowerCase());
+    const before = (d.rows || []).length;
+    d.rows = (d.rows || []).filter(r => {
+      // cells can be plain values or {v: ...} wrappers depending on the column
+      let c = r[i];
+      if (c && typeof c === 'object') c = ('v' in c) ? c.v : ('t' in c ? c.t : '');
+      const s = String(c == null ? '' : c).trim().toLowerCase();
+      const hit = want.includes(s) || (want.includes('0') && s !== '' && Number(s) === 0);
+      return mode === 'keep' ? hit : !hit;
+    });
+    // btoa is Latin1-only, and these payloads carry Rs / em-dash / arrows. Python
+    // writes them with json.dumps(ensure_ascii=True), i.e. \\uXXXX escapes, so
+    // escape the same way on the way back or btoa throws.
+    const json = JSON.stringify(d).replace(/[\\u0080-\\uFFFF]/g,
+      c => '\\\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+    el.textContent = btoa(json);
+    out.push(name + ': ' + before + ' -> ' + d.rows.length);
+  }
+  return out;
+}
+"""
+
+# The grid iframes widen themselves past their container in snapshot mode, but a
+# card that clips overflow keeps document.scrollWidth from growing — so the PDF
+# page is sized too narrow and the last column (Status / Due Status) is sheared
+# off. Let the cards overflow, then report the widest iframe so the caller can
+# size the page to fit it.
+_WIDEN_JS = """
+() => {
+  let need = 0;
+  document.querySelectorAll('iframe.grid-frame').forEach(f => {
+    let w = f.getBoundingClientRect().width;
+    try {
+      const d = f.contentDocument;
+      if (d) {
+        // Measure the TABLE, not body.scrollWidth: .wrap has overflow:auto, so it
+        // absorbs the horizontal overflow and the body never reports it. A table
+        // needing 1757px inside a 1612px frame leaves body.scrollWidth at 1612
+        // while the last column (Status) is scrolled out of sight — invisible in
+        // a PDF, which can't scroll.
+        const t  = d.querySelector('table');
+        const wr = d.querySelector('.wrap');
+        if (t)  w = Math.max(w, t.offsetWidth  + 4);
+        if (wr) w = Math.max(w, wr.scrollWidth + 4);
+        w = Math.max(w, d.body.scrollWidth);
+      }
+    } catch (e) {}
+    w = Math.ceil(w);
+    // main.css carries `.grid-frame { width:100% !important }`, so a plain inline
+    // width is ignored — which is why the frame never actually widened and the
+    // last column stayed cut off. Inline !important is the only thing that wins.
+    if (w > f.clientWidth) f.style.setProperty('width', w + 'px', 'important');
+    // stop ancestors clipping the widened frame, and stretch the card behind it
+    // so the table still sits on its white background instead of hanging out
+    let p = f.parentElement;
+    for (let n = 0; n < 6 && p; n++, p = p.parentElement) {
+      const cs = getComputedStyle(p);
+      if (cs.overflowX !== 'visible') p.style.overflowX = 'visible';
+      if (cs.overflow  !== 'visible') p.style.overflow  = 'visible';
+      if (p.classList && p.classList.contains('chart-card')) {
+        p.style.minWidth = (w + 24) + 'px';
+        p.style.boxSizing = 'border-box';
+      }
+    }
+    need = Math.max(need, f.getBoundingClientRect().left + w);
+  });
+  return Math.ceil(need);
+}
+"""
+
 
 def render(base_url: str, out_path: Path) -> Path:
     pdfs = []
@@ -51,10 +151,17 @@ def render(base_url: str, out_path: Path) -> Path:
             print(f"[snapshot] {name}: {url}", flush=True)
             page.goto(url, wait_until="load", timeout=60000)
             page.wait_for_timeout(SETTLE_MS)
+            # PDF-only row filters, then let the iframes re-render off the edited
+            # payload (their poll runs on a 1s interval) and re-measure.
+            for note in page.evaluate(_FILTER_JS, GRID_FILTERS):
+                print(f"[snapshot]   filter {note}", flush=True)
+            page.wait_for_timeout(2000)
+            need_w = int(page.evaluate(_WIDEN_JS) or 0)
+            page.wait_for_timeout(400)
             dims = page.evaluate(
                 "() => ({w: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),"
                 "        h: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)})")
-            w = max(int(dims["w"]) + 8, VIEWPORT_W)
+            w = max(int(dims["w"]) + 8, need_w + 24, VIEWPORT_W)
             h = int(dims["h"]) + 40
             print(f"[snapshot]   content {w}x{h}", flush=True)
             pdfs.append(page.pdf(width=f"{w}px", height=f"{h}px", print_background=True,
