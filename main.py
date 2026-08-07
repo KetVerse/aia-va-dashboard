@@ -749,9 +749,10 @@ def _recent_event_lookup():
 
 def _usage_28(email, ev_lu):
     """Usage in the last 28 days for a customer's account. Returns
-    (active_days_count, streak). `streak` encodes 28 days as ';'-joined 13-field
+    (active_days_count, streak). `streak` encodes 28 days as ';'-joined 18-field
     tokens (index 0 = today .. 27 = today-27d):
-      on,uploads,syncs,items,views,txns,entities,recon,vmr,mapping,invoices,deletes,logins,txnstatus
+      on,uploads,syncs,items,views,txns,entities,recon,vmr,mapping,invoices,deletes,logins,txnstatus,
+      lineitems,txnlines,reviewed,needsreview   (last 4 from user_daily_upload_summary)
     on=1 (ACTIVE) when there was ANY event that day — an upload, an accounting
     sync, any work event (transactions / entities / invoices / recon /
     vendor-mismatch / mapping / delete), OR a presence event (login /
@@ -759,16 +760,21 @@ def _usage_28(email, ev_lu):
     yellow=any other event, grey=nothing."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
-    blank = ";".join([",".join(["0"] * 14)] * 28)
+    blank = ";".join([",".join(["0"] * 18)] * 28)
     if ac is None:
         return 0, blank
     start = today - pd.Timedelta(days=27)
-    uploads = {}; syncs = {}; items = {}
+    uploads = {}; syncs = {}; items = {}; txnlines = {}   # from user_daily_upload_summary
     if "date" in _UPL.columns:
         u = _UPL[(_UPL["account_id"] == ac) & (_UPL["date"] >= start) & (_UPL["date"] <= today)].copy()
-        if len(u) and "total_uploads" in u.columns:
+        if len(u):
             u["_d"] = u["date"].dt.normalize()
-            uploads = u.groupby("_d")["total_uploads"].sum().to_dict()
+            g = u.groupby("_d")
+            if "total_uploads" in u.columns:        uploads  = g["total_uploads"].sum().to_dict()
+            if "stmt_txn_lines_total" in u.columns: txnlines = g["stmt_txn_lines_total"].sum().to_dict()
+    # Line Items / Reviewed / Needs-Review now come from company_daily_bill_summary
+    # (per company), pre-aggregated to (account, day) in _CBILL.
+    cbill = _CBILL.get(ac, {})
     if "event_date" in _SYN.columns:
         sy = _SYN[(_SYN["account_id"] == ac) & (_SYN["event_date"] >= start) & (_SYN["event_date"] <= today)].copy()
         if len(sy):
@@ -787,11 +793,13 @@ def _usage_28(email, ev_lu):
         vmr = ce.get("vmr", 0); mp = ce.get("mapping", 0); inv = ce.get("invoices", 0)
         dele = ce.get("deletes", 0); log = ce.get("logins", 0); vw = ce.get("views", 0)
         ts = ce.get("txnstatus", 0)   # Transaction Status (shown separately from "Transactions updated")
+        tl = int(txnlines.get(d, 0) or 0)
+        li, rv, nr = cbill.get(d, (0, 0, 0))   # from company_daily_bill_summary
         # active = ANY event that day, presence (login / dashboard-viewed) included
         on = 1 if (up or sc or txn or ts or ent or rec or vmr or mp or inv or dele or log or vw) else 0
         active += on
-        toks.append("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
-            on, up, sc, it, vw, txn, ent, rec, vmr, mp, inv, dele, log, ts))
+        toks.append("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
+            on, up, sc, it, vw, txn, ent, rec, vmr, mp, inv, dele, log, ts, li, tl, rv, nr))
     return active, ";".join(toks)
 
 
@@ -1757,6 +1765,36 @@ def _build_acct_dates():
 
 _ACCT_DATES = _build_acct_dates()
 
+def _build_company_bill():
+    """Per (account_id, day) bill-review counts from company_daily_bill_summary,
+    which is keyed by company_id (no account_id) — linked to account via
+    aia_companies. Returns {account_id: {normalised_date: (line_items, reviewed,
+    needs_review)}} so _usage_28 is a cheap dict lookup. Bounded to ~40 days."""
+    try:
+        df = _q(SUPABASE_URL,
+            "SELECT c.account_id::text AS account_id, b.date AS d, "
+            "COALESCE(SUM(b.line_items_extracted_count),0) AS li, "
+            "COALESCE(SUM(b.reviewed_count),0) AS rv, "
+            "COALESCE(SUM(b.needs_review_count),0) AS nr "
+            "FROM public.company_daily_bill_summary b "
+            "JOIN public.aia_companies c ON c.company_id = b.company_id "
+            "WHERE b.date >= (now() AT TIME ZONE 'Asia/Kolkata')::date - interval '40 days' "
+            "GROUP BY c.account_id, b.date",
+            statement_timeout_ms=20000)
+    except Exception as ex:
+        print(f"[WARN] company_daily_bill_summary load failed: {ex} -- bill counts unavailable")
+        return {}
+    if df is None or len(df) == 0:
+        return {}
+    df["_d"] = pd.to_datetime(df["d"], errors="coerce").dt.normalize()
+    m = {}
+    for ac, d, li, rv, nr in zip(df["account_id"], df["_d"], df["li"], df["rv"], df["nr"]):
+        if pd.notna(ac) and pd.notna(d):
+            m.setdefault(ac, {})[d] = (int(li or 0), int(rv or 0), int(nr or 0))
+    return m
+
+_CBILL = _build_company_bill()
+
 def _build_billing_end():
     """record_id -> billing end date (DAX billing_end_date): max over the
     record's line items of billing_start_date shifted by term/frequency, plus
@@ -1791,7 +1829,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
@@ -1819,6 +1857,7 @@ def _reload_data():
     _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
+    _CBILL = _build_company_bill()
     _BILLING_END = _build_billing_end()
     _LAST_SYNC = datetime.now(_IST)
 

@@ -510,6 +510,8 @@ function streakHtml(s){
       +'" data-recon="'+(p[7]||0)+'" data-vmr="'+(p[8]||0)+'" data-mapping="'+(p[9]||0)
       +'" data-invoices="'+(p[10]||0)+'" data-deletes="'+(p[11]||0)+'" data-logins="'+(p[12]||0)
       +'" data-txnstatus="'+(p[13]||0)
+      +'" data-lineitems="'+(p[14]||0)+'" data-txnlines="'+(p[15]||0)
+      +'" data-reviewed="'+(p[16]||0)+'" data-needsreview="'+(p[17]||0)
       +'"></span>';
   }
   // hidden but copyable string of the streak (dots are CSS-only and don't copy)
@@ -536,9 +538,13 @@ function streakHtml(s){
     var i=+dot.getAttribute("data-i");
     var html=dateLabel(i)+(i===0?" (today)":"");
     var on=dot.getAttribute("data-on")==="1";
-    html+=(on?metricLine("Uploads", dot.getAttribute("data-up")):"")
-         +metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))   // ungated so a purple (sync) dot always explains itself
-         +(on?metricLine("Items Synced", dot.getAttribute("data-items")):"")
+    html+=metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))   // ungated & on top so a purple (sync) dot always explains itself first
+         +(on?metricLine("Items Synced", dot.getAttribute("data-items")):"")   // right under Accounting Syncs
+         +(on?metricLine("Uploads", dot.getAttribute("data-up")):"")
+         +metricLine("Line Items", dot.getAttribute("data-lineitems"))     // 4 lines below, from user_daily_upload_summary; shown only when nonzero
+         +metricLine("Tnx Lines", dot.getAttribute("data-txnlines"))
+         +metricLine("Reviewed", dot.getAttribute("data-reviewed"))
+         +metricLine("Needs Review", dot.getAttribute("data-needsreview"))
          +metricLine("Transaction status", dot.getAttribute("data-txnstatus"))
          +metricLine("Transactions updated", dot.getAttribute("data-txns"))
          +metricLine("Entities created", dot.getAttribute("data-entities"))
