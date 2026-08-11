@@ -1440,7 +1440,8 @@ def _load_all():
                     "closed_lost_date","churned_date","amount_paid","billing_cycle","paid_for",
                     "cs_owner","prospect_score","asked_refund","utm_campaign","utm_source",
                     "login_email_id","aia_discard_reason","aia_parked_reason","aia_lost_reason",
-                    "statement_frequency","bill_frequency","amount?","days_extended","poc_number","poc_email"]
+                    "statement_frequency","bill_frequency","amount?","days_extended","poc_number","poc_email",
+                    "wa_bot_date","ft_start_date"]
         cols_va  = ["record_id","deal_name","deal_stage","deal_owner","deal_source","create_date",
                     "ds_date","dc_date","eta_pay_date","payment_date","amount_paid","billing_cycle",
                     "ot_amount_paid","ot_payment_date","renewed_date","parked_date","discard_date",
@@ -1489,7 +1490,8 @@ def _prep_aia(df):
     df = df.copy()
     df = _dates(df, ["create_date","ds_date","dc_date","eta_pay_date","payment_date",
                      "integration_done_date","activation_date","adopted_date","renewed_date",
-                     "parked_date","discard_date","closed_lost_date","churned_date"])
+                     "parked_date","discard_date","closed_lost_date","churned_date",
+                     "wa_bot_date","ft_start_date"])
     df = _nums(df, ["amount_paid","prospect_score","days_extended"])
     if "amount?" in df.columns:
         df["amount_expected"] = pd.to_numeric(df["amount?"], errors="coerce").fillna(0)
@@ -2216,12 +2218,11 @@ def _aia_ops_refresh(state):
         paid_no_refund = pd2[pd2["asked_refund"] != "Yes"] if "asked_refund" in pd2.columns else pd2
         rows.append({
             "GM":         owner,
-            "Leads":      l,
+            "WA Bot":     _rng(o,"wa_bot_date",s,e)["record_id"].nunique(),
+            "DS":         _rng(o,"ds_date",s,e)["record_id"].nunique(),
             "DC":         _rng(o,"dc_date",s,e)["record_id"].nunique(),
             "HI (ATP)":   _rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
-            "AIA Paid":   pd2[pd2["module_type"]=="AIA Paid"]["record_id"].nunique(),
-            "GST Paid":   pd2[pd2["module_type"]=="GST Paid"]["record_id"].nunique(),
-            "Active PS60":_rng(o,"dc_date",s,e).query("prospect_score>=60 and deal_stage in ['Demo Conducted','High Intent']")["record_id"].nunique(),
+            "FT Started": _rng(o,"ft_start_date",s,e)["record_id"].nunique(),
             "Tot Paid":   pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
             "Revenue":    int(pd2.groupby("record_id")["amount_paid"].max().sum()),
             "MRR":        int(new_li["mrr"].sum()) if len(new_li) else 0,
@@ -2241,27 +2242,25 @@ def _aia_ops_refresh(state):
     # UTM cohort
     rows2 = []
     _utm_src = coh["utm_source_cohort"].fillna("(Blank)")
+    # cohort count: members whose `col` date falls in [s, e] (safe if col missing)
+    def _cin(frame, col):
+        if col not in frame.columns:
+            return 0
+        return frame[frame[col].notna() & (frame[col] >= s) & (frame[col] <= e)]["record_id"].nunique()
     for src in sorted(_utm_src.unique()):
         c  = coh[_utm_src==src]
         l2 = c["record_id"].nunique()
         if l2 == 0: continue
         pd3 = c[c["payment_date"].notna()&(c["payment_date"]>=s)&(c["payment_date"]<=e)]
-        # cActive PS >= 60: PS>=60, demo/HI stage, dc in same month as create
-        aps = c[(c["prospect_score"]>=60)
-                & (c["deal_stage"].isin(["Demo Conducted","High Intent"]))
-                & (c["dc_date"].notna())
-                & (c["create_date"].dt.year==c["dc_date"].dt.year)
-                & (c["create_date"].dt.month==c["dc_date"].dt.month)]["record_id"].nunique()
         # MRR: line items of records paid in-range, unit_price / billing-frequency
         mrr_u = int(_AIA_LI[_AIA_LI["record_id"].isin(pd3["record_id"])]["mrr"].sum())
         rows2.append({
             "UTM Source": src,
-            "Leads": l2,
-            "DC":    c[c["dc_date"].notna()&(c["dc_date"]>=s)&(c["dc_date"]<=e)]["record_id"].nunique(),
+            "WA Bot": _cin(c, "wa_bot_date"),
+            "DS":     _cin(c, "ds_date"),
+            "DC":     _cin(c, "dc_date"),
             "HI (ATP)": c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
-            "AIA Paid": pd3[pd3["module_type"]=="AIA Paid"]["record_id"].nunique(),
-            "GST Paid": pd3[pd3["module_type"]=="GST Paid"]["record_id"].nunique(),
-            "Active PS60": aps,
+            "FT Started": _cin(c, "ft_start_date"),
             "Tot Paid": pd3[pd3["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
             "Revenue":  int(pd3.groupby("record_id")["amount_paid"].max().sum()),
             "MRR":      mrr_u,
