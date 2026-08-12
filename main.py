@@ -1797,6 +1797,39 @@ def _build_company_bill():
 
 _CBILL = _build_company_bill()
 
+def _build_db_bookings():
+    """Demos-Booked (DB) booking events from hubspot_deal_logs (Supabase), which has
+    one row per webhook fire. For each deal, walking its non-null ds_for rows ordered
+    by created_at, a booking event is emitted whenever the ds_for DATE differs from the
+    previous one (the first non-null is the original booking). Same-day reschedules
+    (time-only changes) and duplicate webhook fires do NOT double-count. This keeps each
+    date's count fixed once booked — a reschedule to a new date adds an event there
+    instead of moving the original. Returns [record_id, ds_for_date], one row per event.
+    Deals absent here fall back to aia_live.ds_for at the call site. Bounded to 3 months."""
+    empty = pd.DataFrame(columns=["record_id", "ds_for_date"])
+    try:
+        d = _q(SUPABASE_URL,
+            "SELECT record_id, ds_for, created_at FROM public.hubspot_deal_logs "
+            "WHERE ds_for IS NOT NULL AND created_at >= NOW() - INTERVAL '3 months' "
+            "ORDER BY record_id, created_at",
+            statement_timeout_ms=30000)
+    except Exception as ex:
+        print(f"[WARN] hubspot_deal_logs load failed: {ex} -- DB trend falls back to aia_live.ds_for")
+        return empty
+    if d is None or len(d) == 0:
+        return empty
+    d["record_id"] = d["record_id"].astype(str)
+    d["ds_for_date"] = pd.to_datetime(d["ds_for"], errors="coerce").dt.normalize()   # booking DATE
+    d["created_at"] = pd.to_datetime(d["created_at"], errors="coerce", utc=True)
+    d = d.dropna(subset=["record_id", "ds_for_date", "created_at"]).sort_values(["record_id", "created_at"])
+    # emit an event whenever the ds_for DATE changes vs the deal's previous non-null
+    # value — same-day time-only reschedules and duplicate fires don't double-count
+    prev = d.groupby("record_id")["ds_for_date"].shift(1)
+    changed = prev.isna() | (d["ds_for_date"] != prev)
+    return d.loc[changed, ["record_id", "ds_for_date"]].reset_index(drop=True)
+
+_DB_EVENTS = _build_db_bookings()
+
 def _build_billing_end():
     """record_id -> billing end date (DAX billing_end_date): max over the
     record's line items of billing_start_date shifted by term/frequency, plus
@@ -1831,7 +1864,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
@@ -1860,6 +1893,7 @@ def _reload_data():
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
     _CBILL = _build_company_bill()
+    _DB_EVENTS = _build_db_bookings()
     _BILLING_END = _build_billing_end()
     _LAST_SYNC = datetime.now(_IST)
 
@@ -2185,10 +2219,20 @@ def _aia_ops_refresh(state):
     dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
     daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
     daily_q  = dc_sub[dc_sub["prospect_score"]>=60].groupby("date")["record_id"].nunique().reset_index(name="Qualified")
-    _dsf = pd.to_datetime(df["ds_for"], errors="coerce").dt.normalize() if "ds_for" in df.columns else pd.Series(pd.NaT, index=df.index)
-    _dsm = _dsf.notna() & (_dsf >= s) & (_dsf <= e_cap)
-    daily_ds = (df[_dsm].assign(date=_dsf[_dsm])
-                .groupby("date")["record_id"].nunique().reset_index(name="DS"))
+    # DB (Demos Booked): booking EVENTS from hubspot_deal_logs — each reschedule keeps
+    # the original date's count and adds one on the new date (vs aia_live.ds_for, which
+    # overwrites). Restricted to this page's deals (respects filters + is_deleted).
+    # Deals with no non-null ds_for in the logs fall back to their aia_live.ds_for.
+    _ids    = set(df["record_id"].astype(str))
+    _logged = set(_DB_EVENTS["record_id"]) if len(_DB_EVENTS) else set()
+    _ev = (_DB_EVENTS[_DB_EVENTS["record_id"].isin(_ids)][["ds_for_date"]]
+           .rename(columns={"ds_for_date": "date"}))
+    _fb = df[~df["record_id"].astype(str).isin(_logged)]
+    _fbd = pd.to_datetime(_fb["ds_for"], errors="coerce").dt.normalize() if "ds_for" in _fb.columns else pd.Series(pd.NaT, index=_fb.index)
+    _fb_ev = pd.DataFrame({"date": _fbd[_fbd.notna()].values})
+    _all_ev = pd.concat([_ev, _fb_ev], ignore_index=True)
+    _all_ev = _all_ev[(_all_ev["date"] >= s) & (_all_ev["date"] <= e_cap)]
+    daily_ds = _all_ev.groupby("date").size().reset_index(name="DS")
     trend = pd.DataFrame({"date": pd.date_range(s, e_cap, freq="D")})
     trend = (trend.merge(daily_ds,on="date",how="left").merge(daily_dc,on="date",how="left")
                   .merge(daily_q,on="date",how="left").fillna(0))
@@ -4061,20 +4105,36 @@ def _vaf_refresh(state):
             return pd.NaT
         de = r.get("days_extended"); de = 0 if pd.isna(de) else int(de)
         return sd + relativedelta(months=_tm(r)) + pd.Timedelta(days=de)
+    # Churned / AM Parked deals are dropped from Pending ONLY (they still count in Total MRR / cohorts).
+    _v_pend_excl = (set(_VA[_VA["deal_stage"].isin(["Churned", "AM Parked"])]["record_id"])
+                    if "deal_stage" in _VA.columns else set())
     _pend = li.copy()
     if "recurring_type" in _pend.columns:
         _pend = _pend[_pend["recurring_type"].isin(["New", "Renewal"])]
     if _v_refund_map is not None:
         _pend = _pend[~_pend["record_id"].map(_v_refund_map).eq("Yes")]
+    _pend = _pend[~_pend["record_id"].isin(_v_pend_excl)]
     _pend = _pend.dropna(subset=["record_id", "billing_start_date"]).copy()
     if len(_pend):
         _pend["_ce"] = _pend.apply(_cov_end, axis=1)
         _pend = _pend.dropna(subset=["_ce"])
         _pend = _pend.sort_values("_ce").groupby("record_id", as_index=False).last()  # latest cycle
-        _pend["_per"] = _pend["_ce"].apply(lambda d: pd.Period(d, freq="M"))
-        _pend = _pend[_pend["_per"] <= _cur_per]              # due/overdue, not future
-        _pend["_m"] = _pend["_per"].apply(lambda p: p.strftime("%b %y"))
         _pend["_termm"] = _pend.apply(_tm, axis=1)
+        # Explode into one pending row per UNCOLLECTED billing period, from the latest
+        # coverage-end up to the current month, stepping by the cycle length: monthly
+        # accrues EVERY month (e.g. Jun, Jul, Aug); non-monthly only at each period end.
+        _rows = []
+        for _, _r in _pend.iterrows():
+            _step = int(_r["_termm"]) if (pd.notna(_r["_termm"]) and _r["_termm"]) else 1
+            _due = _r["_ce"]
+            while pd.Period(_due, freq="M") <= _cur_per:
+                _rows.append({"record_id": _r["record_id"],
+                              "_m": pd.Period(_due, freq="M").strftime("%b %y"),
+                              "_ce": _due, "_termm": _step,
+                              "total_price": _r.get("total_price", 0),
+                              "deal_name": _r.get("deal_name", "")})
+                _due = _due + relativedelta(months=_step)
+        _pend = pd.DataFrame(_rows, columns=["record_id", "_m", "_ce", "_termm", "total_price", "deal_name"])
     # per-month hover tip for the Pending row: "₹amt due for (dd-mmm, Nm) Deal"
     _pend_tips = {}
     if len(_pend):
@@ -4295,11 +4355,11 @@ cs_usage_tip = ("Usage Streak — last 28 days\n"
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
-               "• Pending Collections: Renewal cash due that month, not yet collected (coverage ended, not renewed; one-time excluded)")
+               "• Pending Collections: Renewal cash due but not collected — accrues each uncollected billing month up to now (non-monthly show only at each period end); one-time, churned & AM-parked excluded")
 vaf_ret_tip = ("Customer Retention Matrix\n"
                "• Cohort Spread: Based on recurring + one-time customers\n"
                "• Total Recurring: Sum of recurring + one-time customers\n"
-               "• Pending Collections: Customers with a renewal due that month, not yet renewed (one-time excluded)")
+               "• Pending Collections: Customers with a renewal due but not paid, counted each uncollected billing month up to now (one-time, churned & AM-parked excluded)")
 
 # Page 3
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)

@@ -351,7 +351,8 @@ _GRID_HTML = r"""<!DOCTYPE html>
   #streaktip{ position:fixed; display:none; z-index:99999; background:#1a3a6b;
     color:#ffffff; font-size:12px; line-height:1.55; padding:7px 10px;
     border-radius:6px; box-shadow:0 4px 16px rgba(0,0,0,0.28);
-    white-space:nowrap; pointer-events:none; }
+    white-space:nowrap; pointer-events:none;
+    max-height:calc(100vh - 10px); overflow-y:auto; }
   .st-active{ color:#16a34a; font-weight:700; }
   .st-risk{ color:#ea580c; font-weight:700; }
   .st-inactive{ color:#dc2626; font-weight:700; }
@@ -559,6 +560,7 @@ function streakHtml(s){
     t.style.display="block";
     var r=dot.getBoundingClientRect(), tr=t.getBoundingClientRect();
     var top=r.top-tr.height-8; if(top<4) top=r.bottom+8;
+    top=Math.max(4, Math.min(top, window.innerHeight-tr.height-4));   // keep inside the iframe (tall pending tips)
     var left=r.left+r.width/2-tr.width/2;
     left=Math.max(4, Math.min(left, window.innerWidth-tr.width-4));
     t.style.top=top+"px"; t.style.left=left+"px";
@@ -575,6 +577,7 @@ function streakHtml(s){
     t.style.display="block";
     var r=elm.getBoundingClientRect(), tr=t.getBoundingClientRect();
     var top=r.top-tr.height-8; if(top<4) top=r.bottom+8;
+    top=Math.max(4, Math.min(top, window.innerHeight-tr.height-4));   // keep inside the iframe (tall pending tips)
     var left=r.left+r.width/2-tr.width/2;
     left=Math.max(4, Math.min(left, window.innerWidth-tr.width-4));
     t.style.top=top+"px"; t.style.left=left+"px";
