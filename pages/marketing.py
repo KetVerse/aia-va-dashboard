@@ -4,7 +4,11 @@ MARKETING_PAGE = """
 <|part|class_name=topbar|
 <|navbar|lov={nav_links}|class_name=main-nav|>
 <|part|class_name=filter-bar|
-<|layout|columns=1 1 1|gap=12px|
+<|layout|columns=1 1 1 1|gap=12px|
+<|part|class_name=nav-view-col|
+<div class="msc-cap">View</div>
+<|{mkt_view}|selector|lov={mkt_views}|dropdown|on_change=on_mkt_view|class_name=nav-view-sel|>
+|>
 <|part|
 <div class="msc" data-key="mkt_channel"><div class="msc-cap">Channel</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{mkt_channel_ms}|text|mode=raw|class_name=msc-data msc-data-mkt_channel|>
@@ -28,9 +32,6 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=dsig-holder|
-<|part|class_name=dsig-channelbar|
-<|{mkt_sig_channel}|selector|lov={mkt_sig_channels}|dropdown|on_change=on_mkt_sig_channel|>
-|>
 <|part|class_name=dsig-datebar|
 <|{mkt_sig_date}|date|on_change=on_mkt_sig_date|format=dd/MM/yyyy|min={mkt_sig_min}|max={mkt_sig_max}|editable=True|>
 |>
@@ -38,7 +39,7 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
-**Monthly Performance**
+**Monthly Performance**  *(view follows the nav-bar View dropdown)*
 
 <|part|class_name=gridholder gridholder-mkt_monthly|
 <|{mkt_monthly_json}|text|mode=raw|>
@@ -47,12 +48,24 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
-**Weekly Funnel (8W)**
+**Weekly Funnel (8W)**  *(view follows the nav-bar View dropdown)*
 
 <|part|class_name=gridholder gridholder-mkt_weekly|
 <|{mkt_weekly_json}|text|mode=raw|>
 |>
 <iframe src="/grid/mkt_weekly" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+<|part|class_name=mkt-tablehead|
+**UTM Source Cohort**
+<|{aia_date_range}|date_range|label_start=Start Date|label_end=End Date|format=dd/MM/yyyy|on_change=on_mkt_utm_date|class_name=mkt-utm-date|>
+|>
+
+<|part|class_name=gridholder gridholder-mkt_utm|
+<|{mkt_utm_json}|text|mode=raw|>
+|>
+<iframe src="/grid/mkt_utm" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|

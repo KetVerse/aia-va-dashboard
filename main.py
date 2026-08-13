@@ -995,6 +995,274 @@ def _mkt_funnel_8w(mkt_df, aia_df, last_n=8):
     return pd.DataFrame(rows)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Redesigned Marketing funnel — one raw-number series feeding the Monthly (12M)
+# and Weekly (8W) tables; render layer builds Total / Cost / Percentages views.
+# Spine: Visits → Leads → MQL(Deals) → DS → DC → High PS → FT.
+# ═══════════════════════════════════════════════════════════════════
+def _sessions_by_period(ga_df, freq, sig_labels):
+    """GA4 sessions per period + the SET of periods that have ANY GA data (so Visits
+    can show '—' before GA history begins). sig_labels=None -> whole site; otherwise
+    the union of each label's landing-page mask (paid segments are disjoint, so no
+    double-count). Only www.aiaccountant.com sessions count."""
+    if ga_df is None or not len(ga_df):
+        return pd.Series(dtype=float), set()
+    g = ga_df.copy()
+    g["_d"] = pd.to_datetime(g["date"], errors="coerce").dt.normalize()
+    g = g[g["hostname"].astype(str) == "www.aiaccountant.com"]
+    if not len(g):
+        return pd.Series(dtype=float), set()
+    g["_p"] = g["_d"].dt.to_period(freq)
+    ga_periods = set(g["_p"].dropna().unique())
+    if sig_labels is None:
+        gg = g
+    else:
+        mask = pd.Series(False, index=g.index); any_lp = False
+        for lab in sig_labels:
+            lm = _sig_lp_mask(g, lab)
+            if lm is not None:
+                mask = mask | lm; any_lp = True
+        gg = g[mask] if any_lp else g.iloc[0:0]
+    s = (pd.to_numeric(gg["sessions"], errors="coerce").fillna(0).groupby(gg["_p"]).sum()
+         if len(gg) else pd.Series(dtype=float))
+    return s, ga_periods
+
+def _leads_by_period(cts, freq, sig_labels):
+    """contacts_hs count per create-period, optionally channel-filtered by contact_source."""
+    if cts is None or not len(cts) or "create_date" not in cts.columns:
+        return pd.Series(dtype=float)
+    c = cts.dropna(subset=["create_date"]).copy()
+    if sig_labels is not None and "contact_source" in c.columns:
+        c = c[c["contact_source"].map(_sig_contact_channel).isin(sig_labels)]
+    if not len(c):
+        return pd.Series(dtype=float)
+    return c.groupby(c["create_date"].dt.to_period(freq)).size()
+
+def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_labels):
+    """Raw per-period series for the funnel spine + money, over the trailing `last_n`
+    periods ending at the current one. aia_df / mkt_df are ALREADY channel-filtered by
+    the nav (deal_source_group / _MKT.channel); ga_df / cts_df are filtered here by
+    sig_labels. MQL/DS/DC/High PS/FT/Net Paid are cohort by lead create-period (matches
+    the legacy Weekly Funnel); Net Revenue/MRR/CAC/ARPU reuse the _mkt_breakdown basis."""
+    cur_p = pd.Timestamp(date.today()).to_period(freq)
+    full  = pd.period_range(cur_p - (last_n - 1), cur_p, freq=freq)
+    R = lambda s: s.reindex(full, fill_value=0)
+    # spend — in-period (money spent that period)
+    spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
+                if (mkt_df is not None and "day" in getattr(mkt_df, "columns", []) and len(mkt_df)) else pd.Series(dtype=float))
+    # aia cohort — deals created in period + stage cohorts
+    if aia_df is not None and "create_date" in aia_df.columns and len(aia_df):
+        aa = aia_df.dropna(subset=["create_date"]).copy()
+        aa["cperiod"] = aa["create_date"].dt.to_period(freq)
+    else:
+        aa = pd.DataFrame(columns=["record_id", "cperiod"])
+    mql_by = aa.groupby("cperiod")["record_id"].nunique() if len(aa) else pd.Series(dtype=float)
+    def _coh(mask):
+        sub = aa[mask]
+        return sub.groupby("cperiod")["record_id"].nunique() if len(sub) else pd.Series(dtype=float)
+    ds_by  = _coh(aa["ds_date"].notna()) if ("ds_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
+    dc_by  = _coh(aa["dc_date"].notna()) if ("dc_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
+    hps_by = (_coh(aa["dc_date"].notna() & (aa["prospect_score"] >= 60))
+              if ({"dc_date", "prospect_score"}.issubset(aa.columns) and len(aa)) else pd.Series(dtype=float))
+    ft_by  = _coh(aa["ft_start_date"].notna()) if ("ft_start_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
+    # net paid / revenue / MRR (net of refunds), cohort by create-period
+    aa_ok = aa[aa["asked_refund"] != "Yes"] if ("asked_refund" in aa.columns and len(aa)) else aa
+    netpaid_by = rev_by = mrr_by = pd.Series(dtype=float)
+    if len(aa_ok):
+        amt = aa_ok["amount_paid"] if "amount_paid" in aa_ok.columns else 0
+        pmask = aa_ok["payment_date"].notna() & (amt > 0)
+        netpaid_by = aa_ok[pmask].groupby("cperiod")["record_id"].nunique()
+        cmap = aa_ok[["record_id", "cperiod"]].drop_duplicates("record_id")
+        lim = li_df.dropna(subset=["date_paid"]) if (li_df is not None and "date_paid" in li_df.columns) else pd.DataFrame()
+        if len(lim) and "record_id" in lim.columns:
+            lim = lim.merge(cmap, on="record_id", how="inner")
+            rev_by = lim.groupby("cperiod")["total_price"].sum() if "total_price" in lim.columns else pd.Series(dtype=float)
+            mrr_by = lim.groupby("cperiod")["mrr"].sum() if "mrr" in lim.columns else pd.Series(dtype=float)
+    # visits + leads (channel via sig_labels)
+    visits_by, ga_periods = _sessions_by_period(ga_df, freq, sig_labels)
+    leads_by = _leads_by_period(cts_df, freq, sig_labels)
+    return {"full": full, "ga_periods": ga_periods,
+            "spend": R(spend_by), "visits": R(visits_by), "leads": R(leads_by),
+            "mql": R(mql_by), "ds": R(ds_by), "dc": R(dc_by), "highps": R(hps_by), "ft": R(ft_by),
+            "netpaid": R(netpaid_by), "netrev": R(rev_by), "mrr": R(mrr_by)}
+
+_MKT_VIEWS = ["Total", "Cost", "Percentages"]
+_IMM_TIP   = "Cohort not mature yet"
+
+def _mkt_render(fs, view, kind):
+    """Base64 grid JSON for one Marketing-funnel table view.
+      kind : 'monthly' (freq M; has MRR/CAC/ARPU/Payback) or 'weekly' (freq W; no money-KPIs)
+      view : 'Total' | 'Cost' | 'Percentages'
+    Cell rules: %-cell denominator <25 -> 'n<25' (grey italic + tip); any /0 -> '—';
+    current (in-progress) period gets a 'Partial' badge; immature-cohort cells fade
+    (opacity, tip). Total row: Total=sums, Cost=blended (Σspend/Σstage), %=pooled (ΣB/ΣA)."""
+    freq = "M" if kind == "monthly" else "W"
+    full = fs["full"]; ga = fs["ga_periods"]; N = len(full)
+    cur  = pd.Timestamp(date.today()).to_period(freq)
+    v    = lambda k, p: float(fs[k].get(p, 0) or 0)
+    lab  = "Month" if kind == "monthly" else "Week"
+    has_visits = kind == "weekly"   # Monthly drops Visits (GA history only ~2 months)
+    imm = {}   # immature-cohort fade removed per request — no greyed cells
+    fd  = lambda stages, i: "cell-faded" if any(i in imm.get(s, ()) for s in stages) else ""
+    cnt = lambda x: _grp(int(round(x)))
+    def mg(*cs): return " ".join(c for c in cs if c)
+    def pctc(num, den, cls=""):
+        if den <= 0:   return ("—", cls, "")
+        if den < 25:   return ("n<25", mg("cell-muted", cls), f"n = {int(den)} (<25)")
+        return (f"{num / den * 100:.1f}%", cls, "")
+    def costc(sp, c, cls=""):
+        return ("—", cls, "") if c <= 0 else (cnt(sp / c), cls, "")
+
+    def build(i, p, tot=False):
+        # totals aggregate over all periods (visits only where GA exists)
+        if tot:
+            sp = sum(v("spend", q) for q in full); vi = sum(v("visits", q) for q in full if q in ga)
+            le = sum(v("leads", q) for q in full); mq = sum(v("mql", q) for q in full)
+            ds = sum(v("ds", q) for q in full);    dc = sum(v("dc", q) for q in full)
+            hp = sum(v("highps", q) for q in full); ft = sum(v("ft", q) for q in full)
+            npd = sum(v("netpaid", q) for q in full); nr = sum(v("netrev", q) for q in full)
+            mr = sum(v("mrr", q) for q in full); avail = True
+        else:
+            sp, vi, le, mq = v("spend", p), v("visits", p), v("leads", p), v("mql", p)
+            ds, dc, hp, ft = v("ds", p), v("dc", p), v("highps", p), v("ft", p)
+            npd, nr, mr = v("netpaid", p), v("netrev", p), v("mrr", p)
+            avail = p in ga
+        r = {}
+        if tot:
+            r[lab] = ("Total", "", "")
+        else:
+            plab = p.strftime("%b %y") if freq == "M" else p.start_time.strftime("%d-%b")
+            r[lab] = (plab, "cell-partial" if p == cur else "", "")
+        vis = (cnt(vi), "", "") if avail else ("—", "", "")
+        if view == "Total":
+            r["Spend (₹)"] = (int(round(sp)), "", "")   # numeric so the grid draws the Spend bar
+            if has_visits: r["Visits"] = vis
+            r["Leads"] = (cnt(le), "", "")
+            r["MQL (Deals)"] = (cnt(mq), "", "")
+            r["DS"] = (cnt(ds), "", "")
+            r["DC"] = (cnt(dc), "", "")
+            r["High PS"] = (cnt(hp), fd(["highps"], i), "")
+            r["FT"] = (cnt(ft), fd(["ft"], i), "")
+            r["Net Paid"] = (cnt(npd), fd(["netpaid"], i), "")
+            r["Net Revenue"] = (cnt(nr), fd(["netrev"], i), "")
+            if kind == "monthly":
+                r["MRR"] = (cnt(mr), "", "")
+                cac = round(sp / npd) if npd else None
+                arpu = round(mr / npd) if npd else None
+                pb  = round(cac / arpu) if (cac and arpu) else None
+                fdn = fd(["netpaid"], i)
+                r["CAC"] = (cnt(cac) if cac is not None else "—", fdn, "")
+                r["ARPU"] = (cnt(arpu) if arpu is not None else "—", fdn, "")
+                r["Payback (Mo)"] = (cnt(pb) if pb is not None else "—", fdn, "")
+        elif view == "Cost":
+            r["Spend (₹)"] = (int(round(sp)), "", "")   # numeric so the grid draws the Spend bar
+            if has_visits:
+                r["Cost/K Visits"] = ("—", "", "") if (not avail or vi <= 0) else (cnt(sp * 1000 / vi), "", "")
+            r["CPL"] = costc(sp, le)
+            r["Cost/MQL"] = costc(sp, mq)
+            r["Cost/DS"] = costc(sp, ds)
+            r["Cost/DC"] = costc(sp, dc)
+            r["Cost/High PS"] = costc(sp, hp, fd(["highps"], i))
+            r["Cost/FT"] = costc(sp, ft, fd(["ft"], i))
+            if kind == "monthly":
+                r["CAC"] = costc(sp, npd, fd(["netpaid"], i))
+        else:  # Percentages — post-MQL stages measured against the MQL (deals) base
+            if has_visits:
+                r["Visit→Lead"] = ("—", "", "") if not avail else pctc(le, vi)
+            r["Lead→MQL"] = pctc(mq, le)
+            r["MQL→DS"] = pctc(ds, mq)
+            r["MQL→DC"] = pctc(dc, mq)
+            r["MQL→High PS"] = pctc(hp, mq)
+            r["MQL→FT"] = pctc(ft, mq)
+            r["MQL→Paid"] = pctc(npd, mq)
+        return r
+
+    all_rows = [build(i, p) for i, p in enumerate(full)] + [build(None, None, tot=True)]
+    cols = list(all_rows[0].keys())
+    disp = {}
+    class_cols = {}; tip_cols = {}
+    for c in cols:
+        disp[c] = [r[c][0] for r in all_rows]
+        clv = [r[c][1] for r in all_rows]
+        tpv = [(r[c][2] or (_IMM_TIP if "cell-faded" in r[c][1] else "")) for r in all_rows]
+        if any(clv):
+            disp[c + " ​cls"] = clv; class_cols[c] = c + " ​cls"
+        if any(tpv):
+            disp[c + " ​tip"] = tpv; tip_cols[c] = c + " ​tip"
+    # Colour scales — green MRR/ARPU, red CAC — applied in EVERY view they appear in
+    # (Total has all three; Cost has CAC). Cells are formatted strings, so shade from
+    # hidden numeric source columns via heat_from.
+    heat_cols = {}; heat_from = {}
+    if kind == "monthly":
+        mrr_h = []; cac_h = []; arpu_h = []
+        for p in list(full) + [None]:            # None = the pinned Total row
+            if p is None:
+                sp = sum(v("spend", q) for q in full); npd = sum(v("netpaid", q) for q in full); mr = sum(v("mrr", q) for q in full)
+            else:
+                sp = v("spend", p); npd = v("netpaid", p); mr = v("mrr", p)
+            mrr_h.append(int(round(mr)))
+            cac_h.append(int(round(sp / npd)) if npd else 0)
+            arpu_h.append(int(round(mr / npd)) if npd else 0)
+        for colname, srccol, vals, color in (("MRR", "_mrr_h", mrr_h, "green"),
+                                             ("ARPU", "_arpu_h", arpu_h, "green"),
+                                             ("CAC", "_cac_h", cac_h, "red")):
+            if colname in disp:                  # only where the column exists in this view
+                disp[srccol] = vals; heat_cols[colname] = color; heat_from[colname] = srccol
+    heat_cols = heat_cols or None; heat_from = heat_from or None
+    df = pd.DataFrame(disp)
+    return grid_payload_b64(df, lab, autosize=True, center_all=True, no_sort=True, sortable=False,
+                            bar_cols=(["Spend (₹)"] if "Spend (₹)" in df.columns else None),
+                            bar_color="#7fb3e0", heat_cols=heat_cols, heat_from=heat_from,
+                            class_cols=class_cols or None, tip_cols=tip_cols or None)
+
+def _mkt_utm_render(data, view):
+    """UTM Source Cohort table in the shared Total / Cost / Percentages view. `data` =
+    per-source dicts (src, deals, wa_bot, leads, ds, dc, hps, ft, tot_paid, revenue,
+    mrr, spend). Cost = campaign-matched Spend ÷ stage; Percentages = stages vs the
+    Deals cohort base. Total/Cost cells are NUMERIC so every column sorts correctly and
+    the grid formats + heat/bar them; the % view stays string (n<25 / '—'). Total row:
+    sums / blended / pooled. All columns sortable."""
+    if not data:
+        return grid_payload_b64(pd.DataFrame())
+    def pctc(num, den):
+        if den <= 0:  return ("—", "", "")
+        if den < 25:  return ("n<25", "cell-muted", f"n = {int(den)} (<25)")
+        return (f"{num / den * 100:.1f}%", "", "")
+    ncost = lambda sp, c: (int(round(sp / c)) if c > 0 else 0)   # numeric cost (0 when undefined)
+    S = lambda k: sum(d[k] for d in data)
+    def build(d, tot=False):
+        g = (lambda k: S(k)) if tot else (lambda k: d[k])
+        r = {"UTM Source": ("Total" if tot else d["src"], "", "")}
+        if view == "Total":
+            for k, col in (("wa_bot", "WA Bot"), ("leads", "Leads (Contacts)"), ("ds", "DS"), ("dc", "DC"),
+                           ("hps", "High PS"), ("ft", "FT Started"), ("tot_paid", "Tot Paid"),
+                           ("revenue", "Revenue"), ("mrr", "MRR")):
+                r[col] = (int(g(k)), "", "")
+        elif view == "Cost":
+            sp = g("spend"); r["Spend (₹)"] = (int(round(sp)), "", "")
+            r["CPL"] = (ncost(sp, g("leads")), "", ""); r["Cost/DS"] = (ncost(sp, g("ds")), "", "")
+            r["Cost/DC"] = (ncost(sp, g("dc")), "", ""); r["Cost/High PS"] = (ncost(sp, g("hps")), "", "")
+            r["Cost/FT"] = (ncost(sp, g("ft")), "", ""); r["CAC"] = (ncost(sp, g("tot_paid")), "", "")
+        else:
+            de = g("deals")
+            r["Leads→Deals"] = pctc(de, g("leads")); r["Deals→DS"] = pctc(g("ds"), de); r["Deals→DC"] = pctc(g("dc"), de)
+            r["Deals→High PS"] = pctc(g("hps"), de); r["Deals→FT"] = pctc(g("ft"), de); r["Deals→Paid"] = pctc(g("tot_paid"), de)
+        return r
+    all_rows = [build(d) for d in data] + [build(None, tot=True)]
+    cols = list(all_rows[0].keys())
+    disp = {}; class_cols = {}; tip_cols = {}
+    for c in cols:
+        disp[c] = [r[c][0] for r in all_rows]
+        clv = [r[c][1] for r in all_rows]; tpv = [r[c][2] for r in all_rows]
+        if any(clv): disp[c + "__cls"] = clv; class_cols[c] = c + "__cls"
+        if any(tpv): disp[c + "__tip"] = tpv; tip_cols[c] = c + "__tip"
+    heat_cols = {"MRR": "green"} if view == "Total" else ({"CAC": "red"} if view == "Cost" else None)
+    df = pd.DataFrame(disp)
+    return grid_payload_b64(df, "UTM Source", autosize=True, center_all=True, no_sort=True, sortable=True,
+                            bar_cols=(["Spend (₹)"] if "Spend (₹)" in df.columns else None), bar_color="#7fb3e0",
+                            heat_cols=heat_cols, class_cols=class_cols or None, tip_cols=tip_cols or None)
+
+
 def _usage_cohort(event_filter=None, deal_filter=None, stage_filter=None, csm_filter=None):
     """Customer Usage Cohort (last 12 integration weeks). Rows = integration-week
     Monday; columns = Integrated (cohort size) + W1..W12 (active accounts that had
@@ -1379,12 +1647,14 @@ def _load_signals():
     ga = pd.DataFrame(columns=["date", "hostname", "landing_page", "sessions"])
     conv = pd.DataFrame(columns=["lead_phone", "deal_id", "direction",
                                  "template_name", "delivery_status", "timestamp"])
-    contacts = pd.DataFrame(columns=["create_date", "contact_source"])
+    contacts = pd.DataFrame(columns=["create_date", "contact_source", "utm_source", "utm_campaign"])
     try:
+        # Wide enough (400d) to feed the Marketing Monthly (12M) / Weekly funnel Visits
+        # column; Daily-signals only reads the last ~45d of this same frame.
         ga = _q(SUPABASE_URL,
             "SELECT date, hostname, landing_page, sessions FROM public.ga_daily "
-            "WHERE date >= current_date - interval '45 days'",
-            statement_timeout_ms=15000)
+            "WHERE date >= current_date - interval '400 days'",
+            statement_timeout_ms=20000)
     except Exception as ex:
         print(f"[WARN] ga_daily load failed: {ex} -- using empty frame")
     try:
@@ -1396,20 +1666,18 @@ def _load_signals():
     except Exception as ex:
         print(f"[WARN] AI SDR conversations load failed: {ex} -- using empty frame")
     try:
-        # HubSpot contacts — only the two columns the Daily-signals card needs, bounded
-        # to a rolling 46-day window (large table). create_date is a UTC timestamptz;
-        # take its UTC calendar date as-is (no IST shift) so the day-count matches
-        # HubSpot's own "Create Date" column for that day. Pinned to 'UTC' explicitly
-        # (not a bare ::date cast) so this doesn't depend on the connection's default
-        # TimeZone setting.
-        # Exclude deleted contacts (is_deleted='Yes') the same way aia_live does, so the
-        # Leads-to-MQL denominator counts only live contacts.
+        # HubSpot contacts — the two columns Leads needs, bounded to ~13 months (400d)
+        # so the Marketing Monthly (12M) / Weekly funnel Leads column has history;
+        # Daily-signals reads only the last ~45d of this same frame. create_date is a
+        # UTC timestamptz; take its UTC calendar date as-is (no IST shift) so the
+        # day-count matches HubSpot's own "Create Date" column. Pinned to 'UTC' explicitly.
+        # Exclude deleted contacts (is_deleted='Yes') the same way aia_live does.
         contacts = _q(SUPABASE_URL,
             "SELECT (create_date AT TIME ZONE 'UTC')::date AS create_date, "
-            "contact_source FROM public.contacts_hs "
-            "WHERE create_date >= now() - interval '46 days' "
+            "contact_source, utm_source, utm_campaign FROM public.contacts_hs "
+            "WHERE create_date >= now() - interval '400 days' "
             "AND is_deleted IS DISTINCT FROM 'Yes'",
-            statement_timeout_ms=20000)
+            statement_timeout_ms=25000)
     except Exception as ex:
         print(f"[WARN] contacts_hs load failed: {ex} -- using empty frame")
     return ga, conv, contacts
@@ -1616,6 +1884,11 @@ def _prep_signals(ga, conv, contacts=None):
     contacts = contacts.copy() if contacts is not None else pd.DataFrame()
     if len(contacts) and "create_date" in contacts.columns:
         contacts["create_date"] = pd.to_datetime(contacts["create_date"], errors="coerce").dt.normalize()
+    if len(contacts) and {"utm_campaign", "utm_source"}.issubset(contacts.columns):
+        # bucket contacts by the SAME rule as deals: utm_campaign if present, else utm_source
+        contacts["utm_source_cohort"] = contacts.apply(
+            lambda r: r["utm_source"] if pd.isna(r["utm_campaign"]) or str(r["utm_campaign"]).strip() == ""
+            else r["utm_campaign"], axis=1)
     return ga, conv, contacts
 
 _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
@@ -3452,10 +3725,19 @@ def _daily_signals_html(day=None, channel="All"):
             + '<div class="dsig-grid">' + "".join(cards) + '</div></div>')
 
 
+def _nav_sig_channel(state):
+    """Map the nav-bar channel filter (multi-select deal_source_group) to a single
+    Daily-signals label (All / Google / Meta / LinkedIn / Organic). One mapped pick →
+    that channel; nothing selected or a mix → All."""
+    _ch  = _sel(state.mkt_selected_channel)
+    g2s  = {v: k for k, v in _SIG_CH_GROUP.items()}
+    labs = [g2s[c] for c in _ch if c in g2s]
+    return labs[0] if len(labs) == 1 else "All"
+
 def _daily_signals_refresh(state):
     try:
         state.mkt_signals_html = _daily_signals_html(pd.Timestamp(state.mkt_sig_date),
-                                                     state.mkt_sig_channel)
+                                                     _nav_sig_channel(state))
     except Exception as ex:
         print(f"[WARN] daily signals failed: {ex}")
         state.mkt_signals_html = ""
@@ -3463,6 +3745,20 @@ def _daily_signals_refresh(state):
 def on_mkt_sig_channel(state):
     """Daily-signals Channel dropdown changed — re-render the 7 cards for the day."""
     _daily_signals_refresh(state)
+
+def on_mkt_view(state):
+    """Shared Total / Cost / Percentages dropdown changed — rebuild BOTH funnel tables
+    (Monthly 12M + Weekly 8W) in the selected view."""
+    _mkt_refresh(state)
+
+def on_mkt_utm_date(state):
+    """UTM-table Start/End picker changed. It's bound to the SHARED ops range
+    (aia_date_range), so mirror to AIA/VA Ops and refresh all three."""
+    dr = state.aia_date_range
+    if isinstance(dr, (list, tuple)) and len(dr) == 2 and dr[0] and dr[1]:
+        state.aia_start_date = dr[0]; state.aia_end_date = dr[1]
+        state.va_date_range = [dr[0], dr[1]]
+        on_aia_filter_change(state)
 
 def on_mkt_sig_date(state):
     """Daily-signals date picker changed — clamp to the valid window (45 days ago →
@@ -3606,21 +3902,65 @@ def _mkt_refresh(state):
     else:
         state.mkt_cpl_fig = go.Figure()
 
-    # Table — rename Leads->Deals and CPL->CPD (both are deal-based, not lead-based)
-    mdf_tbl = mdf.rename(columns={"Leads": "Deals", "CPL": "CPD"}) if len(mdf) else mdf
-    state.mkt_monthly_json = (grid_payload_b64(mdf_tbl, total_id_col="Month", no_sort=True,
-                              sortable=False, center_all=True, bar_cols=["Spend (₹)"],
-                              bar_color="#7fb3e0", heat_cols=_heat_mkt, autosize=True)
-                              if len(mdf_tbl) else grid_payload_b64(pd.DataFrame()))
+    # Redesigned funnel tables (Monthly 12M + Weekly 8W) sharing the Total/Cost/% view.
+    # Channel: map the nav deal_source_group picks onto the sig session/contact buckets
+    # (Google Ads->Google, …); unmapped picks (Referral/Others) contribute no sessions/
+    # leads. Empty selection = All (whole-site Visits, all contacts).
+    _G2S = {vv: kk for kk, vv in _SIG_CH_GROUP.items()}
+    _sig_labels = None if not _ch else [_G2S[c] for c in _ch if c in _G2S]
+    _view = state.mkt_view if getattr(state, "mkt_view", None) in _MKT_VIEWS else "Total"
+    _fs_m = _funnel_series("M", 12, aia_base, _mkt_full, li_full, _GA, _CONTACTS, _sig_labels)
+    _fs_w = _funnel_series("W", 8,  aia_base, _mkt_full, li_full, _GA, _CONTACTS, _sig_labels)
+    state.mkt_monthly_json = _mkt_render(_fs_m, _view, "monthly")
+    state.mkt_weekly_json  = _mkt_render(_fs_w, _view, "weekly")
 
-    # Weekly Funnel (8W) — demo funnel, trailing 8 weeks through the current week.
-    # Rename Leads->Deals and CPL->CPD (deal-based, matching the monthly table).
-    wdf = _mkt_funnel_8w(_mkt_full, aia_base, last_n=8)
-    wdf_tbl = wdf.rename(columns={"Leads": "Deals", "CPL": "CPD"}) if len(wdf) else wdf
-    state.mkt_weekly_json = (grid_payload_b64(wdf_tbl, total_id_col="Week", no_sort=True,
-                             sortable=False, center_all=True, bar_cols=["Spend (₹)"],
-                             bar_color="#7fb3e0", autosize=True)
-                             if len(wdf_tbl) else grid_payload_b64(pd.DataFrame()))
+    # UTM Source Cohort (moved from AIA Ops) — same period-in cohort logic, over the
+    # SHARED ops date range (aia_start/end), sourced from the marketing-filtered
+    # aia_base so it respects Channel / UTM Campaign / Deal Name. Leads (Contacts) =
+    # contacts_hs bucketed by the same utm_source_cohort, channel + campaign filtered.
+    _us = pd.Timestamp(state.aia_start_date); _ue = pd.Timestamp(state.aia_end_date)
+    _cts = _CONTACTS
+    if "create_date" in _cts.columns:
+        _cts = _cts[(_cts["create_date"] >= _us) & (_cts["create_date"] <= _ue)]
+    if _sig_labels is not None and "contact_source" in _cts.columns:
+        _cts = _cts[_cts["contact_source"].map(_sig_contact_channel).isin(_sig_labels)]
+    if _cmp and "utm_campaign" in _cts.columns:
+        _cts = _cts[_cts["utm_campaign"].isin(_cmp)]
+    _leads_src = (_cts.groupby(_cts["utm_source_cohort"].fillna("(Blank)")).size().to_dict()
+                  if ("utm_source_cohort" in _cts.columns and len(_cts)) else {})
+    _ucoh = _rng(aia_base, "create_date", _us, _ue)
+    _usrc = _ucoh["utm_source_cohort"].fillna("(Blank)") if "utm_source_cohort" in _ucoh.columns else pd.Series(dtype=object)
+    def _ucin(frame, col):
+        if col not in frame.columns: return 0
+        return frame[frame[col].notna() & (frame[col] >= _us) & (frame[col] <= _ue)]["record_id"].nunique()
+    # per-source Spend via campaign match (channel-filtered spend, in the shared range)
+    _msp = _mkt_full
+    if "day" in getattr(_msp, "columns", []):
+        _md = pd.to_datetime(_msp["day"], errors="coerce")
+        _msp = _msp[(_md >= _us) & (_md <= _ue)]
+    _spend_camp = (_msp.groupby("campaign")["cost"].sum().to_dict()
+                   if ("campaign" in getattr(_msp, "columns", []) and len(_msp)) else {})
+    _udata = []
+    for _src in sorted(_usrc.unique()):
+        c = _ucoh[_usrc == _src]
+        _de = c["record_id"].nunique()
+        if _de == 0: continue
+        pd3 = c[c["payment_date"].notna() & (c["payment_date"] >= _us) & (c["payment_date"] <= _ue)]
+        hps = (c[c["dc_date"].notna() & (c["prospect_score"] >= 60)
+                 & (c["dc_date"] >= _us) & (c["dc_date"] <= _ue)]["record_id"].nunique()
+               if {"dc_date", "prospect_score"}.issubset(c.columns) else 0)
+        _udata.append({
+            "src": _src, "deals": _de, "wa_bot": _ucin(c, "wa_bot_date"),
+            "leads": int(_leads_src.get(_src, 0)), "ds": _ucin(c, "ds_date"), "dc": _ucin(c, "dc_date"),
+            "hps": hps, "ft": _ucin(c, "ft_start_date"),
+            "tot_paid": pd3[pd3["module_type"].isin(["AIA Paid", "GST Paid"])]["record_id"].nunique() if "module_type" in pd3.columns else 0,
+            "revenue": int(pd3.groupby("record_id")["amount_paid"].max().sum()) if len(pd3) else 0,
+            "mrr": int(_AIA_LI[_AIA_LI["record_id"].isin(pd3["record_id"])]["mrr"].sum()),
+            "spend": float(_spend_camp.get(_src, 0)),
+        })
+    state.mkt_utm_json = _mkt_utm_render(_udata, _view)
+
+    _daily_signals_refresh(state)   # Daily-signals cards follow the nav channel filter too
 
     # Channel pies — always show ALL channels (from the channel-unfiltered data)
     # so a different slice can be clicked.
@@ -4368,7 +4708,8 @@ mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
 mkt_signals_html=""
 mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn", "Organic"]   # Daily-signals channel filter
 mkt_sig_channel  = "All"
-mkt_monthly_json=""; mkt_weekly_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
+mkt_view = "Total"; mkt_views = _MKT_VIEWS   # shared Total/Cost/Percentages view for both funnel tables
+mkt_monthly_json=""; mkt_weekly_json=""; mkt_utm_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""
 mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_click_last=""
@@ -4507,6 +4848,7 @@ def on_aia_filter_change(state):
     state.va_selected_owner = [o for o in _sel(state.aia_selected_owner) if o in state.va_owner_list]
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
+    _mkt_refresh(state)   # UTM Source Cohort (on Marketing) shares the ops date range
 def on_cs_filter_change(state):  _cs_refresh(state); _sync_ms(state)
 def on_cs_usage_filter(state):   _apply_usage_filter(state); _sync_ms(state)
 def on_mkt_filter_change(state): _mkt_refresh(state)
@@ -4516,6 +4858,7 @@ def on_va_filter_change(state):
     state.aia_selected_owner = [o for o in _sel(state.va_selected_owner) if o in state.aia_owner_list]
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
+    _mkt_refresh(state)   # UTM Source Cohort (on Marketing) shares the ops date range
 def on_vaf_filter_change(state): _vaf_refresh(state); _sync_ms(state)
 
 # Single-box date-range pickers (AIA/VA Ops): split the [start, end] list back into

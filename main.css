@@ -577,7 +577,7 @@ table.taipy-table thead tr th,
    (translateY(-50%) makes `top` the vertical CENTRE, not the top edge) — this
    lines it up with the header text centre no matter what height MUI renders.
    Sits just RIGHT of the channel dropdown. */
-.dsig-datebar { position: absolute; top: 33px; left: 164px; transform: translateY(-50%); z-index: 6; margin: 0; }
+.dsig-datebar { position: absolute; top: 33px; left: 20px; transform: translateY(-50%); z-index: 6; margin: 0; }
 /* Compact, FIXED 36px picker: pin height on every MUI wrapper (incl. the calendar
    icon button) so the default-tall box can't push the header to its top line or
    crowd the cards; trim the width so there's no blank gap before the icon. */
@@ -616,7 +616,7 @@ table.taipy-table thead tr th,
     margin-top: 0;             /* title centre now meets the picker's */
     margin-bottom: 22px;       /* room so the picker never touches the cards */
     min-height: 36px;          /* == the picker height, so their centres coincide */
-    padding-left: 310px;       /* reserve space for the channel dropdown + date picker */
+    padding-left: 164px;       /* reserve space for the date picker (channel dropdown removed) */
     padding-right: 0;
 }
 .dsig-head span {
@@ -790,4 +790,50 @@ table.taipy-table thead tr th,
 @media (max-width: 900px) {
     .kpi-value { font-size: 20px !important; }
     .filter-bar { flex-wrap: wrap !important; }
+}
+
+/* Marketing funnel table header */
+.mkt-tablehead{ display:flex; align-items:center; gap:14px; margin-bottom:6px; }
+.mkt-tablehead p{ margin:0; }
+.mkt-view-sel{ max-width:180px; }
+
+/* View dropdown in the nav filter bar — matched to the msc caption+box look
+   (caption "View" above a 38px translucent-white box with white text) */
+.filter-bar .nav-view-col { display: flex !important; flex-direction: column !important; }
+.filter-bar .nav-view-col .msc-cap { margin: 0 0 2px 2px !important; }
+.filter-bar .nav-view-sel,
+.filter-bar .nav-view-sel .MuiFormControl-root,
+.filter-bar .nav-view-sel .MuiAutocomplete-root,
+.filter-bar .nav-view-sel .MuiInputBase-root {
+    width: 150px !important;
+    min-width: 150px !important;
+    margin: 0 !important;
+}
+.filter-bar .nav-view-sel .MuiInputBase-root,
+.filter-bar .nav-view-sel .MuiAutocomplete-inputRoot,
+.filter-bar .nav-view-sel .MuiOutlinedInput-root {
+    height: 38px !important;
+    min-height: 38px !important;
+    max-height: 38px !important;
+    padding: 0 6px 0 10px !important;
+    background: rgba(255,255,255,0.08) !important;
+    border: 1px solid rgba(255,255,255,0.45) !important;
+    border-radius: 4px !important;
+    box-sizing: border-box !important;
+}
+.filter-bar .nav-view-sel .MuiInputBase-root:hover {
+    border-color: rgba(255,255,255,0.85) !important;
+}
+/* hide the Material floating label + notch (we use the msc-cap div above instead) */
+.filter-bar .nav-view-sel .MuiInputLabel-root { display: none !important; }
+.filter-bar .nav-view-sel .MuiOutlinedInput-notchedOutline { border: none !important; }
+.filter-bar .nav-view-sel legend { display: none !important; max-width: 0 !important; }
+.filter-bar .nav-view-sel .MuiInputBase-input {
+    color: #ffffff !important;
+    font-size: 13px !important;
+    padding: 0 !important;
+    height: 36px !important;
+    line-height: 36px !important;
+    display: flex !important;
+    align-items: center !important;
 }

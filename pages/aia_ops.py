@@ -100,15 +100,6 @@ Refunds
 |>
 
 <|part|class_name=chart-card|
-**UTM Source Cohort**
-
-<|part|class_name=gridholder gridholder-aia_utm|
-<|{aia_utm_json}|text|mode=raw|>
-|>
-<iframe src="/grid/aia_utm" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
-|>
-
-<|part|class_name=chart-card|
 **AIA + VA Incentive Tracker**
 
 <|part|class_name=gridholder gridholder-aia_incentive|

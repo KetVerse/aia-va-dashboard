@@ -361,6 +361,12 @@ _GRID_HTML = r"""<!DOCTYPE html>
   /* a cell flagged from Python via class_cols (e.g. Int Date during the
      initial-milestone window) — orange, but lighter than the status labels */
   .cell-orange{ color:#ea580c; font-weight:600; }
+  /* Marketing funnel: immature-cohort fade, low-denominator "n<25", partial-period badge */
+  .cell-faded{ opacity:.42; }
+  .cell-muted{ color:#9aa4b2; font-style:italic; }
+  td.cell-partial::after{ content:"Partial"; display:inline-block; margin-left:6px;
+    font-size:9px; font-weight:700; line-height:1; padding:2px 5px; border-radius:8px;
+    background:#fde68a; color:#92400e; vertical-align:middle; }
   /* col_w: cap a column by clipping its content — an inner block with a max-width
      bounds the cell's max-content, which is what auto-layout sizes the column to.
      Overlong values ellipsize and keep the full text in a hover title. */
