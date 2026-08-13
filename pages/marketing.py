@@ -39,7 +39,7 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
-**Monthly Performance**  *(view follows the nav-bar View dropdown)*
+**Monthly Performance** <|ⓘ|text|hover_text={mkt_monthly_tip}|class_name=info-ico|>  *(view follows the nav-bar View dropdown)*
 
 <|part|class_name=gridholder gridholder-mkt_monthly|
 <|{mkt_monthly_json}|text|mode=raw|>
@@ -48,7 +48,7 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
-**Weekly Funnel (8W)**  *(view follows the nav-bar View dropdown)*
+**Weekly Funnel (8W)** <|ⓘ|text|hover_text={mkt_weekly_tip}|class_name=info-ico|>  *(view follows the nav-bar View dropdown)*
 
 <|part|class_name=gridholder gridholder-mkt_weekly|
 <|{mkt_weekly_json}|text|mode=raw|>
@@ -58,7 +58,7 @@ MARKETING_PAGE = """
 
 <|part|class_name=chart-card|
 <|part|class_name=mkt-tablehead|
-**UTM Source Cohort**
+**UTM Source Cohort** <|ⓘ|text|hover_text={mkt_utm_tip}|class_name=info-ico|>
 <|{aia_date_range}|date_range|label_start=Start Date|label_end=End Date|format=dd/MM/yyyy|on_change=on_mkt_utm_date|class_name=mkt-utm-date|>
 |>
 

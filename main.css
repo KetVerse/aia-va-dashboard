@@ -795,6 +795,11 @@ table.taipy-table thead tr th,
 /* Marketing funnel table header */
 .mkt-tablehead{ display:flex; align-items:center; gap:14px; margin-bottom:6px; }
 .mkt-tablehead p{ margin:0; }
+/* Push the UTM date range clear of the title's ⓘ. Taipy nests it inside the
+   markdown paragraph rather than making it a flex child of .mkt-tablehead, so the
+   14px flex gap above never reaches it — this margin is the whole spacing. 34px
+   + ~4px inline whitespace ≈ 38px (~1cm) measured from the icon's right edge. */
+.mkt-utm-date{ margin-left:34px; }
 .mkt-view-sel{ max-width:180px; }
 
 /* View dropdown in the nav filter bar — matched to the msc caption+box look

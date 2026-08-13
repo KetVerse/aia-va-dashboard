@@ -1065,6 +1065,11 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
     hps_by = (_coh(aa["dc_date"].notna() & (aa["prospect_score"] >= 60))
               if ({"dc_date", "prospect_score"}.issubset(aa.columns) and len(aa)) else pd.Series(dtype=float))
     ft_by  = _coh(aa["ft_start_date"].notna()) if ("ft_start_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
+    # Effective No-Show: leads whose CURRENT stage is "Demo No-Show" — a demo was
+    # booked but not attended. Same definition the legacy Weekly Funnel used, kept
+    # as-is so the restored column reconciles with the old table.
+    ns_by  = (_coh(aa["deal_stage"] == "Demo No-Show")
+              if ("deal_stage" in aa.columns and len(aa)) else pd.Series(dtype=float))
     # net paid / revenue / MRR (net of refunds), cohort by create-period
     aa_ok = aa[aa["asked_refund"] != "Yes"] if ("asked_refund" in aa.columns and len(aa)) else aa
     netpaid_by = rev_by = mrr_by = pd.Series(dtype=float)
@@ -1084,6 +1089,7 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
     return {"full": full, "ga_periods": ga_periods,
             "spend": R(spend_by), "visits": R(visits_by), "leads": R(leads_by),
             "mql": R(mql_by), "ds": R(ds_by), "dc": R(dc_by), "highps": R(hps_by), "ft": R(ft_by),
+            "noshow": R(ns_by),
             "netpaid": R(netpaid_by), "netrev": R(rev_by), "mrr": R(mrr_by)}
 
 _MKT_VIEWS = ["Total", "Cost", "Percentages"]
@@ -1102,6 +1108,7 @@ def _mkt_render(fs, view, kind):
     v    = lambda k, p: float(fs[k].get(p, 0) or 0)
     lab  = "Month" if kind == "monthly" else "Week"
     has_visits = kind == "weekly"   # Monthly drops Visits (GA history only ~2 months)
+    has_noshow = kind == "weekly"   # Effective No-Show is a Weekly-Funnel column
     imm = {}   # immature-cohort fade removed per request — no greyed cells
     fd  = lambda stages, i: "cell-faded" if any(i in imm.get(s, ()) for s in stages) else ""
     cnt = lambda x: _grp(int(round(x)))
@@ -1121,11 +1128,13 @@ def _mkt_render(fs, view, kind):
             ds = sum(v("ds", q) for q in full);    dc = sum(v("dc", q) for q in full)
             hp = sum(v("highps", q) for q in full); ft = sum(v("ft", q) for q in full)
             npd = sum(v("netpaid", q) for q in full); nr = sum(v("netrev", q) for q in full)
-            mr = sum(v("mrr", q) for q in full); avail = True
+            mr = sum(v("mrr", q) for q in full); ns = sum(v("noshow", q) for q in full)
+            avail = True
         else:
             sp, vi, le, mq = v("spend", p), v("visits", p), v("leads", p), v("mql", p)
             ds, dc, hp, ft = v("ds", p), v("dc", p), v("highps", p), v("ft", p)
             npd, nr, mr = v("netpaid", p), v("netrev", p), v("mrr", p)
+            ns = v("noshow", p)
             avail = p in ga
         r = {}
         if tot:
@@ -1145,6 +1154,7 @@ def _mkt_render(fs, view, kind):
             r["FT"] = (cnt(ft), fd(["ft"], i), "")
             r["Net Paid"] = (cnt(npd), fd(["netpaid"], i), "")
             r["Net Revenue"] = (cnt(nr), fd(["netrev"], i), "")
+            if has_noshow: r["Effective No-Show"] = (cnt(ns), "", "")
             if kind == "monthly":
                 r["MRR"] = (cnt(mr), "", "")
                 cac = round(sp / npd) if npd else None
@@ -1166,6 +1176,8 @@ def _mkt_render(fs, view, kind):
             r["Cost/FT"] = costc(sp, ft, fd(["ft"], i))
             if kind == "monthly":
                 r["CAC"] = costc(sp, npd, fd(["netpaid"], i))
+            # spend burnt on demos that were booked and then not attended
+            if has_noshow: r["Cost/No-Show"] = costc(sp, ns)
         else:  # Percentages — post-MQL stages measured against the MQL (deals) base
             if has_visits:
                 r["Visit→Lead"] = ("—", "", "") if not avail else pctc(le, vi)
@@ -1175,6 +1187,10 @@ def _mkt_render(fs, view, kind):
             r["MQL→High PS"] = pctc(hp, mq)
             r["MQL→FT"] = pctc(ft, mq)
             r["MQL→Paid"] = pctc(npd, mq)
+            # measured against DS, not MQL: a no-show is only possible once a demo
+            # was actually booked, so DS is the denominator that makes it a rate
+            # (against MQL it would just be diluted by leads that never booked)
+            if has_noshow: r["DS→No-Show"] = pctc(ns, ds)
         return r
 
     all_rows = [build(i, p) for i, p in enumerate(full)] + [build(None, None, tot=True)]
@@ -1234,7 +1250,10 @@ def _mkt_utm_render(data, view):
         g = (lambda k: S(k)) if tot else (lambda k: d[k])
         r = {"UTM Source": ("Total" if tot else d["src"], "", "")}
         if view == "Total":
-            for k, col in (("wa_bot", "WA Bot"), ("leads", "Leads (Contacts)"), ("ds", "DS"), ("dc", "DC"),
+            # order follows the funnel: Leads -> MQL (Deals) -> WA Bot -> DS -> ...
+            # "deals" is the same cohort count the Percentages view uses as its base.
+            for k, col in (("leads", "Leads"), ("deals", "MQL (Deals)"),
+                           ("wa_bot", "WA Bot"), ("ds", "DS"), ("dc", "DC"),
                            ("hps", "High PS"), ("ft", "FT Started"), ("tot_paid", "Tot Paid"),
                            ("revenue", "Revenue"), ("mrr", "MRR")):
                 r[col] = (int(g(k)), "", "")
@@ -4705,6 +4724,28 @@ vaf_ret_tip = ("Customer Retention Matrix\n"
 mkt_start_date = date(2020,1,1); mkt_end_date = _today   # no date filter on Marketing page (all-time)
 mkt_kpi_spend="₹0"; mkt_kpi_leads="0"; mkt_kpi_cpl="₹0"; mkt_kpi_cac="₹0"
 mkt_kpi_arpu="₹0"; mkt_kpi_payback="—"
+mkt_monthly_tip = ("Monthly Performance (12M)\n"
+                   "• Shows each month's leads and their lagging indicators over time.\n"
+                   "• Spend is counted for that month only.\n"
+                   "• Recent months may look lower as they haven't matured yet.\n"
+                   "• n<25 = too few leads for a reliable rate.\n"
+                   "• — = no data/denominator.")
+mkt_weekly_tip  = ("Weekly Funnel (8W)\n"
+                   "• Shows leads from each week (Mon–Sun) and their lagging indicators over time.\n"
+                   "• Includes the current partial week.\n"
+                   "• Each conversion rate is based only on that week's leads.\n"
+                   "• Newer weeks may look lower as they haven't matured yet.\n"
+                   "• n<25 = too few leads for a reliable rate.\n"
+                   "• — = no data/denominator.")
+mkt_utm_tip     = ("UTM Source Cohort\n"
+                   "• Groups leads by UTM Campaign, or UTM Source if the campaign is missing.\n"
+                   "• Each metric is counted only if its date falls within the selected date range.\n"
+                   "• Leads created in the period but with a later demo won't count under DS.\n"
+                   "• Leads = contacts created during the selected period.\n"
+                   "• Spend is matched to the campaign name.\n"
+                   "• n<25 = too few leads to show a reliable rate.\n"
+                   "• — = no data/denominator.")
+
 mkt_signals_html=""
 mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn", "Organic"]   # Daily-signals channel filter
 mkt_sig_channel  = "All"
