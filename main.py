@@ -2157,7 +2157,8 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF
+    _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
@@ -2446,9 +2447,91 @@ def _customer_status(row, upl, syn):
 # PAGE 1 — AIA OPS
 # ═══════════════════════════════════════════════════════════════════
 
+_FT_HEALTH_DF = None
+
+def _build_ft_health_df():
+    """Free-Trial Customers Usage & Health data (AIA Ops): every AIA deal with a
+    known ft_start_date, with the SAME 28-day usage streak + Activity Score +
+    tooltip as the CS Usage & Health table. The heavy per-row usage scan is
+    filter-independent, so the frame is cached and only rebuilt on data reload
+    (see _reload_data); the Deal Name / GM / Stage dropdowns then slice it."""
+    global _FT_HEALTH_DF
+    if _FT_HEALTH_DF is not None:
+        return _FT_HEALTH_DF
+    # Free-trial customers only: FT started AND not yet paid (payment_date blank).
+    # Once a payment lands they graduate to the CS Usage & Health table.
+    base = (_AIA[_AIA["ft_start_date"].notna() & _AIA["payment_date"].isna()]
+            if "ft_start_date" in _AIA.columns else _AIA.iloc[0:0])
+    if len(base) == 0:
+        _FT_HEALTH_DF = pd.DataFrame()
+        return _FT_HEALTH_DF
+    _ev_lu = _recent_event_lookup()
+    _scores = _activity_scores()
+    today = pd.Timestamp(date.today()).normalize()
+    _ddmy = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
+    rows = []
+    for _, row in base.iterrows():
+        email = _clean_email(row.get("login_email_id", ""))
+        active_days, streak = _usage_28(email, _ev_lu)
+        _acct = _EMAIL_ACCT.get(email)
+        activity_score = int(_scores.get(_acct, 0)) if _acct else 0
+        ftd = row.get("ft_start_date")
+        dsince = (today - pd.Timestamp(ftd).normalize()).days if pd.notna(ftd) else 9999
+        rows.append({
+            "Deal Name": row.get("deal_name", ""),
+            "record_id": row.get("record_id", ""),
+            "GM": row.get("deal_owner", ""),
+            "Stage": row.get("deal_stage", ""),
+            "FT Start Date": _ddmy(ftd),
+            # Orange while the trial is fresh (started within the last 14 days),
+            # black once older. Hidden — drives the cell class.
+            "__ftcls": ("cell-orange" if (pd.notna(ftd) and 0 <= dsince <= 14) else ""),
+            "Usage Active Days (28d)": active_days,
+            "Activity Score": activity_score,
+            "Usage Streak Last 28D (desc)": streak,
+        })
+    _FT_HEALTH_DF = pd.DataFrame(rows)
+    return _FT_HEALTH_DF
+
+
+def _apply_ft_filter(state):
+    """Filter the Free Trial Usage & Health grid by Deal Name / GM / Deal Stage."""
+    d = state.aia_ft_all
+    if d is None or len(d) == 0:
+        state.aia_ft_json = grid_payload_b64(pd.DataFrame())
+        return
+    _dl = _sel(state.aia_ft_deal)
+    if _dl:
+        d = d[d["Deal Name"].isin(_dl)]
+    _gm = _sel(state.aia_ft_gm)
+    if _gm:
+        d = d[d["GM"].isin(_gm)]
+    _st = _sel(state.aia_ft_stage)
+    if _st:
+        d = d[d["Stage"].isin(_st)]
+    # Sl no re-numbers 1..N over the current view (see rownum_col), so it stays
+    # pinned top-to-bottom through any re-sort.
+    d = d.reset_index(drop=True)
+    d.insert(0, "Sl no", range(1, len(d) + 1))
+    state.aia_ft_json = grid_payload_b64(
+        d, sort_default_col="Usage Active Days (28d)", rownum_col="Sl no",
+        col_w={"Deal Name": 300},
+        streak_cols=["Usage Streak Last 28D (desc)"],
+        center_cols=["FT Start Date"], date_cols=["FT Start Date"],
+        heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
+        class_cols={"FT Start Date": "__ftcls"},
+        link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
+
+
 def _aia_ops_refresh(state):
     s = pd.Timestamp(state.aia_start_date)
     e = pd.Timestamp(state.aia_end_date)
+    _ftdf = _build_ft_health_df()
+    state.aia_ft_all = _ftdf
+    state.aia_ft_deal_list  = sorted(_ftdf["Deal Name"].dropna().unique().tolist()) if len(_ftdf) else []
+    state.aia_ft_gm_list    = sorted(_ftdf["GM"].dropna().unique().tolist()) if len(_ftdf) else []
+    state.aia_ft_stage_list = sorted(_ftdf["Stage"].dropna().unique().tolist()) if len(_ftdf) else []
+    _apply_ft_filter(state)
     df = _AIA.copy()
     _o = _sel(state.aia_selected_owner)
     if _o:    df = df[df["deal_owner"].isin(_o)]
@@ -4688,6 +4771,11 @@ aia_date_range = [_month_start, _month_end]   # single-box range picker <-> star
 aia_owner_list    = sorted(_AIA["deal_owner"].dropna().unique().tolist())
 aia_campaign_list = sorted(_AIA["utm_campaign"].dropna().unique().tolist())
 aia_selected_owner = [];  aia_selected_campaign = []
+# Free Trial Usage & Health filters (Deal Name / GM / Deal Stage)
+aia_ft_all = None
+aia_ft_deal = []; aia_ft_gm = []; aia_ft_stage = []
+aia_ft_deal_list = []; aia_ft_gm_list = []; aia_ft_stage_list = []
+aia_ft_deal_ms = _ms_json([], []); aia_ft_gm_ms = _ms_json([], []); aia_ft_stage_ms = _ms_json([], [])
 aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_hi=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
@@ -4697,7 +4785,7 @@ aia_trend_fig = go.Figure()
 aia_channel_pie_json = ""
 aia_channel_filter = "All"; aia_channel_order = []; aia_filter_label = ""
 aia_channel_click = ""; aia_channel_click_last = ""
-aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""
+aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""; aia_ft_json=""
 aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.DataFrame()
 
 # Page 2
@@ -4752,6 +4840,9 @@ cs_usage_tip = ("Usage Streak — last 28 days\n"
                 "• Grey = not active (no event that day)\n"
                 "Usage Active Days (28d) = number of active days (green + yellow); grey days are not active.\n"
                 "Hover a dot for that day's event counts.")
+aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
+              "• FT Start Date is orange within the first 14 days\n"
+              "• Active Days / Activity Score / streak = same 28-day measures as CS Usage & Health")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
@@ -4965,6 +5056,9 @@ def on_va_date(state):
 _MS_DISPATCH = {
     "aia_owner":      ("aia_selected_owner",     "aia"),
     "aia_campaign":   ("aia_selected_campaign",  "aia"),
+    "aia_ft_deal":    ("aia_ft_deal",            "aiaft"),
+    "aia_ft_gm":      ("aia_ft_gm",              "aiaft"),
+    "aia_ft_stage":   ("aia_ft_stage",           "aiaft"),
     "va_owner":       ("va_selected_owner",      "va"),
     "va_campaign":    ("va_selected_campaign",   "va"),
     "mkt_channel":    ("mkt_selected_channel",   "mkt"),
@@ -5089,6 +5183,24 @@ def _sync_ms(state):
     # empty Status "" is included as a real, selectable option (an empty box)
     state.cs_usage_status_ms = _ms_json(_ulov("Status"), state.cs_usage_status)
 
+    # Free Trial Usage & Health: Deal Name / GM / Deal Stage cross-filter each other
+    _fa = state.aia_ft_all
+    def _flov(target):
+        d = _fa
+        if d is None or len(d) == 0:
+            return []
+        for col, sv in (("Deal Name", state.aia_ft_deal), ("GM", state.aia_ft_gm),
+                        ("Stage", state.aia_ft_stage)):
+            if col == target:
+                continue
+            s = _sel(sv)
+            if s:
+                d = d[d[col].isin(s)]
+        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
+    state.aia_ft_deal_ms  = _ms_json(_flov("Deal Name"), state.aia_ft_deal)
+    state.aia_ft_gm_ms    = _ms_json(_flov("GM"),        state.aia_ft_gm)
+    state.aia_ft_stage_ms = _ms_json(_flov("Stage"),     state.aia_ft_stage)
+
     # VA Deal Name options depend on the selected Recurring Type(s)
     _vrt = _sel(state.vaf_selected_rectype)
     if _vrt and "recurring_type" in _VA_LI.columns:
@@ -5162,6 +5274,7 @@ def on_ms_change(state):
     var, scope = _MS_DISPATCH[key]
     setattr(state, var, sel)
     if scope == "aia":     on_aia_filter_change(state)
+    elif scope == "aiaft": _apply_ft_filter(state)
     elif scope == "va":    on_va_filter_change(state)
     elif scope == "mkt":   _mkt_refresh(state)
     elif scope == "cs":    _cs_refresh(state)
@@ -5248,6 +5361,7 @@ def on_reset_filters(state, *_):
     # AIA Ops
     state.aia_start_date     = ms;  state.aia_end_date     = me
     state.aia_selected_owner = []; state.aia_selected_campaign = []
+    state.aia_ft_deal = []; state.aia_ft_gm = []; state.aia_ft_stage = []
     state.aia_channel_filter = "All"; state.aia_filter_label = ""
     # VA Ops
     state.va_start_date      = ms;  state.va_end_date      = me

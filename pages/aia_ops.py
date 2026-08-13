@@ -108,6 +108,30 @@ Refunds
 <iframe src="/grid/aia_incentive" class="grid-frame" style="width:100%;height:480px;border:none;"></iframe>
 |>
 
+<|part|class_name=chart-card|
+**Free Trial Customers Usage & Health** <|ⓘ|text|hover_text={aia_ft_tip}|class_name=info-ico|>
+
+<|layout|columns=1 1 1|gap=12px|
+<|part|
+<div class="msc wide" data-key="aia_ft_deal"><div class="msc-cap">Deal Name</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_ft_deal_ms}|text|mode=raw|class_name=msc-data msc-data-aia_ft_deal|>
+|>
+<|part|
+<div class="msc" data-key="aia_ft_gm"><div class="msc-cap">GM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_ft_gm_ms}|text|mode=raw|class_name=msc-data msc-data-aia_ft_gm|>
+|>
+<|part|
+<div class="msc" data-key="aia_ft_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_ft_stage_ms}|text|mode=raw|class_name=msc-data msc-data-aia_ft_stage|>
+|>
+|>
+
+<|part|class_name=gridholder gridholder-aia_ft|
+<|{aia_ft_json}|text|mode=raw|>
+|>
+<iframe src="/grid/aia_ft" class="grid-frame" style="width:100%;height:620px;border:none;"></iframe>
+|>
+
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
 **Channel Distribution**  (click a slice to filter the page)
