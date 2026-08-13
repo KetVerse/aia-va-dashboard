@@ -191,8 +191,10 @@ _CHANNEL_COLORS = {
 }
 
 
-def pie_payload_b64(df, label_col, value_col):
-    """base64 JSON {labels, values, colors} for the interactive pie iframe."""
+def pie_payload_b64(df, label_col, value_col, money=False):
+    """base64 JSON {labels, values, colors, money} for the interactive pie iframe.
+    `money` prefixes the hover value with ₹ — set it for spend/revenue pies and
+    leave it off for headcount ones (Deals, Count), which aren't currency."""
     if df is None or len(df) == 0 or value_col not in df.columns:
         payload = {"labels": [], "values": [], "colors": []}
     else:
@@ -202,6 +204,7 @@ def pie_payload_b64(df, label_col, value_col):
                                       _PIE_COLORS[i % len(_PIE_COLORS)])
                   for i, lab in enumerate(labels)]
         payload = {"labels": labels, "values": values, "colors": colors}
+    payload["money"] = bool(money)
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -256,7 +259,11 @@ function draw(data){
     marker:{colors:data.colors, line:{color:"white", width:2}},
     pull:0,
     rotation:20,
-    hovertemplate:"<b>%{label}</b><br>%{value:,} • %{percent}<extra></extra>",
+    // .0f drops the paise on Spend (values arrive as floats); Deals are already
+    // whole so it's a no-op there. &nbsp; keeps real space either side of the
+    // bullet — plain spaces collapse in the SVG hover label.
+    hovertemplate:"<b>%{label}</b><br>"+(data.money?"₹":"")+
+                  "%{value:,.0f}&nbsp; • &nbsp;%{percent}<extra></extra>",
     automargin:true,
   };
   const layout = {

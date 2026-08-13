@@ -68,10 +68,17 @@ MARKETING_PAGE = """
 <iframe src="/grid/mkt_utm" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
 |>
 
+<|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
-**CPD vs Cost Per DC Trend**
+**Cost Per MQL vs Cost Per DC Trend**
 
 <|chart|figure={mkt_cpl_fig}|plot_config={chart_config}|>
+|>
+<|part|class_name=chart-card|
+**Cost Per High PS vs CAC Trend**
+
+<|chart|figure={mkt_hps_cac_fig}|plot_config={chart_config}|>
+|>
 |>
 
 <|part|class_name=piebridge piebridge-mkt_channel|

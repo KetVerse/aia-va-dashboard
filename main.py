@@ -3794,41 +3794,58 @@ def on_mkt_sig_date(state):
             state.mkt_sig_date = cd
     _daily_signals_refresh(state)
 
-def _make_cpd_trend(df):
-    """Monthly CPD (Cost per Deal = Spend/Deals) and Cost per DC (Spend/DC) as two lines.
-    Each point carries a rounded-₹ data label; hovering a dot shows the month and the
-    ₹spend ÷ count (deals for CPD, demos-conducted for Cost per DC) that produced it."""
-    x     = df["Month"].tolist()
-    spend = [int(v) for v in df["Spend"].tolist()]
-    deals = [int(v) for v in df["Leads"].tolist()]
-    dcn   = [int(v) for v in df["DCn"].tolist()]
-    cpd   = [int(v) for v in df["CPL"].tolist()]
-    cpdc  = [int(v) for v in df["Cost Per DC"].tolist()]
+def _make_cost_trend(x, spend, series):
+    """Two-line monthly ₹-cost trend. `series` = [(name, denominators, word, colour)];
+    each line is spend ÷ denominator for that month.
+
+    Every denominator is a COHORT count — of the leads created that month, how many
+    later reached the stage — so all lines lag, matching Monthly Performance rather
+    than the period-in basis this chart used before. A month with no denominator
+    plots as a gap, not ₹0, so an empty stage doesn't read as free.
+    Each point carries a rounded-₹ label; hover shows ₹spend ÷ count = ₹value."""
+    vals_all = [[round(s / d) if d else None for s, d in zip(spend, den)]
+                for _n, den, _w, _c in series]
+    # Labels normally sit above their dot. Where two series run close enough that
+    # their labels would touch, the lower dot's label flips below — so the pair
+    # stays legible and each label still reads against its own point. Threshold is
+    # ~7% of the plotted range, roughly one label's height at this chart size
+    # (y starts at 0, so the range is just the max value).
+    _flat = [v for vs in vals_all for v in vs if v is not None]
+    _near = (max(_flat) * 0.07) if _flat else 0
+    positions = []
+    for si, vs in enumerate(vals_all):
+        pos = []
+        for i, v in enumerate(vs):
+            others = [vals_all[oi][i] for oi in range(len(vals_all)) if oi != si]
+            others = [o for o in others if o is not None]
+            crowded = v is not None and any(abs(v - o) <= _near for o in others)
+            pos.append("bottom center" if (crowded and v < max(others)) else "top center")
+        positions.append(pos)
+
     fig = go.Figure()
-    fig.add_scatter(
-        x=x, y=cpd, name="CPD", mode="lines+markers+text", cliponaxis=False,
-        line={"color": "#1a7fc4", "width": 2}, marker={"size": 7, "color": "#1a7fc4"},
-        text=[f"{_grp(v)}" for v in cpd], textposition="top center",
-        textfont={"size": 10, "color": "#000000", "family": "Inter,sans-serif"},
-        customdata=[[f"₹{_grp(s)}", f"{_grp(d)} deals", f"₹{_grp(v)}"]
-                    for s, d, v in zip(spend, deals, cpd)],
-        hovertemplate="<b>%{x}</b><br>%{customdata[0]} ÷ %{customdata[1]} = %{customdata[2]}<extra>CPD</extra>",
-    )
-    fig.add_scatter(
-        x=x, y=cpdc, name="Cost Per DC", mode="lines+markers+text", cliponaxis=False,
-        line={"color": "#ed7d31", "width": 2}, marker={"size": 7, "color": "#ed7d31"},
-        text=[f"{_grp(v)}" for v in cpdc], textposition="top center",
-        textfont={"size": 10, "color": "#000000", "family": "Inter,sans-serif"},
-        customdata=[[f"₹{_grp(s)}", f"{_grp(d)} dc", f"₹{_grp(v)}"]
-                    for s, d, v in zip(spend, dcn, cpdc)],
-        hovertemplate="<b>%{x}</b><br>%{customdata[0]} ÷ %{customdata[1]} = %{customdata[2]}<extra>Cost Per DC</extra>",
-    )
+    for si, (name, den, word, colour) in enumerate(series):
+        vals = vals_all[si]
+        fig.add_scatter(
+            x=x, y=vals, name=name, mode="lines+markers+text", cliponaxis=False,
+            connectgaps=False,
+            line={"color": colour, "width": 2}, marker={"size": 7, "color": colour},
+            text=["" if v is None else _grp(v) for v in vals], textposition=positions[si],
+            textfont={"size": 10, "color": "#000000", "family": "Inter,sans-serif"},
+            customdata=[[f"₹{_grp(s)}", f"{_grp(d)} {word}",
+                         "—" if v is None else f"₹{_grp(v)}"]
+                        for s, d, v in zip(spend, den, vals)],
+            hovertemplate="<b>%{x}</b><br>%{customdata[0]} ÷ %{customdata[1]} = %{customdata[2]}"
+                          f"<extra>{name}</extra>",
+        )
     fig.update_layout(
-        margin={"l": 44, "r": 20, "t": 28, "b": 60}, height=300,
-        legend={"orientation": "h", "y": -0.3, "x": 0},
+        margin={"l": 44, "r": 20, "t": 28, "b": 70}, height=300,
+        legend={"orientation": "h", "y": -0.32, "x": 0},
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font={"family": "Inter,sans-serif", "size": 12},
-        xaxis={"tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#1a3a6b"}},
+        # A transparent 10px tick pushes the month labels down and clear of any
+        # data label that has flipped below its dot near the baseline (Jan-26).
+        xaxis={"tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#1a3a6b"},
+               "ticks": "outside", "ticklen": 10, "tickcolor": "rgba(0,0,0,0)"},
         yaxis={"showgrid": True, "gridcolor": "#eef2f7", "tickprefix": "₹", "rangemode": "tozero",
                "tickfont": {"size": 11, "family": "Inter,sans-serif"}},
     )
@@ -3904,22 +3921,41 @@ def _mkt_refresh(state):
     mdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "M", "Month",
                          lambda p: p.strftime("%b %y"), last_n=12)
 
-    # Trend chart — CPL vs Cost Per DC (Spend ÷ demos conducted). Built from mdf
-    # BEFORE the table renames Leads/CPL. Cost Per DC is chart-only (not in the table).
+    # Trend charts — all four lines are lagging/cohort: the denominators count the
+    # leads CREATED that month which later reached the stage, so they line up with
+    # Monthly Performance. (Cost/DC used to divide by DCs that HAPPENED that month,
+    # which quietly disagreed with the table above it — e.g. Jul-26 read 5,664 on
+    # the chart vs 6,456 in the table.) Built from mdf before the table renames
+    # Leads/CPL; mdf already carries the cohort Leads and Net Paid we need.
     if len(mdf):
         chart = mdf[mdf["Month"] != "Total"].rename(columns={"Spend (₹)": "Spend"}).copy()
-        _dc = aia_base[aia_base["dc_date"].notna()] if "dc_date" in aia_base.columns else aia_base.iloc[0:0]
-        _dc_by = (_dc.groupby(_dc["dc_date"].dt.to_period("M"))["record_id"].nunique()
-                  if len(_dc) else pd.Series(dtype=float))
-        def _dcn(row):
-            p = pd.Period(pd.to_datetime(row["Month"], format="%b %y"), freq="M")
-            return int(_dc_by.get(p, 0))
-        chart["DCn"] = chart.apply(_dcn, axis=1)
-        chart["Cost Per DC"] = chart.apply(
-            lambda r: round(r["Spend"] / r["DCn"]) if r["DCn"] else 0, axis=1)
-        state.mkt_cpl_fig = _make_cpd_trend(chart)
+        _ac = aia_base.dropna(subset=["create_date"]).copy() if "create_date" in aia_base.columns else aia_base.iloc[0:0].copy()
+        if len(_ac):
+            _ac["_cp"] = _ac["create_date"].dt.to_period("M")
+        _coh_n = lambda mask: (_ac[mask].groupby("_cp")["record_id"].nunique()
+                               if len(_ac) else pd.Series(dtype=float))
+        _dc_by = _coh_n(_ac["dc_date"].notna()) if len(_ac) else pd.Series(dtype=float)
+        _hp_by = (_coh_n(_ac["dc_date"].notna() & (_ac["prospect_score"] >= 60))
+                  if len(_ac) else pd.Series(dtype=float))
+        _per = [pd.Period(pd.to_datetime(mth, format="%b %y"), freq="M") for mth in chart["Month"]]
+        x     = chart["Month"].tolist()
+        spend = [int(v) for v in chart["Spend"].tolist()]
+        mqln  = [int(v) for v in chart["Leads"].tolist()]        # cohort: created that month
+        npd   = [int(v) for v in chart["Net Paid"].tolist()]     # cohort: of those, paid
+        dcn   = [int(_dc_by.get(p, 0)) for p in _per]
+        hpn   = [int(_hp_by.get(p, 0)) for p in _per]
+        state.mkt_cpl_fig = _make_cost_trend(x, spend, [
+            ("Cost/MQL", mqln, "MQL", "#1a7fc4"),
+            ("Cost/DC",  dcn,  "DC",  "#ed7d31")])
+        # Green/purple rather than anything red: red is reserved for the tables'
+        # CAC heat scale (magnitude), and red-vs-green is the classic colourblind
+        # collision — this pair separates at ΔE 20.0 under deuteranopia.
+        state.mkt_hps_cac_fig = _make_cost_trend(x, spend, [
+            ("Cost/High PS", hpn, "High PS", "#2e9e6b"),
+            ("CAC",          npd, "paid",    "#7e57c2")])
     else:
         state.mkt_cpl_fig = go.Figure()
+        state.mkt_hps_cac_fig = go.Figure()
 
     # Redesigned funnel tables (Monthly 12M + Weekly 8W) sharing the Total/Cost/% view.
     # Channel: map the nav deal_source_group picks onto the sig session/contact buckets
@@ -3982,16 +4018,21 @@ def _mkt_refresh(state):
     _daily_signals_refresh(state)   # Daily-signals cards follow the nav channel filter too
 
     # Channel pies — always show ALL channels (from the channel-unfiltered data)
-    # so a different slice can be clicked.
-    if "channel" in mkt_all.columns and len(mkt_all):
-        cs = mkt_all.groupby("channel")["cost"].sum().reset_index(); cs.columns=["Channel","Spend"]
+    # so a different slice can be clicked. Scoped to the UTM Source Cohort table's
+    # own Start/End range (_us/_ue, the shared ops range), so the pies and that
+    # table always describe the same period; the page's own range is all-time,
+    # which made the pies an all-time mix matching nothing else on the page.
+    _mkt_pie = (mkt_all[(mkt_all["day"] >= _us) & (mkt_all["day"] <= _ue)]
+                if ("day" in mkt_all.columns and len(mkt_all)) else mkt_all)
+    if "channel" in _mkt_pie.columns and len(_mkt_pie):
+        cs = _mkt_pie.groupby("channel")["cost"].sum().reset_index(); cs.columns=["Channel","Spend"]
         cs = cs.sort_values("Spend", ascending=False, ignore_index=True)
-        state.mkt_channel_spend_json = pie_payload_b64(cs, "Channel", "Spend")
+        state.mkt_channel_spend_json = pie_payload_b64(cs, "Channel", "Spend", money=True)
     else:
         state.mkt_channel_spend_json = pie_payload_b64(pd.DataFrame())
 
     # Deals by channel (distinct deal records by create_date) — this counts DEALS.
-    cl = _rng(_AIA,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
+    cl = _rng(_AIA,"create_date",_us,_ue).groupby("deal_source_group")["record_id"].nunique().reset_index()
     cl.columns = ["Channel","Deals"]
     cl = cl.sort_values("Deals", ascending=False, ignore_index=True)
     state.mkt_channel_leads_json = pie_payload_b64(cl, "Channel", "Deals")
@@ -4751,6 +4792,7 @@ mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn", "Organic"]   # Daily-si
 mkt_sig_channel  = "All"
 mkt_view = "Total"; mkt_views = _MKT_VIEWS   # shared Total/Cost/Percentages view for both funnel tables
 mkt_monthly_json=""; mkt_weekly_json=""; mkt_utm_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
+mkt_hps_cac_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""
 mkt_channel_click=""; mkt_channel_click_last=""; mkt_leads_click=""; mkt_leads_click_last=""
