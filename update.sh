@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 # Update the AiA + VA dashboard on the VPS.
 # Run on the HOST shell (root@srv1701205), NOT inside the container:
-#     cd /opt/taipy-dashboard && ./update.sh
+#     cd /opt/taipy-dashboard && bash update.sh
 # It pulls the latest code from GitHub and rebuilds/restarts the container.
 # Your .env (credentials) is gitignored and never touched.
 # ─────────────────────────────────────────────────────────────────────────
