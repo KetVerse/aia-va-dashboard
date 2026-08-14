@@ -31,7 +31,8 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      heat_by_row=False, link_cols=None, date_cols=None, header_tips=None,
                      max_height=None, tip_cols=None, total_inline=False,
                      heat_from=None, heat_max=None, class_cols=None,
-                     rownum_col=None, col_w=None):
+                     rownum_col=None, col_w=None, hdr_center=False,
+                     fixed_layout=False):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -147,6 +148,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
     header_tip_list = [str(_htips.get(cols[i], "")) for i in range(len(cols))]
 
     payload = {"columns": cols, "numeric": numeric, "center": center,
+               "hdr_center": bool(hdr_center), "fixedLayout": bool(fixed_layout),
                "rows": rows, "total": total, "bars": bars, "fixed": bool(fixed),
                "streak": streak, "barColor": default_bc, "barColors": bar_colors,
                "sortable": bool(sortable), "searchIdx": search_idx,
@@ -313,6 +315,9 @@ _GRID_HTML = r"""<!DOCTYPE html>
      a second scrollbar; the sticky header/total stay pinned. */
   .wrap{ width:100%; overflow:auto; flex:1 1 0; min-height:0; }
   table{ width:100%; border-collapse:collapse; font-size:13px; }
+  /* fixed_layout: columns get exactly their col_w ratios (scaled to 100%), so a
+     clipped cell ellipsizes right at its own edge instead of at a fixed px cap. */
+  table.fl{ table-layout:fixed; }
   table.fixed{ table-layout:fixed; }
   table.fixed thead th:first-child,
   table.fixed tbody td:first-child,
@@ -425,7 +430,7 @@ function header(){
     let arr="", pri="";
     if(s){ arr='<span class="arr">'+(s.dir===1?"▲":"▼")+'</span>';
            if(SORT.length>1) pri='<span class="pri">'+(SORT.indexOf(s)+1)+'</span>'; }
-    let c2 = DATA.center[i] ? "" : "left";
+    let c2 = (DATA.hdr_center || DATA.center[i]) ? "" : "left";
     if(!sortable) c2 += " nosort";
     const tips=DATA.headerTips||[];
     const tip = tips[i] ? ' title="'+String(tips[i]).replace(/"/g,"&quot;")+'"' : '';
@@ -622,7 +627,10 @@ function body(){
   function clipWrap(i, inner, raw){    // cap a col_w column's content (+ full text on hover)
     const w=colW[i]; if(!w) return inner;
     const t=String(raw==null?"":raw).trim().replace(/"/g,"&quot;");
-    return '<span class="clip" style="max-width:'+w+'px"'+(t?' title="'+t+'"':'')+'>'+inner+'</span>';
+    // fixed-layout: fill the cell (which is already sized to col_w) so text
+    // ellipsizes at the real column edge, not at a fixed px cap short of it.
+    const mw = DATA.fixedLayout ? "100%" : (w+"px");
+    return '<span class="clip" style="max-width:'+mw+'"'+(t?' title="'+t+'"':'')+'>'+inner+'</span>';
   }
   function cellCls(colName, r){        // CSS class from a hidden source column
     const src=classCols[colName]; if(!src) return "";
@@ -735,7 +743,7 @@ function render(){
   const tbl=document.getElementById("g"), em=document.getElementById("empty");
   if(!DATA || !DATA.columns.length){ tbl.style.display="none"; em.style.display="block"; return; }
   tbl.style.display=""; em.style.display="none";
-  tbl.className = DATA.fixed ? "fixed" : "";
+  tbl.className = ((DATA.fixed ? "fixed" : "") + (DATA.fixedLayout ? " fl" : "")).trim();
   if(DATA.firstW) tbl.style.setProperty("--firstw", DATA.firstW+"px");
   else tbl.style.removeProperty("--firstw");
   document.getElementById("searchbar").style.display =
