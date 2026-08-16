@@ -84,7 +84,7 @@ _ZOOM_LOCK_SCRIPT = """
 _PAGE_NAV_SCRIPT = """
 <script id="page-nav">
 (function () {
-  var ORDER = ["/aia", "/cs", "/marketing", "/va-ops", "/va-finance", "/wa-bot"];
+  var ORDER = ["/aia", "/cs", "/marketing", "/va-ops", "/va-finance", "/aia-bot"];
   function nav(target) {
     var links = Array.prototype.slice.call(document.querySelectorAll(".main-nav a"));
     var link = links.filter(function (a) { return a.pathname.replace(/\\/+$/, "") === target; })[0];
@@ -2157,9 +2157,9 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _WABOT
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
-    _WABOT = None          # rebuilt lazily on next WA Bot refresh
+    _aiaBOT = None          # rebuilt lazily on next WA Bot refresh
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
@@ -4777,17 +4777,17 @@ aia_ft_all = None
 aia_ft_deal = []; aia_ft_gm = []; aia_ft_stage = []
 aia_ft_deal_list = []; aia_ft_gm_list = []; aia_ft_stage_list = []
 aia_ft_deal_ms = _ms_json([], []); aia_ft_gm_ms = _ms_json([], []); aia_ft_stage_ms = _ms_json([], [])
-# WA Bot tracker
-wabot_all = None
-wabot_segment = []; wabot_stage = []; wabot_deal = []
-wabot_stage_list = []; wabot_deal_list = []
-wabot_segment_ms = _ms_json(["Paid", "Free", "Unknown"], []); wabot_stage_ms = _ms_json([], []); wabot_deal_ms = _ms_json([], [])
-wabot_kpi_users = "0"; wabot_kpi_paid_users = "0"; wabot_kpi_ft_users = "0"
-wabot_kpi_messages = "0"; wabot_kpi_messages_tip = ""; wabot_kpi_split = "—"
-wabot_kpi_wau = "0"; wabot_kpi_success = "—"; wabot_kpi_success_tip = ""
-wabot_table_json = ""
-wabot_adopt_fig = go.Figure(); wabot_intent_fig = go.Figure(); wabot_trend_fig = go.Figure()
-wabot_fail_json = ""; wabot_fail_intent = []; wabot_fail_intent_list = []; wabot_fail_intent_ms = _ms_json([], [])
+# AIA Bot tracker
+aiabot_all = None
+aiabot_segment = []; aiabot_stage = []; aiabot_deal = []
+aiabot_stage_list = []; aiabot_deal_list = []
+aiabot_segment_ms = _ms_json(["Paid", "Free", "Unknown"], []); aiabot_stage_ms = _ms_json([], []); aiabot_deal_ms = _ms_json([], [])
+aiabot_kpi_users = "0"; aiabot_kpi_paid_users = "0"; aiabot_kpi_ft_users = "0"
+aiabot_kpi_messages = "0"; aiabot_kpi_messages_tip = ""; aiabot_kpi_split = "—"
+aiabot_kpi_wau = "0"; aiabot_kpi_success = "—"; aiabot_kpi_success_tip = ""
+aiabot_table_json = ""
+aiabot_adopt_fig = go.Figure(); aiabot_intent_fig = go.Figure(); aiabot_trend_fig = go.Figure()
+aiabot_fail_json = ""; aiabot_fail_intent = []; aiabot_fail_intent_list = []; aiabot_fail_intent_ms = _ms_json([], [])
 aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_hi=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
@@ -5035,7 +5035,7 @@ def on_aia_filter_change(state):
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
     _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-    _wabot_refresh(state)   # WA Bot shares the ops date range too
+    _aiabot_refresh(state)   # WA Bot shares the ops date range too
 def on_cs_filter_change(state):  _cs_refresh(state); _sync_ms(state)
 def on_cs_usage_filter(state):   _apply_usage_filter(state); _sync_ms(state)
 def on_mkt_filter_change(state): _mkt_refresh(state)
@@ -5046,7 +5046,7 @@ def on_va_filter_change(state):
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
     _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-    _wabot_refresh(state)   # WA Bot shares the ops date range too
+    _aiabot_refresh(state)   # WA Bot shares the ops date range too
 def on_vaf_filter_change(state): _vaf_refresh(state); _sync_ms(state)
 
 # Single-box date-range pickers (AIA/VA Ops): split the [start, end] list back into
@@ -5073,10 +5073,10 @@ _MS_DISPATCH = {
     "aia_ft_deal":    ("aia_ft_deal",            "aiaft"),
     "aia_ft_gm":      ("aia_ft_gm",              "aiaft"),
     "aia_ft_stage":   ("aia_ft_stage",           "aiaft"),
-    "wabot_segment":  ("wabot_segment",          "wabot"),
-    "wabot_stage":    ("wabot_stage",            "wabot"),
-    "wabot_deal":     ("wabot_deal",             "wabot"),
-    "wabot_fail_intent": ("wabot_fail_intent",   "wabot"),
+    "aiabot_segment":  ("aiabot_segment",          "aiabot"),
+    "aiabot_stage":    ("aiabot_stage",            "aiabot"),
+    "aiabot_deal":     ("aiabot_deal",             "aiabot"),
+    "aiabot_fail_intent": ("aiabot_fail_intent",   "aiabot"),
     "va_owner":       ("va_selected_owner",      "va"),
     "va_campaign":    ("va_selected_campaign",   "va"),
     "mkt_channel":    ("mkt_selected_channel",   "mkt"),
@@ -5220,23 +5220,23 @@ def _sync_ms(state):
     state.aia_ft_stage_ms = _ms_json(_flov("Stage"),     state.aia_ft_stage)
 
     # WA Bot: Segment (fixed lov) / Deal Stage / Deal Name cross-filter
-    _wa = state.wabot_all
+    _wa = state.aiabot_all
     def _walov(target):
         d = _wa
         if d is None or len(d) == 0:
             return []
-        for col, sv in (("segment", state.wabot_segment), ("deal_stage", state.wabot_stage),
-                        ("deal_name", state.wabot_deal)):
+        for col, sv in (("segment", state.aiabot_segment), ("deal_stage", state.aiabot_stage),
+                        ("deal_name", state.aiabot_deal)):
             if col == target:
                 continue
             s = _sel(sv)
             if s:
                 d = d[d[col].isin(s)]
         return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.wabot_segment_ms = _ms_json(["Paid", "Free", "Unknown"], state.wabot_segment)
-    state.wabot_stage_ms   = _ms_json(_walov("deal_stage"), state.wabot_stage)
-    state.wabot_deal_ms    = _ms_json(_walov("deal_name"),  state.wabot_deal)
-    state.wabot_fail_intent_ms = _ms_json(state.wabot_fail_intent_list, state.wabot_fail_intent)
+    state.aiabot_segment_ms = _ms_json(["Paid", "Free", "Unknown"], state.aiabot_segment)
+    state.aiabot_stage_ms   = _ms_json(_walov("deal_stage"), state.aiabot_stage)
+    state.aiabot_deal_ms    = _ms_json(_walov("deal_name"),  state.aiabot_deal)
+    state.aiabot_fail_intent_ms = _ms_json(state.aiabot_fail_intent_list, state.aiabot_fail_intent)
 
     # VA Deal Name options depend on the selected Recurring Type(s)
     _vrt = _sel(state.vaf_selected_rectype)
@@ -5312,7 +5312,7 @@ def on_ms_change(state):
     setattr(state, var, sel)
     if scope == "aia":     on_aia_filter_change(state)
     elif scope == "aiaft": _apply_ft_filter(state)
-    elif scope == "wabot": _wabot_refresh(state)
+    elif scope == "aiabot": _aiabot_refresh(state)
     elif scope == "va":    on_va_filter_change(state)
     elif scope == "mkt":   _mkt_refresh(state)
     elif scope == "cs":    _cs_refresh(state)
@@ -5445,7 +5445,7 @@ def _refresh_all(state):
     _va_ops_refresh(state)
     _vaf_refresh(state)
     _ar_refresh(state)
-    _wabot_refresh(state)
+    _aiabot_refresh(state)
     _sync_ms(state)
 
 def _refresh_signal_date_bounds(state):
@@ -5512,35 +5512,35 @@ def _auto_refresh_loop(gui):
                 print(f"[auto-refresh] error: {ex}")
 
 # ═══════════════════════════════════════════════════════════════════
-# PAGE — WA BOT (WhatsApp bot usage tracker)
+# PAGE — AIA BOT (WhatsApp bot usage tracker)
 # ═══════════════════════════════════════════════════════════════════
-_WABOT = None   # cached message-level frame (enriched); rebuilt on data reload
+_aiaBOT = None   # cached message-level frame (enriched); rebuilt on data reload
 _WA_SEG_COLORS = {"Paid": "#2e8b57", "Free": "#e0952f", "Unknown": "#7b8794"}
 # bold navy fonts for axes / legend (matches the AIA Ops chart styling)
 _WA_AXIS = dict(size=13, color="#1a3a6b", family="Inter,sans-serif", weight="bold")
 _WA_LEG  = dict(size=12, color="#1a3a6b", family="Inter,sans-serif", weight="bold")
 
-def _build_wabot():
+def _build_aiabot():
     """One row per WhatsApp bot message, enriched with the sender company's
     Segment (Paid / Free / Unknown) and mapped AIA deal.
       company_uuid -> aia_companies (account_id, company_name) -> AIA deal via
       login email. Segment: Paid = deal has payment_date; Free = ft_start_date
       known & no payment; else Unknown (incl. blank company_uuid = unknown number).
     Cached; rebuilt only on data reload (see _reload_data)."""
-    global _WABOT
-    if _WABOT is not None:
-        return _WABOT
+    global _aiaBOT
+    if _aiaBOT is not None:
+        return _aiaBOT
     try:
         m = _q(SUPABASE_URL,
             "SELECT message_id, sent_date, company_uuid::text AS cuid, "
             "message_type, interaction_type, intent, answer_status, user_id, "
             "user_request, reply_note "
-            "FROM public.wa_bot_messages WHERE is_internal IS NOT TRUE")
+            "FROM public.aia_bot_messages WHERE is_internal IS NOT TRUE")
     except Exception as ex:
-        print(f"[WARN] wa_bot_messages load failed: {ex}")
-        _WABOT = pd.DataFrame(); return _WABOT
+        print(f"[WARN] aia_bot_messages load failed: {ex}")
+        _aiaBOT = pd.DataFrame(); return _aiaBOT
     if m is None or len(m) == 0:
-        _WABOT = pd.DataFrame(); return _WABOT
+        _aiaBOT = pd.DataFrame(); return _aiaBOT
     m["sent_date"] = pd.to_datetime(m["sent_date"], errors="coerce")
     try:
         comp = _q(SUPABASE_URL, "SELECT company_id::text cuid, account_id::text acct, "
@@ -5590,32 +5590,32 @@ def _build_wabot():
         if pd.notna(r["deal_name"]):    return r["deal_name"]
         return f"Unknown ({r['user_id']})"
     m["co_name"] = m.apply(_coname, axis=1)
-    _WABOT = m
-    return _WABOT
+    _aiaBOT = m
+    return _aiaBOT
 
-def _wabot_refresh(state):
-    m = _build_wabot()
-    state.wabot_all = m
+def _aiabot_refresh(state):
+    m = _build_aiabot()
+    state.aiabot_all = m
     if m is None or len(m) == 0:
-        state.wabot_kpi_users = "0"; state.wabot_kpi_paid_users = "0"; state.wabot_kpi_ft_users = "0"
-        state.wabot_kpi_messages = "0"; state.wabot_kpi_messages_tip = ""
-        state.wabot_kpi_split = "—"; state.wabot_kpi_wau = "0"
-        state.wabot_kpi_success = "—"; state.wabot_kpi_success_tip = ""
-        state.wabot_stage_list = []; state.wabot_deal_list = []
-        state.wabot_adopt_fig = go.Figure(); state.wabot_intent_fig = go.Figure()
-        state.wabot_trend_fig = go.Figure()
-        state.wabot_fail_intent_list = []
-        state.wabot_fail_json = grid_payload_b64(pd.DataFrame())
-        state.wabot_table_json = grid_payload_b64(pd.DataFrame())
+        state.aiabot_kpi_users = "0"; state.aiabot_kpi_paid_users = "0"; state.aiabot_kpi_ft_users = "0"
+        state.aiabot_kpi_messages = "0"; state.aiabot_kpi_messages_tip = ""
+        state.aiabot_kpi_split = "—"; state.aiabot_kpi_wau = "0"
+        state.aiabot_kpi_success = "—"; state.aiabot_kpi_success_tip = ""
+        state.aiabot_stage_list = []; state.aiabot_deal_list = []
+        state.aiabot_adopt_fig = go.Figure(); state.aiabot_intent_fig = go.Figure()
+        state.aiabot_trend_fig = go.Figure()
+        state.aiabot_fail_intent_list = []
+        state.aiabot_fail_json = grid_payload_b64(pd.DataFrame())
+        state.aiabot_table_json = grid_payload_b64(pd.DataFrame())
         return
-    state.wabot_stage_list = sorted(m["deal_stage"].dropna().unique().tolist())
-    state.wabot_deal_list  = sorted(m["deal_name"].dropna().unique().tolist())
+    state.aiabot_stage_list = sorted(m["deal_stage"].dropna().unique().tolist())
+    state.aiabot_deal_list  = sorted(m["deal_name"].dropna().unique().tolist())
     base = m.copy()
-    _seg = _sel(state.wabot_segment)
+    _seg = _sel(state.aiabot_segment)
     if _seg: base = base[base["segment"].isin(_seg)]
-    _st = _sel(state.wabot_stage)
+    _st = _sel(state.aiabot_stage)
     if _st: base = base[base["deal_stage"].isin(_st)]
-    _dl = _sel(state.wabot_deal)
+    _dl = _sel(state.aiabot_deal)
     if _dl: base = base[base["deal_name"].isin(_dl)]
     # Shared ops date range (aia_start/end — same picker as AIA/VA Ops & Marketing
     # UTM) applies to KPIs / adoption / intent / table; the weekly trend below stays
@@ -5626,31 +5626,31 @@ def _wabot_refresh(state):
     # ── KPIs ──
     seg_co = d.groupby("segment")["co_key"].nunique().to_dict()    # companies per segment (Adoption chart)
     users  = d.groupby("segment")["user_id"].nunique().to_dict()   # distinct WA numbers per segment
-    state.wabot_kpi_users = _grp(d["user_id"].nunique())
-    state.wabot_kpi_paid_users = _grp(int(users.get('Paid', 0)))
-    state.wabot_kpi_ft_users = _grp(int(users.get('Free', 0)))
-    state.wabot_kpi_messages = _grp(len(d))
+    state.aiabot_kpi_users = _grp(d["user_id"].nunique())
+    state.aiabot_kpi_paid_users = _grp(int(users.get('Paid', 0)))
+    state.aiabot_kpi_ft_users = _grp(int(users.get('Free', 0)))
+    state.aiabot_kpi_messages = _grp(len(d))
     _mseg = d.groupby("segment").size().to_dict()
-    state.wabot_kpi_messages_tip = (f"Paid: {int(_mseg.get('Paid',0))}\n"
+    state.aiabot_kpi_messages_tip = (f"Paid: {int(_mseg.get('Paid',0))}\n"
                                     f"Free Trial: {int(_mseg.get('Free',0))}\n"
                                     f"Unknown: {int(_mseg.get('Unknown',0))}")
     up = int((d["interaction_type"] == "upload").sum()); qy = int((d["interaction_type"] == "query").sum())
-    state.wabot_kpi_split = (f"{round(up/(up+qy)*100)}% upload" if (up + qy) else "—")
+    state.aiabot_kpi_split = (f"{round(up/(up+qy)*100)}% upload" if (up + qy) else "—")
     if d["sent_date"].notna().any():
         mx = d["sent_date"].max().normalize()
-        state.wabot_kpi_wau = str(d[d["sent_date"] >= mx - pd.Timedelta(days=6)]["co_key"].nunique())
+        state.aiabot_kpi_wau = str(d[d["sent_date"] >= mx - pd.Timedelta(days=6)]["co_key"].nunique())
     else:
-        state.wabot_kpi_wau = "0"
+        state.aiabot_kpi_wau = "0"
     stt = d["answer_status"]; tot_status = int(stt.notna().sum())
     _succ = int((stt == "success").sum())
     if tot_status:
-        state.wabot_kpi_success = f"{round(_succ/tot_status*100)}%"
+        state.aiabot_kpi_success = f"{round(_succ/tot_status*100)}%"
         _nonsucc = stt[stt.notna() & (stt != "success")]
         _topreason = (_nonsucc.value_counts().idxmax() if len(_nonsucc) else "—")
-        state.wabot_kpi_success_tip = (f"{_succ} of {tot_status} succeeded\n"
+        state.aiabot_kpi_success_tip = (f"{_succ} of {tot_status} succeeded\n"
                                        f"{round((tot_status-_succ)/tot_status*100)}% failed · top reason: {_topreason}")
     else:
-        state.wabot_kpi_success = "—"; state.wabot_kpi_success_tip = ""
+        state.aiabot_kpi_success = "—"; state.aiabot_kpi_success_tip = ""
 
     # ── Chart A: adoption ──
     segs = ["Paid", "Free", "Unknown"]
@@ -5669,7 +5669,7 @@ def _wabot_refresh(state):
                        legend=dict(orientation="h", y=-0.16, font=_WA_LEG),
                        xaxis=dict(tickfont=_WA_AXIS),
                        yaxis=dict(range=[0, _amax * 1.18], tickfont=_WA_AXIS))
-    state.wabot_adopt_fig = figA
+    state.aiabot_adopt_fig = figA
 
     # ── Chart B: intent × interaction ──
     it = d[d["intent"].notna()]
@@ -5696,7 +5696,7 @@ def _wabot_refresh(state):
                        yaxis=dict(ticklabelstandoff=5,   # 5px gap between the intent name and the bar
                                   tickfont=dict(size=14, color="#1a3a6b",
                                                 family="Inter,sans-serif", weight="bold")))
-    state.wabot_intent_fig = figB
+    state.aiabot_intent_fig = figB
 
     # ── Chart C: weekly trend ── built from `base` (all weeks; ignores the date
     # range) but still respects the Segment / Deal Stage / Deal Name dropdowns.
@@ -5751,12 +5751,12 @@ def _wabot_refresh(state):
                        yaxis2=dict(title=dict(text="Companies", font=_WA_AXIS), tickfont=_WA_AXIS,
                                    overlaying="y", side="right", showgrid=False,
                                    range=([0, _comax * 1.5] if _comax else None)))
-    state.wabot_trend_fig = figC
+    state.aiabot_trend_fig = figC
 
     # ── Where the bot falls short — table of non-success messages (own Intent filter) ──
     fail = d[d["answer_status"].notna() & (d["answer_status"] != "success")].copy()
-    state.wabot_fail_intent_list = sorted(fail["intent"].dropna().unique().tolist())
-    _fi = _sel(state.wabot_fail_intent)
+    state.aiabot_fail_intent_list = sorted(fail["intent"].dropna().unique().tolist())
+    _fi = _sel(state.aiabot_fail_intent)
     if _fi:
         fail = fail[fail["intent"].isin(_fi)]
     if len(fail):
@@ -5770,7 +5770,7 @@ def _wabot_refresh(state):
             "Company": fail["co_name"],
         }).reset_index(drop=True)
         fdf.insert(0, "Sl no", range(1, len(fdf) + 1))
-        state.wabot_fail_json = grid_payload_b64(
+        state.aiabot_fail_json = grid_payload_b64(
             fdf, rownum_col="Sl no", sortable=True, no_sort=True, hdr_center=True,
             fixed_layout=True,   # columns ellipsize right at their own edge
             center_cols=["Date", "Status"],   # these cells centered; Intent/User Request/Bot Reply/Company left
@@ -5778,7 +5778,7 @@ def _wabot_refresh(state):
                    "User Request": 300, "Bot Reply": 520, "Company": 240},
             date_cols=["Date"])
     else:
-        state.wabot_fail_json = grid_payload_b64(pd.DataFrame())
+        state.aiabot_fail_json = grid_payload_b64(pd.DataFrame())
 
     # ── Table ──
     rows = []
@@ -5805,7 +5805,7 @@ def _wabot_refresh(state):
         })
     t = pd.DataFrame(rows).sort_values("Messages", ascending=False).reset_index(drop=True)
     t.insert(0, "Sl no", range(1, len(t) + 1))
-    state.wabot_table_json = grid_payload_b64(
+    state.aiabot_table_json = grid_payload_b64(
         t, sort_default_col="Messages", rownum_col="Sl no",
         col_w={"Company": 240, "Deal Name": 220, "WA Number": 150},
         center_cols=["Deal Stage", "Segment", "WA Number", "Messages", "Uploads", "Queries",
@@ -5824,7 +5824,7 @@ from pages.cs_finance import CS_FINANCE_PAGE
 from pages.marketing  import MARKETING_PAGE
 from pages.va_ops     import VA_OPS_PAGE
 from pages.va_finance import VA_FINANCE_PAGE
-from pages.wa_bot     import WA_BOT_PAGE
+from pages.aia_bot     import AIA_BOT_PAGE
 
 ROOT_PAGE = """
 <|↺|button|id=reset-filters-btn|on_action=on_reset_filters|class_name=hidden-reset|>
@@ -5841,7 +5841,7 @@ nav_links = [
     ("/marketing",  "Marketing"),
     ("/va-ops",     "VA Ops"),
     ("/va-finance", "VA Finance"),
-    ("/wa-bot",     "WA Bot"),
+    ("/aia-bot",     "AIA Bot"),
 ]
 
 pages = {
@@ -5851,7 +5851,7 @@ pages = {
     "marketing":  MARKETING_PAGE,
     "va-ops":     VA_OPS_PAGE,
     "va-finance": VA_FINANCE_PAGE,
-    "wa-bot":     WA_BOT_PAGE,
+    "aia-bot":     AIA_BOT_PAGE,
 }
 
 # ═══════════════════════════════════════════════════════════════════
