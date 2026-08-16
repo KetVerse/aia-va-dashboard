@@ -394,7 +394,7 @@ _DATERANGE_SCRIPT = """
       }
       obs.observe(document.body, {childList: true, subtree: true});
       settle = setTimeout(fire, 700);   // in case no mutations fire at all
-      cap    = setTimeout(fire, 4000);  // hard cap
+      cap    = setTimeout(fire, 1000);  // hard cap
     }
   }, true);
 })();
@@ -5542,6 +5542,11 @@ def _build_aiabot():
     if m is None or len(m) == 0:
         _aiaBOT = pd.DataFrame(); return _aiaBOT
     m["sent_date"] = pd.to_datetime(m["sent_date"], errors="coerce")
+    
+    # Sort by date first so .last() reliably grabs their most recent company UUID
+    uid_to_cuid = m.dropna(subset=["cuid"]).sort_values("sent_date").groupby("user_id")["cuid"].last()
+    m["cuid"] = m["cuid"].fillna(m["user_id"].map(uid_to_cuid))
+    
     try:
         comp = _q(SUPABASE_URL, "SELECT company_id::text cuid, account_id::text acct, "
                                 "company_name, created_by_email email FROM public.aia_companies")
@@ -5677,7 +5682,7 @@ def _aiabot_refresh(state):
     if len(it):
         piv = it.groupby(["intent", "interaction_type"]).size().unstack(fill_value=0)
         piv["_tot"] = piv.sum(axis=1); piv = piv.sort_values("_tot")
-        for itype, color in [("upload", "#3b82c4"), ("query", "#e0872f")]:
+        for itype, color in [("upload", "#3b82c4"), ("query", "#e0872f"), ("voice", "#7b8794")]:
             if itype in piv.columns:
                 _vals = piv[itype].tolist()
                 # value sits ON the segment (trace text) so it disappears when the
