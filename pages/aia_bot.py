@@ -82,7 +82,7 @@ Success Rate
 |>
 
 <|part|class_name=chart-card|
-**Weekly Usage **  (messages + active companies per week)
+**Weekly Usage Trend**  (messages + active companies per week)
 
 <|chart|figure={aiabot_trend_fig}|plot_config={chart_config}|>
 |>
