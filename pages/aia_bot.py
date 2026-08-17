@@ -41,7 +41,7 @@ Paid Users
 
 <|{aiabot_kpi_paid_users}|text|class_name=kpi-value|>
 |>
-<|part|class_name=kpi-card kpi-blue|
+<|part|class_name=kpi-card kpi-amber|
 FT Users
 
 <|{aiabot_kpi_ft_users}|text|class_name=kpi-value|>
@@ -99,6 +99,30 @@ Success Rate
 <|{aiabot_fail_json}|text|mode=raw|>
 |>
 <iframe src="/grid/aiabot_fail" class="grid-frame" style="width:100%;height:540px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**AIA Bot Activity Cohort**
+
+<|layout|columns=1 1 1|gap=12px|
+<|part|
+<div class="msc wide" data-key="aiabot_cohort_company"><div class="msc-cap">Company</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aiabot_cohort_company_ms}|text|mode=raw|class_name=msc-data msc-data-aiabot_cohort_company|>
+|>
+<|part|
+<div class="msc wide" data-key="aiabot_cohort_intent"><div class="msc-cap">Intent</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aiabot_cohort_intent_ms}|text|mode=raw|class_name=msc-data msc-data-aiabot_cohort_intent|>
+|>
+<|part|
+<div class="msc" data-key="aiabot_cohort_view"><div class="msc-cap">View</div><div class="msc-box"><span class="msc-text">Both</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aiabot_cohort_view_ms}|text|mode=raw|class_name=msc-data msc-data-aiabot_cohort_view|>
+|>
+|>
+
+<|part|class_name=gridholder gridholder-aiabot_cohort|
+<|{aiabot_cohort_json}|text|mode=raw|>
+|>
+<iframe src="/grid/aiabot_cohort" class="grid-frame" style="width:100%;height:450px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|

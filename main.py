@@ -1250,10 +1250,10 @@ def _mkt_utm_render(data, view):
         g = (lambda k: S(k)) if tot else (lambda k: d[k])
         r = {"UTM Source": ("Total" if tot else d["src"], "", "")}
         if view == "Total":
-            # order follows the funnel: Leads -> MQL (Deals) -> WA Bot -> DS -> ...
+            # order follows the funnel: Leads -> MQL (Deals) -> AIA Bot -> DS -> ...
             # "deals" is the same cohort count the Percentages view uses as its base.
             for k, col in (("leads", "Leads"), ("deals", "MQL (Deals)"),
-                           ("wa_bot", "WA Bot"), ("ds", "DS"), ("dc", "DC"),
+                           ("wa_bot", "AIA Bot"), ("ds", "DS"), ("dc", "DC"),
                            ("hps", "High PS"), ("ft", "FT Started"), ("tot_paid", "Tot Paid"),
                            ("revenue", "Revenue"), ("mrr", "MRR")):
                 r[col] = (int(g(k)), "", "")
@@ -1728,7 +1728,7 @@ def _load_all():
                     "cs_owner","prospect_score","asked_refund","utm_campaign","utm_source",
                     "login_email_id","aia_discard_reason","aia_parked_reason","aia_lost_reason",
                     "statement_frequency","bill_frequency","amount?","days_extended","poc_number","poc_email",
-                    "wa_bot_date","ft_start_date"]
+                    "aia_bot_date","ft_start_date"]
         cols_va  = ["record_id","deal_name","deal_stage","deal_owner","deal_source","create_date",
                     "ds_date","dc_date","eta_pay_date","payment_date","amount_paid","billing_cycle",
                     "ot_amount_paid","ot_payment_date","renewed_date","parked_date","discard_date",
@@ -1778,7 +1778,7 @@ def _prep_aia(df):
     df = _dates(df, ["create_date","ds_date","dc_date","eta_pay_date","payment_date",
                      "integration_done_date","activation_date","adopted_date","renewed_date",
                      "parked_date","discard_date","closed_lost_date","churned_date",
-                     "wa_bot_date","ft_start_date"])
+                     "aia_bot_date","ft_start_date"])
     df = _nums(df, ["amount_paid","prospect_score","days_extended"])
     if "amount?" in df.columns:
         df["amount_expected"] = pd.to_numeric(df["amount?"], errors="coerce").fillna(0)
@@ -2159,7 +2159,7 @@ def _reload_data():
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
-    _aiaBOT = None          # rebuilt lazily on next WA Bot refresh
+    _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
@@ -2638,7 +2638,7 @@ def _aia_ops_refresh(state):
         paid_no_refund = pd2[pd2["asked_refund"] != "Yes"] if "asked_refund" in pd2.columns else pd2
         rows.append({
             "GM":         owner,
-            "WA Bot":     _rng(o,"wa_bot_date",s,e)["record_id"].nunique(),
+            "AIA Bot":    _rng(o,"aia_bot_date",s,e)["record_id"].nunique(),
             "DS":         _rng(o,"ds_date",s,e)["record_id"].nunique(),
             "DC":         _rng(o,"dc_date",s,e)["record_id"].nunique(),
             "HI (ATP)":   _rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
@@ -2676,7 +2676,7 @@ def _aia_ops_refresh(state):
         mrr_u = int(_AIA_LI[_AIA_LI["record_id"].isin(pd3["record_id"])]["mrr"].sum())
         rows2.append({
             "UTM Source": src,
-            "WA Bot": _cin(c, "wa_bot_date"),
+            "AIA Bot": _cin(c, "aia_bot_date"),
             "DS":     _cin(c, "ds_date"),
             "DC":     _cin(c, "dc_date"),
             "HI (ATP)": c[c["eta_pay_date"].notna()&(c["eta_pay_date"]>=s)&(c["eta_pay_date"]<=e)&(c["deal_stage"]=="High Intent")]["record_id"].nunique(),
@@ -4089,7 +4089,7 @@ def _mkt_refresh(state):
                  & (c["dc_date"] >= _us) & (c["dc_date"] <= _ue)]["record_id"].nunique()
                if {"dc_date", "prospect_score"}.issubset(c.columns) else 0)
         _udata.append({
-            "src": _src, "deals": _de, "wa_bot": _ucin(c, "wa_bot_date"),
+            "src": _src, "deals": _de, "wa_bot": _ucin(c, "aia_bot_date"),
             "leads": int(_leads_src.get(_src, 0)), "ds": _ucin(c, "ds_date"), "dc": _ucin(c, "dc_date"),
             "hps": hps, "ft": _ucin(c, "ft_start_date"),
             "tot_paid": pd3[pd3["module_type"].isin(["AIA Paid", "GST Paid"])]["record_id"].nunique() if "module_type" in pd3.columns else 0,
@@ -4781,13 +4781,26 @@ aia_ft_deal_ms = _ms_json([], []); aia_ft_gm_ms = _ms_json([], []); aia_ft_stage
 aiabot_all = None
 aiabot_segment = []; aiabot_stage = []; aiabot_deal = []
 aiabot_stage_list = []; aiabot_deal_list = []
-aiabot_segment_ms = _ms_json(["Paid", "Free", "Unknown"], []); aiabot_stage_ms = _ms_json([], []); aiabot_deal_ms = _ms_json([], [])
+aiabot_segment_ms = _ms_json(["Paid", "FT", "Unknown"], []); aiabot_stage_ms = _ms_json([], []); aiabot_deal_ms = _ms_json([], [])
 aiabot_kpi_users = "0"; aiabot_kpi_paid_users = "0"; aiabot_kpi_ft_users = "0"
 aiabot_kpi_messages = "0"; aiabot_kpi_messages_tip = ""; aiabot_kpi_split = "—"
 aiabot_kpi_wau = "0"; aiabot_kpi_success = "—"; aiabot_kpi_success_tip = ""
 aiabot_table_json = ""
 aiabot_adopt_fig = go.Figure(); aiabot_intent_fig = go.Figure(); aiabot_trend_fig = go.Figure()
 aiabot_fail_json = ""; aiabot_fail_intent = []; aiabot_fail_intent_list = []; aiabot_fail_intent_ms = _ms_json([], [])
+
+# AIA Bot Activity Cohort
+aiabot_cohort_json = ""
+aiabot_cohort_intent = []
+aiabot_cohort_intent_list = []
+aiabot_cohort_intent_ms = _ms_json([], [])
+aiabot_cohort_company = []
+aiabot_cohort_company_list = []
+aiabot_cohort_company_ms = _ms_json([], [])
+aiabot_cohort_view = []
+aiabot_cohort_view_list = ["Cohort %", "Users"]
+aiabot_cohort_view_ms = _ms_json(aiabot_cohort_view_list, [])
+
 aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_hi=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
@@ -4838,7 +4851,7 @@ cs_activity_deal = []; cs_activity_stage = []; cs_activity_csm = []
 # ── Matrix explainer tooltips (ⓘ next to each matrix heading) ────────────────
 # Multi-line bullet text lives in vars (the inline control syntax can't hold line
 # breaks); .MuiTooltip-tooltip has white-space: pre-line so the \n render as lines.
-cs_rev_tip = ("Revenue Matrix (₹)\n"
+cs_rev_tip = ("MRR Matrix (₹)\n"
               "• Cohort Spread: Based on MRR\n"
               "• Fresh Renewals: Monthly cash collected\n"
               "• Total: Sum of cohort MRR")
@@ -5035,7 +5048,7 @@ def on_aia_filter_change(state):
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
     _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-    _aiabot_refresh(state)   # WA Bot shares the ops date range too
+    _aiabot_refresh(state)   # AIA Bot shares the ops date range too
 def on_cs_filter_change(state):  _cs_refresh(state); _sync_ms(state)
 def on_cs_usage_filter(state):   _apply_usage_filter(state); _sync_ms(state)
 def on_mkt_filter_change(state): _mkt_refresh(state)
@@ -5046,7 +5059,7 @@ def on_va_filter_change(state):
     _aia_ops_refresh(state)
     _va_ops_refresh(state)
     _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-    _aiabot_refresh(state)   # WA Bot shares the ops date range too
+    _aiabot_refresh(state)   # AIA Bot shares the ops date range too
 def on_vaf_filter_change(state): _vaf_refresh(state); _sync_ms(state)
 
 # Single-box date-range pickers (AIA/VA Ops): split the [start, end] list back into
@@ -5077,6 +5090,9 @@ _MS_DISPATCH = {
     "aiabot_stage":    ("aiabot_stage",            "aiabot"),
     "aiabot_deal":     ("aiabot_deal",             "aiabot"),
     "aiabot_fail_intent": ("aiabot_fail_intent",   "aiabot"),
+    "aiabot_cohort_intent":  ("aiabot_cohort_intent",  "aiabot"),
+    "aiabot_cohort_company": ("aiabot_cohort_company", "aiabot"),
+    "aiabot_cohort_view":    ("aiabot_cohort_view",    "aiabot"),
     "va_owner":       ("va_selected_owner",      "va"),
     "va_campaign":    ("va_selected_campaign",   "va"),
     "mkt_channel":    ("mkt_selected_channel",   "mkt"),
@@ -5219,7 +5235,7 @@ def _sync_ms(state):
     state.aia_ft_gm_ms    = _ms_json(_flov("GM"),        state.aia_ft_gm)
     state.aia_ft_stage_ms = _ms_json(_flov("Stage"),     state.aia_ft_stage)
 
-    # WA Bot: Segment (fixed lov) / Deal Stage / Deal Name cross-filter
+    # AIA Bot: Segment (fixed lov) / Deal Stage / Deal Name cross-filter
     _wa = state.aiabot_all
     def _walov(target):
         d = _wa
@@ -5233,10 +5249,13 @@ def _sync_ms(state):
             if s:
                 d = d[d[col].isin(s)]
         return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.aiabot_segment_ms = _ms_json(["Paid", "Free", "Unknown"], state.aiabot_segment)
+    state.aiabot_segment_ms = _ms_json(["Paid", "FT", "Unknown"], state.aiabot_segment)
     state.aiabot_stage_ms   = _ms_json(_walov("deal_stage"), state.aiabot_stage)
     state.aiabot_deal_ms    = _ms_json(_walov("deal_name"),  state.aiabot_deal)
     state.aiabot_fail_intent_ms = _ms_json(state.aiabot_fail_intent_list, state.aiabot_fail_intent)
+    state.aiabot_cohort_intent_ms  = _ms_json(state.aiabot_cohort_intent_list,  state.aiabot_cohort_intent)
+    state.aiabot_cohort_company_ms = _ms_json(state.aiabot_cohort_company_list, state.aiabot_cohort_company)
+    state.aiabot_cohort_view_ms    = _ms_json(aiabot_cohort_view_list, state.aiabot_cohort_view)
 
     # VA Deal Name options depend on the selected Recurring Type(s)
     _vrt = _sel(state.vaf_selected_rectype)
@@ -5310,6 +5329,12 @@ def on_ms_change(state):
         return
     var, scope = _MS_DISPATCH[key]
     setattr(state, var, sel)
+    # AIA Bot: the cohort Intent filter and the "falls short" Intent filter mirror
+    # each other, so picking an intent in one place applies to both tables.
+    if key == "aiabot_cohort_intent":
+        state.aiabot_fail_intent = sel
+    elif key == "aiabot_fail_intent":
+        state.aiabot_cohort_intent = sel
     if scope == "aia":     on_aia_filter_change(state)
     elif scope == "aiaft": _apply_ft_filter(state)
     elif scope == "aiabot": _aiabot_refresh(state)
@@ -5512,19 +5537,19 @@ def _auto_refresh_loop(gui):
                 print(f"[auto-refresh] error: {ex}")
 
 # ═══════════════════════════════════════════════════════════════════
-# PAGE — AIA BOT (WhatsApp bot usage tracker)
+# PAGE — AIA BOT (AIA bot usage tracker)
 # ═══════════════════════════════════════════════════════════════════
 _aiaBOT = None   # cached message-level frame (enriched); rebuilt on data reload
-_WA_SEG_COLORS = {"Paid": "#2e8b57", "Free": "#e0952f", "Unknown": "#7b8794"}
+_WA_SEG_COLORS = {"Paid": "#2e8b57", "FT": "#e0952f", "Unknown": "#7b8794"}
 # bold navy fonts for axes / legend (matches the AIA Ops chart styling)
 _WA_AXIS = dict(size=13, color="#1a3a6b", family="Inter,sans-serif", weight="bold")
 _WA_LEG  = dict(size=12, color="#1a3a6b", family="Inter,sans-serif", weight="bold")
 
 def _build_aiabot():
-    """One row per WhatsApp bot message, enriched with the sender company's
-    Segment (Paid / Free / Unknown) and mapped AIA deal.
+    """One row per AIA bot message, enriched with the sender company's
+    Segment (Paid / FT / Unknown) and mapped AIA deal.
       company_uuid -> aia_companies (account_id, company_name) -> AIA deal via
-      login email. Segment: Paid = deal has payment_date; Free = ft_start_date
+      login email. Segment: Paid = deal has payment_date; FT = ft_start_date
       known & no payment; else Unknown (incl. blank company_uuid = unknown number).
     Cached; rebuilt only on data reload (see _reload_data)."""
     global _aiaBOT
@@ -5576,7 +5601,7 @@ def _build_aiabot():
         if src is not None:
             stage = src["deal_stage"]; dname = src["deal_name"]; rid = src["record_id"]
             if   pd.notna(src["payment_date"]):   seg = "Paid"
-            elif pd.notna(src["ft_start_date"]):  seg = "Free"
+            elif pd.notna(src["ft_start_date"]):  seg = "FT"
             else:                                 seg = "Unknown"
         return seg, cname, dname, stage, rid
     attr = {c: _co_attr(c) for c in m["cuid"].dropna().unique().tolist()}
@@ -5597,6 +5622,96 @@ def _build_aiabot():
     m["co_name"] = m.apply(_coname, axis=1)
     _aiaBOT = m
     return _aiaBOT
+
+def _aiabot_cohort_matrix(messages_df, intent_filter=None, company_filter=None, mode="all"):
+    """WoW retention heatmap for AIA Bot users (up to 12 weeks).
+
+    SINGLE-COHORT rule: each user is locked to ONE row — the Monday-week of their
+    FIRST message ("Users Started"). Any later message only lights up the Wn cell
+    of that original cohort row; it never adds to another week's Users Started, so
+    that column tracks brand-new users only (no double-count).
+
+    Columns grow with the OLDEST displayed cohort's age (W1..Wn) — no empty future
+    columns; it auto-extends by one each week.
+
+    Built with the CS-cohort helper's 'Integration Week' / 'Integrated' headers so
+    the count/% merge maths works, then renamed to 'Bot Start Week' / 'Users
+    Started' for the UI. The current in-progress week is excluded throughout.
+    """
+    if messages_df is None or len(messages_df) == 0:
+        return pd.DataFrame(), {}
+
+    df = messages_df.dropna(subset=["user_id", "sent_date"]).copy()
+    if company_filter:
+        df = df[df["co_name"].isin(company_filter)]
+    if len(df) == 0:
+        return pd.DataFrame(), {}
+
+    # each user's first-message week (Monday) = their single, fixed cohort
+    first_dates = df.groupby("user_id")["sent_date"].min().dt.normalize()
+    user_start_mon = first_dates - pd.to_timedelta(first_dates.dt.weekday, unit="D")
+    user_start_map = user_start_mon.to_dict()
+    cohort_of = {}
+    for uid, sw in user_start_map.items():
+        cohort_of.setdefault(sw, []).append(uid)
+
+    # activity weeks (user, Monday) — the Intent filter narrows what counts as active
+    act_df = df.copy()
+    if intent_filter:
+        act_df = act_df[act_df["intent"].isin(intent_filter)]
+    act_norm = act_df["sent_date"].dt.normalize()
+    act_df["msg_mon"] = act_norm - pd.to_timedelta(act_norm.dt.weekday, unit="D")
+    active_weeks_set = set(zip(act_df["user_id"], act_df["msg_mon"]))
+
+    # last fully-completed Mon–Sun week (the in-progress week is excluded)
+    today = pd.Timestamp(date.today()).normalize()
+    last_complete_mon = (today - pd.Timedelta(days=today.weekday())) - pd.Timedelta(days=7)
+
+    unique_start_wks = sorted(w for w in user_start_mon.unique() if w <= last_complete_mon)[-12:]
+    if not unique_start_wks:
+        return pd.DataFrame(), {}
+
+    # dynamic width: only as many W columns as the OLDEST cohort has aged (cap 12)
+    oldest = pd.Timestamp(unique_start_wks[0])
+    max_off = max(1, min(12, int((last_complete_mon - oldest).days // 7) + 1))
+    OFFS = list(range(max_off))
+
+    cnt_rows, pct_rows = [], []
+    tot_users = 0
+    tot_act = {o: 0 for o in OFFS}; tot_size = {o: 0 for o in OFFS}; tot_valid = {o: False for o in OFFS}
+
+    for wk in unique_start_wks:
+        wk = pd.Timestamp(wk)
+        cohort_users = cohort_of.get(wk, [])
+        size = len(cohort_users); tot_users += size
+        label = wk.strftime("%d %b")
+        crow = {"Integration Week": label, "Integrated": size}
+        prow = {"Integration Week": label, "Integrated": size}
+        for o in OFFS:
+            cws = wk + pd.Timedelta(days=o * 7)
+            col = f"W{o+1}"
+            if cws > last_complete_mon:                # future for this cohort -> blank
+                crow[col] = ""; prow[col] = ""; continue
+            active = sum(1 for u in cohort_users if (u, cws) in active_weeks_set)
+            crow[col] = active
+            prow[col] = f"{round(active / size * 100) if size else 0}%"
+            tot_act[o] += active; tot_size[o] += size; tot_valid[o] = True
+        cnt_rows.append(crow); pct_rows.append(prow)
+
+    # weighted-average Total row
+    cnt_tot = {"Integration Week": "Total", "Integrated": tot_users}
+    pct_tot = {"Integration Week": "Total", "Integrated": tot_users}
+    for o in OFFS:
+        col = f"W{o+1}"
+        cnt_tot[col] = tot_act[o] if tot_valid[o] else ""
+        tp = round(tot_act[o] / tot_size[o] * 100) if (tot_valid[o] and tot_size[o]) else 0
+        pct_tot[col] = f"{tp}%" if tot_valid[o] else ""
+    cnt_rows.append(cnt_tot); pct_rows.append(pct_tot)
+
+    cnt_df, pct_df = pd.DataFrame(cnt_rows), pd.DataFrame(pct_rows)
+    merged, heat_from = _merge_cohort_pct_count(cnt_df, pct_df, mode=mode)
+    merged = merged.rename(columns={"Integration Week": "Bot Start Week", "Integrated": "Users Started"})
+    return merged, heat_from
 
 def _aiabot_refresh(state):
     m = _build_aiabot()
@@ -5633,11 +5748,11 @@ def _aiabot_refresh(state):
     users  = d.groupby("segment")["user_id"].nunique().to_dict()   # distinct WA numbers per segment
     state.aiabot_kpi_users = _grp(d["user_id"].nunique())
     state.aiabot_kpi_paid_users = _grp(int(users.get('Paid', 0)))
-    state.aiabot_kpi_ft_users = _grp(int(users.get('Free', 0)))
+    state.aiabot_kpi_ft_users = _grp(int(users.get('FT', 0)))
     state.aiabot_kpi_messages = _grp(len(d))
     _mseg = d.groupby("segment").size().to_dict()
     state.aiabot_kpi_messages_tip = (f"Paid: {int(_mseg.get('Paid',0))}\n"
-                                    f"Free Trial: {int(_mseg.get('Free',0))}\n"
+                                    f"FT: {int(_mseg.get('FT',0))}\n"
                                     f"Unknown: {int(_mseg.get('Unknown',0))}")
     up = int((d["interaction_type"] == "upload").sum()); qy = int((d["interaction_type"] == "query").sum())
     state.aiabot_kpi_split = (f"{round(up/(up+qy)*100)}% upload" if (up + qy) else "—")
@@ -5658,8 +5773,8 @@ def _aiabot_refresh(state):
         state.aiabot_kpi_success = "—"; state.aiabot_kpi_success_tip = ""
 
     # ── Chart A: adoption ──
-    segs = ["Paid", "Free", "Unknown"]
-    seg_labels = ["Paid", "Free Trials", "Unknown"]
+    segs = ["Paid", "FT", "Unknown"]
+    seg_labels = ["Paid", "FT", "Unknown"]
     co_counts  = [int(seg_co.get(s, 0)) for s in segs]
     msg_counts = [int((d["segment"] == s).sum()) for s in segs]
     figA = go.Figure()
@@ -5758,12 +5873,21 @@ def _aiabot_refresh(state):
                                    range=([0, _comax * 1.5] if _comax else None)))
     state.aiabot_trend_fig = figC
 
-    # ── Where the bot falls short — table of non-success messages (own Intent filter) ──
+    # ── Where the bot falls short — non-success messages (Intent synced with the
+    # cohort Intent filter; Company filter also applies here) ──
+    _c_company = _sel(state.aiabot_cohort_company)
+    _c_intent  = _sel(state.aiabot_cohort_intent)   # synced with aiabot_fail_intent
+    # Company ↔ Intent cross-filter each other's option lists: each list narrows by
+    # the OTHER's selection, so picking an intent trims the Company dropdown & vice versa.
+    _int_scoped  = base if not _c_company else base[base["co_name"].isin(_c_company)]
+    _co_scoped   = base if not _c_intent  else base[base["intent"].isin(_c_intent)]
+    _intent_lov  = sorted(_int_scoped["intent"].dropna().unique().tolist())
+    _company_lov = sorted(_co_scoped["co_name"].dropna().unique().tolist())
+    state.aiabot_fail_intent_list = _intent_lov
     fail = d[d["answer_status"].notna() & (d["answer_status"] != "success")].copy()
-    state.aiabot_fail_intent_list = sorted(fail["intent"].dropna().unique().tolist())
     _fi = _sel(state.aiabot_fail_intent)
-    if _fi:
-        fail = fail[fail["intent"].isin(_fi)]
+    if _fi:        fail = fail[fail["intent"].isin(_fi)]
+    if _c_company: fail = fail[fail["co_name"].isin(_c_company)]
     if len(fail):
         fail = fail.sort_values("sent_date", ascending=False)
         fdf = pd.DataFrame({
@@ -5784,10 +5908,34 @@ def _aiabot_refresh(state):
             date_cols=["Date"])
     else:
         state.aiabot_fail_json = grid_payload_b64(pd.DataFrame())
+    # ── AIA Bot Activity Cohort ──
+    state.aiabot_cohort_intent_list = _intent_lov
+    state.aiabot_cohort_company_list = _company_lov
 
-    # ── Table ──
+    _c_view = _sel(state.aiabot_cohort_view)
+    # View: "Cohort %" -> % only, "Users" -> counts only, else both (default).
+    _c_mode = ("pct" if _c_view == ["Cohort %"] else "count" if _c_view == ["Users"] else "all")
+
+    coh_df, coh_heat_from = _aiabot_cohort_matrix(base, intent_filter=_c_intent,
+                                                  company_filter=_c_company, mode=_c_mode)
+    _coh_heat = {c: "green" for c in coh_df.columns if str(c).startswith("W")}
+
+    if len(coh_df):
+        state.aiabot_cohort_json = grid_payload_b64(
+            coh_df, total_id_col="Bot Start Week",
+            no_sort=True, fixed=True, sortable=False,
+            center_all=True, heat_cols=_coh_heat, autosize=True,
+            heat_from=coh_heat_from, heat_max=100
+        )
+    else:
+        state.aiabot_cohort_json = grid_payload_b64(pd.DataFrame())
+    
+    # ── Per-Company Detail ── also respects the cohort Company + Intent filters
+    dpc = d
+    if _c_company: dpc = dpc[dpc["co_name"].isin(_c_company)]
+    if _c_intent:  dpc = dpc[dpc["intent"].isin(_c_intent)]
     rows = []
-    for ck, grp in d.groupby("co_key"):
+    for ck, grp in dpc.groupby("co_key"):
         st2 = grp["answer_status"]; tots = int(st2.notna().sum())
         intent_top = grp["intent"].dropna()
         # phone-shaped user_ids only — a few messages mis-log the company UUID in

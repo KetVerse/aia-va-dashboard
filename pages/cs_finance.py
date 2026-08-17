@@ -84,7 +84,7 @@ Integration Due
 |>
 
 <|part|class_name=chart-card|
-**Revenue Matrix (₹)** <|ⓘ|text|hover_text={cs_rev_tip}|class_name=info-ico|>
+**MRR Matrix (₹)** <|ⓘ|text|hover_text={cs_rev_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-cs_revenue|
 <|{cs_revenue_matrix_json}|text|mode=raw|>

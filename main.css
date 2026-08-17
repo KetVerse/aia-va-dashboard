@@ -258,6 +258,7 @@ body {
 .kpi-green  { background: #16a34a; }
 .kpi-red    { background: #dc2626; }
 .kpi-orange { background: #ea580c; }
+.kpi-amber { background: #e0952f; }
 .kpi-grey   { background: #475569; }
 
 /* ── Chart Cards ────────────────────────────────────────────────────────── */
