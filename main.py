@@ -5774,7 +5774,7 @@ def _aiabot_refresh(state):
 
     # ── Chart A: adoption ──
     segs = ["Paid", "FT", "Unknown"]
-    seg_labels = ["Paid", "FT", "Unknown"]
+    seg_labels = ["Paid", "Free Trials", "Unknown"]   # x-axis display only; segment value stays "FT"
     co_counts  = [int(seg_co.get(s, 0)) for s in segs]
     msg_counts = [int((d["segment"] == s).sum()) for s in segs]
     figA = go.Figure()
