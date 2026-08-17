@@ -3333,7 +3333,8 @@ def _cs_refresh(state):
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Marketing "Daily signals" panel ──────────────────────────────────────────
-_FT_TEMPLATES = {"initial_verification", "demo_details", "updated_demo_details"}
+_FT_TEMPLATES = {"initial_verification", "demo_details", "updated_demo_details",
+                 "initial_verification_free_trial", "updated_demo_details_free_trial_session"}
 _DS_TEMPLATES = {"demo_details", "updated_demo_details"}
 _DELIVERED_STATUS = {"delivered", "read"}
 
