@@ -3799,7 +3799,9 @@ def _daily_signals_html(day=None, channel="All"):
                 out.append({"v": None, "size": 0, "tip": f"{d.strftime('%d %b')} · no data"})
                 continue
             pct = (100.0 * t / gm_avg) if gm_avg else 0.0
-            body = "\n".join(f"{gm} — {n}" for gm, n in gm_lines.get(d, []))
+            _rows = gm_lines.get(d, [])
+            _w = max((len(gm) for gm, _ in _rows), default=0)   # pad names to a column (tip is monospace)
+            body = "\n".join(f"{gm.ljust(_w)}  {n:>2}" for gm, n in _rows)
             out.append({"v": float(t), "size": 1,
                         "color": _spark_hex(_rate_color(pct, 90, 75)),
                         "tip": f"{d.strftime('%d %b')} · {t} slots" + (f"\n{body}" if body else "")})

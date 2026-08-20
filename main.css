@@ -633,7 +633,7 @@ table.taipy-table thead tr th,
 }
 .dsig-grid {
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     gap: 10px;
 }
 .dsig-card {
@@ -668,6 +668,7 @@ table.taipy-table thead tr th,
     white-space: pre;          /* renders \n in multi-line tips (e.g. GM slots breakdown); single-line tips unaffected */
     text-align: left;
     line-height: 1.35;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;  /* aligns the GM/count columns */
     pointer-events: none;
     z-index: 9999;
     box-shadow: 0 2px 6px rgba(0,0,0,0.25);
