@@ -1701,6 +1701,34 @@ def _load_signals():
         print(f"[WARN] contacts_hs load failed: {ex} -- using empty frame")
     return ga, conv, contacts
 
+def _load_gm_slots():
+    """Marketing Daily-signals: GM demo-slot inventory (public.gm_slots_inventory)
+    from Supabase, bounded to a rolling 45-day window and guarded so a failure just
+    yields an empty frame. Columns: date, gm, slots_avl, created_at."""
+    df = pd.DataFrame(columns=["date", "gm", "slots_avl", "created_at"])
+    try:
+        df = _q(SUPABASE_URL,
+            "SELECT date, gm, slots_avl, created_at FROM public.gm_slots_inventory "
+            "WHERE date >= current_date - interval '45 days'",
+            statement_timeout_ms=20000)
+    except Exception as ex:
+        print(f"[WARN] gm_slots_inventory load failed: {ex} -- using empty frame")
+    return df
+
+def _prep_gm_slots(df):
+    """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
+    same-day re-write via created_at doesn't double-count."""
+    df = df.copy() if df is not None else pd.DataFrame()
+    if not len(df):
+        return df
+    df["_d"] = pd.to_datetime(df.get("date"), errors="coerce").dt.normalize()
+    df["slots_avl"] = pd.to_numeric(df.get("slots_avl"), errors="coerce").fillna(0)
+    df["gm"] = df.get("gm").astype(str).str.strip()
+    if "created_at" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True)
+        df = df.sort_values("created_at").drop_duplicates(subset=["_d", "gm"], keep="last")
+    return df[df["_d"].notna()]
+
 def _load_all():
     try:
         # aia_live / va_live date columns (create_date, ds_date, dc_date, payment_date, ...)
@@ -1912,6 +1940,7 @@ def _prep_signals(ga, conv, contacts=None):
 
 _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
 _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
+_GM_SLOTS = _prep_gm_slots(_load_gm_slots())
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -2157,12 +2186,13 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT, _GM_SLOTS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
+    _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -3576,7 +3606,7 @@ def _sig_spend(mkt, channel):
     return mkt[mkt["channel"] == ch] if (ch and "channel" in mkt.columns) else mkt
 
 def _daily_signals_html(day=None, channel="All"):
-    """Build the 7 'Daily signals' cards, ALL for a single selected `day` (a
+    """Build the 6 'Daily signals' cards, ALL for a single selected `day` (a
     date/Timestamp) and `channel` (All / Google / Meta / LinkedIn). Defaults to —
     and is capped at — yesterday (IST): today is never selectable because that
     day's data isn't fetched until the next day.
@@ -3606,7 +3636,6 @@ def _daily_signals_html(day=None, channel="All"):
     dt = _rng(aia_ch, "create_date", day, day).copy()
     ft_den = int(dt["record_id"].nunique()) if len(dt) else 0
     ft_num = 0
-    deliver_flags = []           # one per first-touch deal -> feeds the delivered card
     if len(dt):
         dt["p10"] = dt["poc_number"].apply(_phone10) if "poc_number" in dt.columns else ""
         for _, r in dt.iterrows():
@@ -3620,30 +3649,7 @@ def _daily_signals_html(day=None, channel="All"):
             cand = outs if is_repeat else outs[outs["template_name"].isin(_FT_TEMPLATES)]
             if len(cand):
                 ft_num += 1
-                first = cand.sort_values("timestamp").iloc[0]
-                deliver_flags.append(str(first["delivery_status"]) in _DELIVERED_STATUS)
     ft_rate = (100.0 * ft_num / ft_den) if ft_den else 0.0
-
-    # Card — WhatsApp delivered (of the first-touch messages that went out)
-    del_den = len(deliver_flags)
-    del_num = int(sum(deliver_flags))
-    del_rate = (100.0 * del_num / del_den) if del_den else 0.0
-
-    # Card — DS follow-up sent (selected day's demos booked, this channel)
-    ds = _rng(aia_ch, "ds_date", day, day).copy()
-    ds_den = int(ds["record_id"].nunique()) if len(ds) else 0
-    ds_num = 0
-    if len(ds):
-        ds["p10"] = ds["poc_number"].apply(_phone10) if "poc_number" in ds.columns else ""
-        for _, r in ds.iterrows():
-            p = r["p10"]; bdate = r["ds_date"]
-            pf = by_phone.get(p)
-            if pf is None or pd.isna(bdate):
-                continue
-            cand = pf[(pf["msg_date"] >= bdate) & (pf["template_name"].isin(_DS_TEMPLATES))]
-            if len(cand):
-                ds_num += 1
-    ds_rate = (100.0 * ds_num / ds_den) if ds_den else 0.0
 
     # channel deals created, keyed by day — feeds the MQL numerator + Leads card
     gl = aia_ch.copy()
@@ -3713,8 +3719,8 @@ def _daily_signals_html(day=None, channel="All"):
                        .groupby("_d")["cost"].sum().reindex(spark_idx, fill_value=0.0))
     else:
         spend_daily = pd.Series(0.0, index=spark_idx)
-    # messaging series — one pass over the window's deals / demos (cheap: ~7 days)
-    ftN, ftD, dlN, dlD = {}, {}, {}, {}
+    # First-touch series — one pass over the window's deals (cheap: ~7 days)
+    ftN, ftD = {}, {}
     _dtw = _rng(aia_ch, "create_date", w0, w1).copy()
     if len(_dtw):
         _dtw["p10"] = _dtw["poc_number"].apply(_phone10) if "poc_number" in _dtw.columns else ""
@@ -3731,23 +3737,6 @@ def _daily_signals_html(day=None, channel="All"):
             cand = outs if is_repeat else outs[outs["template_name"].isin(_FT_TEMPLATES)]
             if len(cand):
                 ftN[k] = ftN.get(k, 0) + 1
-                first = cand.sort_values("timestamp").iloc[0]
-                dlD[k] = dlD.get(k, 0) + 1
-                if str(first["delivery_status"]) in _DELIVERED_STATUS:
-                    dlN[k] = dlN.get(k, 0) + 1
-    dsN, dsD = {}, {}
-    _dsw = _rng(aia_ch, "ds_date", w0, w1).copy()
-    if len(_dsw):
-        _dsw["p10"] = _dsw["poc_number"].apply(_phone10) if "poc_number" in _dsw.columns else ""
-        for _, r in _dsw.iterrows():
-            bdate = r["ds_date"]
-            if pd.isna(bdate):
-                continue
-            k = bdate.normalize(); dsD[k] = dsD.get(k, 0) + 1
-            pf = by_phone.get(r["p10"])
-            if pf is not None and len(pf[(pf["msg_date"] >= bdate)
-                                        & (pf["template_name"].isin(_DS_TEMPLATES))]):
-                dsN[k] = dsN.get(k, 0) + 1
 
     def _rate_pts(numf, denf, lbl, good, ok):
         # each dot coloured by that day's rate vs the card's own thresholds
@@ -3778,16 +3767,51 @@ def _daily_signals_html(day=None, channel="All"):
                              _spark_hex(_rate_color(mql_rate, 70, 40)))
     ft_spark    = _sparkline(_rate_pts(lambda d: ftN.get(d, 0), lambda d: ftD.get(d, 0), "deals", 90, 75),
                              _spark_hex(_rate_color(ft_rate, 90, 75)))
-    ds_spark    = _sparkline(_rate_pts(lambda d: dsN.get(d, 0), lambda d: dsD.get(d, 0), "demos", 90, 75),
-                             _spark_hex(_rate_color(ds_rate, 90, 75)))
-    wa_spark    = _sparkline(_rate_pts(lambda d: dlN.get(d, 0), lambda d: dlD.get(d, 0), "sent", 90, 75),
-                             _spark_hex(_rate_color(del_rate, 90, 75)))
     # band-card sparklines: the LINE takes the card's status colour; each dot is
     # coloured by that day's value vs the band (same rule as the card).
     spend_spark = _sparkline(_val_pts(spend_daily, s_lo, s_hi, False, money=True),
                              _spark_hex(_band_status(s_lo, s_hi, spend_val, higher_good=False)))
     leads_spark = _sparkline(_val_pts(deals_daily, l_lo, l_hi, True),
                              _spark_hex(_band_status(l_lo, l_hi, leads_val, higher_good=True)))
+
+    # ── GM Slots Available — total open demo slots across GMs, per day ─────────
+    # Not channel-scoped (GM availability is global). pct = day total / average of
+    # the in-window days that HAVE data (incl. the selected day) — a fixed prior-7
+    # average would divide by empty days while history is still filling in. Each
+    # sparkline dot's hover lists every GM that day (incl. 0s), biggest first.
+    gm_tot, gm_lines = {}, {}
+    if len(_GM_SLOTS):
+        _gsw = _GM_SLOTS[(_GM_SLOTS["_d"] >= w0) & (_GM_SLOTS["_d"] <= w1)]
+        for _d, _g in _gsw.groupby("_d"):
+            gm_tot[_d] = int(_g["slots_avl"].sum())
+            gm_lines[_d] = sorted(((str(r["gm"]), int(r["slots_avl"]))
+                                   for _, r in _g.iterrows()),
+                                  key=lambda x: -x[1])
+    _gm_avail = [gm_tot[d] for d in spark_idx if d in gm_tot]     # days that have data
+    gm_avg = (sum(_gm_avail) / len(_gm_avail)) if _gm_avail else 0.0
+    gm_day = gm_tot.get(day)                                       # None => no data that day
+    gm_pct = (100.0 * gm_day / gm_avg) if (gm_day is not None and gm_avg) else 0.0
+    def _gm_pts():
+        out = []
+        for d in spark_idx:
+            t = gm_tot.get(d)
+            if t is None:
+                out.append({"v": None, "size": 0, "tip": f"{d.strftime('%d %b')} · no data"})
+                continue
+            pct = (100.0 * t / gm_avg) if gm_avg else 0.0
+            body = "\n".join(f"{gm} — {n}" for gm, n in gm_lines.get(d, []))
+            out.append({"v": float(t), "size": 1,
+                        "color": _spark_hex(_rate_color(pct, 90, 75)),
+                        "tip": f"{d.strftime('%d %b')} · {t} slots" + (f"\n{body}" if body else "")})
+        return out
+    gm_spark = _sparkline(_gm_pts(), _spark_hex(_rate_color(gm_pct, 90, 75)))
+    if gm_day is not None:
+        _gm_card = _sig_rate_card("GM Slots Available", str(gm_day), " slots",
+                                  f"avg {gm_avg:.0f}/day · {len(gm_lines.get(day, []))} GMs",
+                                  gm_pct, _rate_color(gm_pct, 90, 75), spark=gm_spark)
+    else:
+        _gm_card = _sig_rate_card("GM Slots Available", "—", "",
+                                  "no inventory for this day", 0, "#94a3b8", spark=gm_spark)
 
     # LP Traffic-to-Leads — dash when the channel has no LP sessions (LinkedIn).
     # "N sessions" carries a hover listing the landing pages behind it, so the
@@ -3812,12 +3836,7 @@ def _daily_signals_html(day=None, channel="All"):
         _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
                        f"{ft_num} of {ft_den} deals", ft_rate,
                        _rate_color(ft_rate, 90, 75), spark=ft_spark),
-        _sig_rate_card("WhatsApp delivered", f"{del_rate:.1f}", "%",
-                       f"{del_num} of {del_den} sent", del_rate,
-                       _rate_color(del_rate, 90, 75), spark=wa_spark),
-        _sig_rate_card("DS follow-up sent", f"{ds_rate:.1f}", "%",
-                       f"{ds_num} of {ds_den} demos", ds_rate,
-                       _rate_color(ds_rate, 90, 75), spark=ds_spark),
+        _gm_card,
         _sig_band_card("Spend", "₹" + _grp(spend_val), "",
                        s_lo, s_med, s_hi, spend_val, True, higher_good=False, spark=spend_spark),
         _sig_band_card("Deals", str(leads_val), "",
