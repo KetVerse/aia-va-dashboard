@@ -1639,17 +1639,20 @@ def _empty_activity_events():
 
 
 def _load_bot_events():
-    """AIA WhatsApp-bot messages -> activity events. Maps aia_bot_messages.company_uuid
-    -> aia_companies.company_id -> account_id, and interaction_type 'query'/'upload'
-    -> event_name 'Bot Query'/'Bot Upload'. Bounded 100-day pull (matches the other
-    activity tables); returns the standard [account_id, event_name, event_time,
-    items_count] shape so it concatenates straight into _ACT_EVENTS. Errors -> empty
-    frame (additive; never on the critical load path)."""
+    """AIA WhatsApp-bot messages -> activity events. interaction_type 'query'/'upload'
+    -> event_name 'Bot Query'/'Bot Upload'; company_uuid -> aia_companies.company_id
+    -> account_id. Some messages log with a NULL company_uuid, so (like the AIA Bot
+    page) first backfill a message's company from that phone's (user_id's) most recent
+    KNOWN company — otherwise those messages silently vanish from the streak while the
+    AIA Bot page still counts them. Bounded 100-day pull; excludes internal test
+    traffic; returns the standard [account_id, event_name, event_time, items_count]
+    shape. Errors -> empty frame (additive; never on the critical load path)."""
     cols = ["account_id", "event_name", "event_time", "items_count"]
     try:
         bot = _q(SUPABASE_URL,
-            "SELECT company_uuid, interaction_type, sent_at FROM public.aia_bot_messages "
-            "WHERE sent_at >= now() - interval '100 days' AND company_uuid IS NOT NULL "
+            "SELECT company_uuid::text AS cuid, user_id, interaction_type, sent_at "
+            "FROM public.aia_bot_messages "
+            "WHERE sent_at >= now() - interval '100 days' AND is_internal IS NOT TRUE "
             "AND interaction_type IN ('query','upload')", statement_timeout_ms=10000)
         comp = _q(SUPABASE_URL,
             "SELECT company_id, account_id FROM public.aia_companies WHERE account_id IS NOT NULL",
@@ -1659,10 +1662,13 @@ def _load_bot_events():
         return pd.DataFrame(columns=cols)
     if bot is None or len(bot) == 0 or comp is None or len(comp) == 0:
         return pd.DataFrame(columns=cols)
-    cmap = dict(zip(comp["company_id"].astype(str), comp["account_id"]))
-    bot["account_id"] = bot["company_uuid"].astype(str).map(cmap)
-    bot["event_name"] = bot["interaction_type"].map({"query": "Bot Query", "upload": "Bot Upload"})
     bot["event_time"] = pd.to_datetime(bot["sent_at"], errors="coerce", utc=True).dt.tz_convert(None)
+    # backfill a missing company_uuid from that phone's most recent known company
+    known = bot.dropna(subset=["cuid"]).sort_values("event_time").groupby("user_id")["cuid"].last()
+    bot["cuid"] = bot["cuid"].fillna(bot["user_id"].map(known))
+    cmap = dict(zip(comp["company_id"].astype(str), comp["account_id"]))
+    bot["account_id"] = bot["cuid"].map(cmap)
+    bot["event_name"] = bot["interaction_type"].map({"query": "Bot Query", "upload": "Bot Upload"})
     bot["items_count"] = np.nan
     bot = bot.dropna(subset=["account_id", "event_name", "event_time"])
     return bot[cols]
