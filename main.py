@@ -693,6 +693,7 @@ _STREAK_EVENT_BUCKET = {
     "Vendor Mismatch Resolved": "vmr", "Mapping Completed": "mapping",
     "Delete": "deletes",                       # work
     "Login": "logins", "Dashboard Viewed": "views",   # engagement only (not active)
+    "Bot Query": "botq", "Bot Upload": "botu",         # WhatsApp bot -> active (amber dot)
 }
 
 # Activity Score weighting: per event per day -> weight * min(count, cap_per_day),
@@ -749,10 +750,11 @@ def _recent_event_lookup():
 
 def _usage_28(email, ev_lu):
     """Usage in the last 28 days for a customer's account. Returns
-    (active_days_count, streak). `streak` encodes 28 days as ';'-joined 18-field
-    tokens (index 0 = today .. 27 = today-27d):
+    (active_days_count, streak, bot_query_28d_total, bot_upload_28d_total). `streak`
+    encodes 28 days as ';'-joined 20-field tokens (index 0 = today .. 27 = today-27d):
       on,uploads,syncs,items,views,txns,entities,recon,vmr,mapping,invoices,deletes,logins,txnstatus,
-      lineitems,txnlines,reviewed,needsreview   (last 4 from user_daily_upload_summary)
+      lineitems,txnlines,reviewed,needsreview,botqueries,botuploads
+      (lineitems..needsreview from user_daily_upload_summary; last 2 = WhatsApp bot)
     on=1 (ACTIVE) when there was ANY event that day — an upload, an accounting
     sync, any work event (transactions / entities / invoices / recon /
     vendor-mismatch / mapping / delete), OR a presence event (login /
@@ -760,9 +762,9 @@ def _usage_28(email, ev_lu):
     yellow=any other event, grey=nothing."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()
-    blank = ";".join([",".join(["0"] * 18)] * 28)
+    blank = ";".join([",".join(["0"] * 20)] * 28)
     if ac is None:
-        return 0, blank
+        return 0, blank, 0, 0
     start = today - pd.Timedelta(days=27)
     uploads = {}; syncs = {}; items = {}; txnlines = {}   # from user_daily_upload_summary
     if "date" in _UPL.columns:
@@ -784,6 +786,7 @@ def _usage_28(email, ev_lu):
             syncs = sy.groupby("_d").size().to_dict()
     acc_ev = ev_lu.get(ac, {})
     active = 0
+    botq_tot = 0; botu_tot = 0     # 28-day bot query / upload totals (for the cell tooltip)
     toks = []
     for i in range(28):
         d = today - pd.Timedelta(days=i)
@@ -795,12 +798,14 @@ def _usage_28(email, ev_lu):
         ts = ce.get("txnstatus", 0)   # Transaction Status (shown separately from "Transactions updated")
         tl = int(txnlines.get(d, 0) or 0)
         li, rv, nr = cbill.get(d, (0, 0, 0))   # from company_daily_bill_summary
-        # active = ANY event that day, presence (login / dashboard-viewed) included
-        on = 1 if (up or sc or txn or ts or ent or rec or vmr or mp or inv or dele or log or vw) else 0
+        bq = int(ce.get("botq", 0)); bu = int(ce.get("botu", 0))   # WhatsApp bot query/upload
+        botq_tot += bq; botu_tot += bu
+        # active = ANY event that day, presence (login / dashboard-viewed) and bot included
+        on = 1 if (up or sc or txn or ts or ent or rec or vmr or mp or inv or dele or log or vw or bq or bu) else 0
         active += on
-        toks.append("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
-            on, up, sc, it, vw, txn, ent, rec, vmr, mp, inv, dele, log, ts, li, tl, rv, nr))
-    return active, ";".join(toks)
+        toks.append("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
+            on, up, sc, it, vw, txn, ent, rec, vmr, mp, inv, dele, log, ts, li, tl, rv, nr, bq, bu))
+    return active, ";".join(toks), botq_tot, botu_tot
 
 
 def _va_mrr(record_ids):
@@ -1633,6 +1638,36 @@ def _empty_activity_events():
     return {key: pd.DataFrame(columns=cols) for key, (_t, cols) in _EVENT_TABLES.items()}
 
 
+def _load_bot_events():
+    """AIA WhatsApp-bot messages -> activity events. Maps aia_bot_messages.company_uuid
+    -> aia_companies.company_id -> account_id, and interaction_type 'query'/'upload'
+    -> event_name 'Bot Query'/'Bot Upload'. Bounded 100-day pull (matches the other
+    activity tables); returns the standard [account_id, event_name, event_time,
+    items_count] shape so it concatenates straight into _ACT_EVENTS. Errors -> empty
+    frame (additive; never on the critical load path)."""
+    cols = ["account_id", "event_name", "event_time", "items_count"]
+    try:
+        bot = _q(SUPABASE_URL,
+            "SELECT company_uuid, interaction_type, sent_at FROM public.aia_bot_messages "
+            "WHERE sent_at >= now() - interval '100 days' AND company_uuid IS NOT NULL "
+            "AND interaction_type IN ('query','upload')", statement_timeout_ms=10000)
+        comp = _q(SUPABASE_URL,
+            "SELECT company_id, account_id FROM public.aia_companies WHERE account_id IS NOT NULL",
+            statement_timeout_ms=10000)
+    except Exception as ex:
+        print(f"[WARN] bot events load failed: {ex} -- using empty frame")
+        return pd.DataFrame(columns=cols)
+    if bot is None or len(bot) == 0 or comp is None or len(comp) == 0:
+        return pd.DataFrame(columns=cols)
+    cmap = dict(zip(comp["company_id"].astype(str), comp["account_id"]))
+    bot["account_id"] = bot["company_uuid"].astype(str).map(cmap)
+    bot["event_name"] = bot["interaction_type"].map({"query": "Bot Query", "upload": "Bot Upload"})
+    bot["event_time"] = pd.to_datetime(bot["sent_at"], errors="coerce", utc=True).dt.tz_convert(None)
+    bot["items_count"] = np.nan
+    bot = bot.dropna(subset=["account_id", "event_name", "event_time"])
+    return bot[cols]
+
+
 def _load_acct_by_email():
     """email -> account_id from the authoritative aia_accounts table (which links
     every account to its hubspot_login_email and its app account_email). Two jobs:
@@ -2012,6 +2047,9 @@ def _clean_email(v):
 # session Login rows that arrive with a NULL account_id can be backfilled by email.
 _ACCT_BY_EMAIL = _load_acct_by_email()
 _ACT_EVENTS = _prep_activity_events(_RAW_ACT)
+_bot_ev = _load_bot_events()   # WhatsApp bot query/upload as two more activity events
+if len(_bot_ev):
+    _ACT_EVENTS = pd.concat([_ACT_EVENTS, _bot_ev], ignore_index=True)
 # Pre-filtered once so _usage_28 (called once per paid customer) doesn't re-scan
 # every event_name on every call — only account_id/date filtering happens per call.
 _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
@@ -2217,6 +2255,9 @@ def _reload_data():
         _SYN = _nums(_SYN, ["items_count"])
     _ACCT_BY_EMAIL = _load_acct_by_email()   # rebuild before prep (backfill dep)
     _ACT_EVENTS = _prep_activity_events(_RAW_ACT)
+    _bot_ev = _load_bot_events()
+    if len(_bot_ev):
+        _ACT_EVENTS = pd.concat([_ACT_EVENTS, _bot_ev], ignore_index=True)
     _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
@@ -2507,21 +2548,29 @@ def _build_ft_health_df():
     rows = []
     for _, row in base.iterrows():
         email = _clean_email(row.get("login_email_id", ""))
-        active_days, streak = _usage_28(email, _ev_lu)
+        active_days, streak, bot_q, bot_u = _usage_28(email, _ev_lu)
         _acct = _EMAIL_ACCT.get(email)
         activity_score = int(_scores.get(_acct, 0)) if _acct else 0
         ftd = row.get("ft_start_date")
-        dsince = (today - pd.Timestamp(ftd).normalize()).days if pd.notna(ftd) else 9999
+        # FT End Date = start + ft_duration days (expiry: 19-Aug + 3 -> 22-Aug, the day
+        # the trial lapses). Blank if either input is missing.
+        dur = pd.to_numeric(row.get("ft_duration"), errors="coerce")
+        fte = (pd.Timestamp(ftd).normalize() + pd.Timedelta(days=int(dur))
+               if (pd.notna(ftd) and pd.notna(dur)) else pd.NaT)
+        expired = bool(pd.notna(fte) and today >= fte)   # trial already ended
         rows.append({
             "Deal Name": row.get("deal_name", ""),
             "record_id": row.get("record_id", ""),
             "GM": row.get("deal_owner", ""),
             "Stage": row.get("deal_stage", ""),
             "FT Start Date": _ddmy(ftd),
-            # Orange while the trial is fresh (started within the last 14 days),
-            # black once older. Hidden — drives the cell class.
-            "__ftcls": ("cell-orange" if (pd.notna(ftd) and 0 <= dsince <= 14) else ""),
+            "FT End Date": _ddmy(fte),
+            # Amber once the trial has ended (end date reached/past). Hidden — drives
+            # the FT End Date cell class.
+            "__ftendcls": ("cell-orange" if expired else ""),
             "Usage Active Days (28d)": active_days,
+            # Hover on the Active Days cell: 28-day WhatsApp-bot query / upload totals.
+            "__botTip": (f"Bot Queries: {bot_q} · Bot Uploads: {bot_u}" if (bot_q or bot_u) else ""),
             "Activity Score": activity_score,
             "Usage Streak Last 28D (desc)": streak,
         })
@@ -2552,9 +2601,10 @@ def _apply_ft_filter(state):
         d, sort_default_col="Usage Active Days (28d)", rownum_col="Sl no",
         col_w={"Deal Name": 300},
         streak_cols=["Usage Streak Last 28D (desc)"],
-        center_cols=["FT Start Date"], date_cols=["FT Start Date"],
+        center_cols=["FT Start Date", "FT End Date"], date_cols=["FT Start Date", "FT End Date"],
         heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
-        class_cols={"FT Start Date": "__ftcls"},
+        class_cols={"FT End Date": "__ftendcls"},
+        tip_cols={"Usage Active Days (28d)": "__botTip"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
 
@@ -2933,6 +2983,7 @@ def _apply_usage_filter(state):
         date_cols=["Paid On", "Int Date", "Due On"],
         heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
         class_cols={"Int Date": "__intcls"},
+        tip_cols={"Usage Active Days (28d)": "__botTip"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
 def _merge_cohort_pct_count(cnt_df, pct_df, mode="all"):
@@ -3296,7 +3347,7 @@ def _cs_refresh(state):
     usage_rows = []
     for _, row in usage_base.iterrows():
         email  = _clean_email(row.get("login_email_id",""))
-        active_days, streak = _usage_28(email, _ev_lu)
+        active_days, streak, bot_q, bot_u = _usage_28(email, _ev_lu)
         _acct = _EMAIL_ACCT.get(email)
         activity_score = int(_scores.get(_acct, 0)) if _acct else 0
         intd = row.get("integration_done_date")
@@ -3319,6 +3370,8 @@ def _cs_refresh(state):
             "Due On":          _due_on(row.get("record_id")),
             "Cadence":         cad,
             "Usage Active Days (28d)": active_days,
+            # Hover on the Active Days cell: 28-day WhatsApp-bot query / upload totals.
+            "__botTip": (f"Bot Queries: {bot_q} · Bot Uploads: {bot_u}" if (bot_q or bot_u) else ""),
             "Activity Score": activity_score,
             "Usage Streak Last 28D (desc)": streak,
             # Status is blank when not yet integrated (no days-since basis), matching PBI
@@ -4860,6 +4913,7 @@ cs_activity_event_list = [
     "Transaction Status", "Transaction Ledger Updated", "Transaction Type Updated",
     "Entity Created", "Invoice Created", "Invoice Bulk Edited",
     "Vendor Mismatch Resolved", "Recon Processed", "Mapping Completed",
+    "Bot Query", "Bot Upload",
 ]
 cs_activity_event = []   # [] = All Events
 cs_activity_count_json = ""
@@ -4892,7 +4946,7 @@ cs_usage_tip = ("Usage Streak — last 28 days\n"
                 "Usage Active Days (28d) = number of active days (green + yellow); grey days are not active.\n"
                 "Hover a dot for that day's event counts.")
 aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
-              "• FT Start Date is orange within the first 14 days\n"
+              "• FT End Date is orange if duration is completed\n"
               "• Active Days / Activity Score / streak = same 28-day measures as CS Usage & Health")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"

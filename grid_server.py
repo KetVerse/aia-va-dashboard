@@ -531,6 +531,7 @@ function streakHtml(s){
       +'" data-txnstatus="'+(p[13]||0)
       +'" data-lineitems="'+(p[14]||0)+'" data-txnlines="'+(p[15]||0)
       +'" data-reviewed="'+(p[16]||0)+'" data-needsreview="'+(p[17]||0)
+      +'" data-botq="'+(p[18]||0)+'" data-botu="'+(p[19]||0)
       +'"></span>';
   }
   // hidden but copyable string of the streak (dots are CSS-only and don't copy)
@@ -560,6 +561,8 @@ function streakHtml(s){
     html+=metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))   // ungated & on top so a purple (sync) dot always explains itself first
          +(on?metricLine("Items Synced", dot.getAttribute("data-items")):"")   // right under Accounting Syncs
          +(on?metricLine("Uploads", dot.getAttribute("data-up")):"")
+         +metricLine("Bot Queries", dot.getAttribute("data-botq"))     // WhatsApp bot (ungated: real signal)
+         +metricLine("Bot Uploads", dot.getAttribute("data-botu"))
          +metricLine("Line Items", dot.getAttribute("data-lineitems"))     // 4 lines below, from user_daily_upload_summary; shown only when nonzero
          +metricLine("Tnx Lines", dot.getAttribute("data-txnlines"))
          +metricLine("Reviewed", dot.getAttribute("data-reviewed"))
