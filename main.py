@@ -1240,6 +1240,10 @@ def _mkt_utm_render(data, view):
     sums / blended / pooled. All columns sortable."""
     if not data:
         return grid_payload_b64(pd.DataFrame())
+    # Default order: highest-revenue sources first (stable, so ties keep their prior
+    # alphabetical order). no_sort=True below renders rows in this DataFrame order, so
+    # this drives both the live page and the PDF snapshot; users can still click to re-sort.
+    data = sorted(data, key=lambda d: d.get("revenue", 0), reverse=True)
     def pctc(num, den):
         if den <= 0:  return ("—", "", "")
         if den < 25:  return ("n<25", "cell-muted", f"n = {int(den)} (<25)")

@@ -50,6 +50,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 GRID_FILTERS = {
     # name: (column header, mode, values)   mode: "drop" | "keep"
     "cs_usage": ("Usage Active Days (28d)", "drop", ["0"]),
+    "aia_ft":   ("Usage Active Days (28d)", "drop", ["0"]),   # Free Trial Usage & Health
     "vaf_tat":  ("TAT Status",              "drop", ["Parked", "Churned"]),
     "vaf_ar":   ("Due Status",              "drop", ["Churned"]),
 }
