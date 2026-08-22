@@ -146,10 +146,31 @@ def render(base_url: str, out_path: Path) -> Path:
                                   device_scale_factor=2)
         page = ctx.new_page()
         page.emulate_media(media="screen")     # keep on-screen styling in the PDF
+
+        # Warm-up load (discarded): the dashboard is a client-rendered SPA — the whole
+        # page, nav bar included, only appears after the JS bundle + websocket +
+        # on_init finish. In a freshly-launched Chromium the VERY FIRST navigation
+        # can't complete that within SETTLE_MS, so the first real page (AIA Ops) was
+        # captured blank every day. This throwaway load absorbs that cold start.
+        warm = f"{base_url}/{PAGES[0][0]}?snapshot=1"
+        print(f"[snapshot] warm-up: {warm}", flush=True)
+        try:
+            page.goto(warm, wait_until="load", timeout=60000)
+            page.wait_for_selector(".main-nav", timeout=45000)
+            page.wait_for_timeout(SETTLE_MS)
+        except Exception as ex:
+            print(f"[snapshot]   warm-up note: {ex}", flush=True)
+
         for route, name in PAGES:
             url = f"{base_url}/{route}?snapshot=1"
             print(f"[snapshot] {name}: {url}", flush=True)
             page.goto(url, wait_until="load", timeout=60000)
+            # Don't start the settle timer until the SPA shell has actually rendered,
+            # so a slow first paint can never be captured as a blank page.
+            try:
+                page.wait_for_selector(".main-nav", timeout=45000)
+            except Exception:
+                print(f"[snapshot]   WARN {name}: nav never rendered", flush=True)
             page.wait_for_timeout(SETTLE_MS)
             # PDF-only row filters, then let the iframes re-render off the edited
             # payload (their poll runs on a 1s interval) and re-measure.
