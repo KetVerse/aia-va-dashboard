@@ -5734,6 +5734,11 @@ def _build_aiabot():
                  .drop_duplicates("_acct", keep="last").set_index("_acct"))
     by_em   = (a.dropna(subset=["_em"]).sort_values("payment_date")
                  .drop_duplicates("_em", keep="last").set_index("_em"))
+    # (3) WhatsApp number -> aia_live.poc_number (last-10-digit key): fallback for
+    # messages whose company_uuid is blank/unmatched but whose WA number is a deal POC.
+    a["_p10"] = a["poc_number"].map(_phone10) if "poc_number" in a.columns else ""
+    by_phone = (a[a["_p10"] != ""].sort_values("payment_date")
+                  .drop_duplicates("_p10", keep="last").set_index("_p10"))
     def _co_attr(cuid):
         row = cmap.loc[cuid] if (len(cmap) and cuid in cmap.index) else None
         cname = row["company_name"] if row is not None else None
@@ -5758,6 +5763,20 @@ def _build_aiabot():
     m["deal_stage"]   = _pick(3)
     m["record_id"]    = _pick(4)
     m["segment"] = m["segment"].fillna("Unknown")
+    # ── Phone fallback ── messages with no company_uuid match still carry a WA
+    # number; match it to aia_live.poc_number so a WA-only user resolves to their
+    # deal + FT/Paid segment instead of falling to Unknown.
+    if len(by_phone):
+        need = m["record_id"].isna()
+        for idx, key in m.loc[need, "user_id"].astype(str).map(_phone10).items():
+            if not key or key not in by_phone.index:
+                continue
+            src = by_phone.loc[key]
+            m.at[idx, "record_id"]  = src["record_id"]
+            m.at[idx, "deal_name"]  = src["deal_name"]
+            m.at[idx, "deal_stage"] = src["deal_stage"]
+            m.at[idx, "segment"]    = ("Paid" if pd.notna(src["payment_date"])
+                                       else "FT" if pd.notna(src["ft_start_date"]) else "Unknown")
     # blank company_uuid -> keyed per phone so each unknown number is its own "company"
     m["co_key"]  = m["cuid"].where(m["cuid"].notna(), "phone:" + m["user_id"].astype(str))
     def _coname(r):
