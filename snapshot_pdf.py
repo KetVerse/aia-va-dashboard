@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Daily dashboard PDF snapshot — live-screenshot edition.
 
-Loads each of the 5 dashboard pages in a headless browser with ?snapshot=1
+Loads each of the 6 dashboard pages in a headless browser with ?snapshot=1
 (which forces every grid to full height/width — no scrollbars), prints each as
 one tall page, and merges them into a single PDF. Optionally uploads to Google
 Drive via a service-account key.
@@ -31,6 +31,7 @@ PAGES = [
     ("marketing",  "Marketing"),
     ("va-ops",     "VA Ops"),
     ("va-finance", "VA Finance"),
+    ("aia-bot",    "AIA Bot"),
 ]
 VIEWPORT_W   = 1680     # design width; PDF widens further if a table needs it
 SETTLE_MS    = 9000     # wait for data load + grid expansion after each page loads
@@ -48,11 +49,15 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # a payload edit is picked up as a normal update (and keeps the Total row, the
 # row numbering and the frame auto-height all consistent with what's shown).
 GRID_FILTERS = {
-    # name: (column header, mode, values)   mode: "drop" | "keep"
-    "cs_usage": ("Usage Active Days (28d)", "drop", ["0"]),
-    "aia_ft":   ("Usage Active Days (28d)", "drop", ["0"]),   # Free Trial Usage & Health
-    "vaf_tat":  ("TAT Status",              "drop", ["Parked", "Churned"]),
-    "vaf_ar":   ("Due Status",              "drop", ["Churned"]),
+    # name: (column header, mode, values)   mode: "drop" | "keep" | "date_max"
+    # date_max keeps only rows dated <= yesterday (drops today's partial data);
+    # the date cell must be a "dd-MMM-yy" string. The values entry is ignored.
+    "cs_usage":     ("Usage Active Days (28d)", "drop", ["0"]),
+    "aia_ft":       ("Usage Active Days (28d)", "drop", ["0"]),   # Free Trial Usage & Health
+    "vaf_tat":      ("TAT Status",              "drop", ["Parked", "Churned"]),
+    "vaf_ar":       ("Due Status",              "drop", ["Churned"]),
+    "aiabot_fail":  ("Date",                    "date_max", ["yesterday"]),  # Where the Bot Falls Short
+    "aiabot_table": ("Last Seen",               "date_max", ["yesterday"]),  # Per-Company Detail
 }
 
 _FILTER_JS = """
@@ -68,16 +73,35 @@ _FILTER_JS = """
     catch (e) { out.push(name + ': undecodable'); continue; }
     const i = (d.columns || []).indexOf(col);
     if (i < 0) { out.push(name + ': no column "' + col + '"'); continue; }
-    const want = values.map(v => String(v).trim().toLowerCase());
     const before = (d.rows || []).length;
-    d.rows = (d.rows || []).filter(r => {
-      // cells can be plain values or {v: ...} wrappers depending on the column
-      let c = r[i];
-      if (c && typeof c === 'object') c = ('v' in c) ? c.v : ('t' in c ? c.t : '');
-      const s = String(c == null ? '' : c).trim().toLowerCase();
-      const hit = want.includes(s) || (want.includes('0') && s !== '' && Number(s) === 0);
-      return mode === 'keep' ? hit : !hit;
-    });
+    if (mode === 'date_max') {
+      // keep only rows dated on/before YESTERDAY (drop today's partial data).
+      // date cells are "dd-MMM-yy" strings; unparseable/blank cells are kept.
+      const MON = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+      const now = new Date();
+      const cut = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+      const cutNum = cut.getFullYear()*10000 + (cut.getMonth()+1)*100 + cut.getDate();
+      d.rows = (d.rows || []).filter(r => {
+        let c = r[i];
+        if (c && typeof c === 'object') c = ('v' in c) ? c.v : ('t' in c ? c.t : '');
+        const m = String(c == null ? '' : c).trim().match(/^(\\d{1,2})-([A-Za-z]{3})-(\\d{2})$/);
+        if (!m) return true;
+        const mo = MON[m[2].toLowerCase()];
+        if (mo == null) return true;
+        const num = (2000 + (+m[3]))*10000 + (mo+1)*100 + (+m[1]);
+        return num <= cutNum;
+      });
+    } else {
+      const want = values.map(v => String(v).trim().toLowerCase());
+      d.rows = (d.rows || []).filter(r => {
+        // cells can be plain values or {v: ...} wrappers depending on the column
+        let c = r[i];
+        if (c && typeof c === 'object') c = ('v' in c) ? c.v : ('t' in c ? c.t : '');
+        const s = String(c == null ? '' : c).trim().toLowerCase();
+        const hit = want.includes(s) || (want.includes('0') && s !== '' && Number(s) === 0);
+        return mode === 'keep' ? hit : !hit;
+      });
+    }
     // btoa is Latin1-only, and these payloads carry Rs / em-dash / arrows. Python
     // writes them with json.dumps(ensure_ascii=True), i.e. \\uXXXX escapes, so
     // escape the same way on the way back or btoa throws.
