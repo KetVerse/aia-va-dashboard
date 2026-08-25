@@ -355,9 +355,10 @@ _GRID_HTML = r"""<!DOCTYPE html>
         overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   .dot{ display:inline-block; width:11px; height:11px; border-radius:50%;
         margin:0 1px; vertical-align:middle; cursor:default; }
-  .dot.on{ background:#eab308; }     /* yellow: any non-sync event that day */
+  .dot.on{ background:#eab308; }     /* amber: a work event (upload/txn/invoice/bot…) */
   .dot.off{ background:#d8dee6; }    /* grey: no activity */
-  .dot.sync{ background:#16a34a; }   /* green: a day with an accounting sync */
+  .dot.sync{ background:#16a34a; }   /* green: accounting sync or recon */
+  .dot.seen{ background:#7dd3fc; }   /* light blue: login / dashboard only — NOT real usage */
   td.streakcell{ text-align:left; }
   /* custom per-day tooltip — uniform white text, stays put for screenshots */
   #streaktip{ position:fixed; display:none; z-index:99999; background:#1a3a6b;
@@ -508,7 +509,7 @@ function rowHeatMax(r){
 }
 const _MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function dateLabel(offset){
-  const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-offset);
+  const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-offset-1);   // index 0 = yesterday
   return d.getDate()+" "+_MON[d.getMonth()]+" "+d.getFullYear();
 }
 function streakHtml(s){
@@ -519,10 +520,13 @@ function streakHtml(s){
   let h='<span class="streak">', copytxt='';
   for(let i=0;i<days.length;i++){
     const p=(days[i]||"").split(",");
-    const on=p[0]==="1";                       // active: ANY event that day
-    const sync=(+(p[2]||0))>0;                 // accounting sync -> green
-    const cls = sync?"sync":(on?"on":"off");   // green=sync, yellow=any other event, grey=none
-    copytxt += (on||sync) ? "●" : "○";   // filled / hollow circle for copy-paste
+    const on=p[0]==="1";                       // active: ANY event that day (incl. login)
+    const g=(+(p[2]||0))>0||(+(p[7]||0))>0;    // accounting sync OR recon -> GREEN
+    const a=(+(p[1]||0))>0||(+(p[5]||0))>0||(+(p[6]||0))>0||(+(p[8]||0))>0||(+(p[9]||0))>0
+          ||(+(p[10]||0))>0||(+(p[11]||0))>0||(+(p[13]||0))>0||(+(p[18]||0))>0||(+(p[19]||0))>0;   // work -> AMBER
+    const b=(+(p[12]||0))>0||(+(p[4]||0))>0;    // login / dashboard only -> BLUE (not real usage)
+    const cls = g?"sync":(a?"on":(b?"seen":"off"));
+    copytxt += (g||a) ? "●" : (b ? "◐" : "○");   // ● real usage · ◐ login-only · ○ none
     h+='<span class="dot '+cls+'" data-i="'+i+'" data-on="'+(on?1:0)
       +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)
       +'" data-views="'+(p[4]||0)+'" data-txns="'+(p[5]||0)+'" data-entities="'+(p[6]||0)
@@ -556,7 +560,7 @@ function streakHtml(s){
     var t=el(); if(!t) return;
     clearTimeout(hideT);
     var i=+dot.getAttribute("data-i");
-    var html=dateLabel(i)+(i===0?" (today)":"");
+    var html=dateLabel(i)+(i===0?" (yesterday)":"");
     var on=dot.getAttribute("data-on")==="1";
     html+=metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))   // ungated & on top so a purple (sync) dot always explains itself first
          +(on?metricLine("Items Synced", dot.getAttribute("data-items")):"")   // right under Accounting Syncs

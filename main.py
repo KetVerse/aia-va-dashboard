@@ -712,7 +712,7 @@ def _activity_scores():
     """Per-account Activity Score over the last 28 days: sum over days & events of
     weight * min(daily_count, cap_per_day). One vectorized pass over the in-memory
     _ACT_EVENTS (no DB). Returns {account_id: score}."""
-    today = pd.Timestamp(date.today()).normalize()
+    today = pd.Timestamp(date.today()).normalize() - pd.Timedelta(days=1)   # anchor to YESTERDAY (last complete day)
     start = today - pd.Timedelta(days=27)
     ev = _ACT_EVENTS
     if ev is None or len(ev) == 0:
@@ -732,7 +732,7 @@ def _recent_event_lookup():
     """Per (account_id, day) counts of the streak's event-table events for the last
     28 days, computed ONCE from the in-memory _ACT_EVENTS so _usage_28 is a cheap
     dict lookup per customer (no DB, no 124k-row rescan per account)."""
-    today = pd.Timestamp(date.today()).normalize()
+    today = pd.Timestamp(date.today()).normalize() - pd.Timedelta(days=1)   # anchor to YESTERDAY
     start = today - pd.Timedelta(days=27)
     ev = _ACT_EVENTS
     if ev is None or len(ev) == 0:
@@ -761,7 +761,7 @@ def _usage_28(email, ev_lu):
     dashboard-viewed). The grid colours the dot: green=accounting sync,
     yellow=any other event, grey=nothing."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
-    today = pd.Timestamp(date.today()).normalize()
+    today = pd.Timestamp(date.today()).normalize() - pd.Timedelta(days=1)   # anchor to YESTERDAY (index 0 = yesterday)
     blank = ";".join([",".join(["0"] * 20)] * 28)
     if ac is None:
         return 0, blank, 0, 0
@@ -2136,6 +2136,24 @@ def _build_acct_dates():
 
 _ACCT_DATES = _build_acct_dates()
 
+# ── V3 flagging — "real usage" = GREEN (accounting sync / recon) + AMBER (uploads,
+# transactions, invoices, entities, mapping, vendor-mismatch, deletes, WhatsApp bot
+# query / upload). EXCLUDES BLUE (Login, Dashboard Viewed): a login-only day is NOT
+# real usage. Drives the V3 status only; the streak / active-days counters are unchanged.
+_NON_USAGE_EVENTS = {"Login", "Dashboard Viewed"}
+def _build_real_dates():
+    """account_id -> set of dates with any real-usage event (green+amber, blue excluded).
+    Upload/sync from _ACCT_DATES; all other events (incl. Bot Query/Upload) from _ACT_EVENTS."""
+    m = {ac: set(dts) for ac, dts in _ACCT_DATES.items()}
+    ev = _ACT_EVENTS
+    if ev is not None and len(ev) and {"account_id", "event_name", "event_time"}.issubset(ev.columns):
+        sub = ev[~ev["event_name"].isin(_NON_USAGE_EVENTS)]
+        for ac, t in zip(sub["account_id"], sub["event_time"]):
+            if pd.notna(ac) and pd.notna(t):
+                m.setdefault(ac, set()).add(pd.Timestamp(t).normalize())
+    return m
+_REAL_DATES = _build_real_dates()
+
 def _build_company_bill():
     """Per (account_id, day) bill-review counts from company_daily_bill_summary,
     which is keyed by company_id (no account_id) — linked to account via
@@ -2233,7 +2251,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT, _GM_SLOTS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -2267,6 +2285,7 @@ def _reload_data():
     _DVIEW_EVENTS = _ACT_EVENTS[_ACT_EVENTS["event_name"] == "Dashboard Viewed"]
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
+    _REAL_DATES = _build_real_dates()
     _CBILL = _build_company_bill()
     _DB_EVENTS = _build_db_bookings()
     _BILLING_END = _build_billing_end()
@@ -2361,7 +2380,35 @@ def _continuous_missed(acct, intdate, cad, days_since, today):
             missed = 0   # streak resets on a hit
     return missed
 
+# ── V3 status — single reversible switch. True = days-since-real-usage model;
+# False = the exact production window/miss logic above.
+_FLAGGING_V3 = True
+_V3_POST = {"Daily": (4, 10), "Weekly": (8, 16), "Bi weekly": (14, 21), "Monthly": (20, 27)}
+def _v3_status(acct, intdate, cad, today):
+    """Post-milestone = consecutive days since the last REAL-usage day (green+amber;
+    login/dashboard excluded), anchored to YESTERDAY, judged on per-cadence thresholds:
+    Daily <=4 / 5-10 / >10 · Weekly <=8 / 9-16 / >16 · Bi <=14 / 15-21 / >21 · Monthly
+    <=20 / 21-27 / >27  (Active / Risk / Inactive). Initial phase = fixed milestone
+    checkpoints counted on real usage (3 consecutive misses = Risk, 6 = Inactive)."""
+    intdate = pd.Timestamp(intdate).normalize()
+    yest = today - pd.Timedelta(days=1)
+    ds = (yest - intdate).days
+    if ds < 0:
+        return ""
+    real = _REAL_DATES.get(acct, set())
+    if ds <= _CAD_PASTINIT.get(cad, 29):                       # INITIAL — milestone checkpoints
+        ms = _MILESTONES.get(cad, {}); missed = 0
+        for day in sorted(d for d in ms if d <= ds):
+            used = sum(1 for d in real if intdate < d <= intdate + pd.Timedelta(days=day))
+            missed = missed + 1 if used < ms[day] else 0
+        return "Inactive" if missed >= 6 else ("Risk of Churn" if missed >= 3 else "Active")
+    inact = next((i for i in range(29) if (yest - pd.Timedelta(days=i)) in real), 99)   # days since last real usage
+    a, r = _V3_POST.get(cad, (8, 16))
+    return "Active" if inact <= a else ("Risk of Churn" if inact <= r else "Inactive")
+
 def _customer_status_m(acct, intdate, cad, days_since, today):
+    if _FLAGGING_V3:
+        return _v3_status(acct, intdate, cad, today)
     m = _continuous_missed(acct, intdate, cad, days_since, today)
     if m is None: return None
     if m >= 6: return "Inactive"
@@ -2505,6 +2552,9 @@ def _customer_status(row, upl, syn):
         return None
     email = _clean_email(row["login_email_id"])
     cadence = row.get("cadence","Monthly")
+    if _FLAGGING_V3:                       # KPI uses the same V3 verdict as the usage table
+        return _v3_status(_acct_for(email), row["integration_done_date"], cadence,
+                          pd.Timestamp(date.today()).normalize())
     days_since = row.get("days_since_int", 0)
     window = {"Daily":4,"Weekly":7,"Bi weekly":10,"Monthly":14}.get(cadence, 7)
     past_initial = {"Daily":days_since>15,"Weekly":days_since>20,"Bi weekly":days_since>25,"Monthly":days_since>29}.get(cadence, False)
@@ -4945,15 +4995,24 @@ cs_ret_tip = ("Customer Retention Matrix\n"
               "• Cohort Spread: Based on recurring customers by term\n"
               "• Fresh Renewals: Customers who paid that month\n"
               "• Total: Sum of recurring customers")
-cs_usage_tip = ("Usage Streak — last 28 days\n"
-                "• Green = Accounting Sync that day\n"
-                "• Yellow = any other event (uploads, transactions, invoices, recon, logins…)\n"
-                "• Grey = not active (no event that day)\n"
-                "Usage Active Days (28d) = number of active days (green + yellow); grey days are not active.\n"
-                "Hover a dot for that day's event counts.")
+cs_usage_tip = ("• Hover a dot for that day's event counts.\n"
+                "• Usage Active Days (28d) = number of active days; grey days are not active.\n"
+                "🟢 Accounting Sync / Recon processed\n"
+                "🔵 Login / Dashboard-viewed → excluded from status\n"
+                "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
+                "⚪ No event that day\n"
+                "Status = days since last real usage — Active / Risk / Inactive:\n"
+                "Daily: ≤4 / 5–10 / >10\n"
+                "Weekly: ≤8 / 9–16 / >16\n"
+                "Bi-weekly: ≤14 / 15–21 / >21\n"
+                "Monthly: ≤20 / 21–27 / >27")
 aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "• FT End Date is orange if duration is completed\n"
-              "• Active Days / Activity Score / streak = same 28-day measures as CS Usage & Health")
+              "• Active Days / Activity Score / streak = same 28-day measures as CS Usage & Health\n"
+              "🟢 Accounting Sync / Recon processed\n"
+              "🔵 Login / Dashboard-viewed → excluded from status\n"
+              "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
+              "⚪ No event that day")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
