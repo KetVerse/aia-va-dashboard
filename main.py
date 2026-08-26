@@ -4932,6 +4932,9 @@ aiabot_cohort_intent_ms = _ms_json([], [])
 aiabot_cohort_company = []
 aiabot_cohort_company_list = []
 aiabot_cohort_company_ms = _ms_json([], [])
+aiabot_cohort_csm = []
+aiabot_cohort_csm_list = []
+aiabot_cohort_csm_ms = _ms_json([], [])
 aiabot_cohort_view = []
 aiabot_cohort_view_list = ["Cohort %", "Users"]
 aiabot_cohort_view_ms = _ms_json(aiabot_cohort_view_list, [])
@@ -5010,7 +5013,7 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "• FT End Date is orange if duration is completed\n"
               "• Active Days / Activity Score / streak = same 28-day measures as CS Usage & Health\n"
               "🟢 Accounting Sync / Recon processed\n"
-              "🔵 Login / Dashboard-viewed → excluded from status\n"
+              "🔵 Login / Dashboard-viewed\n"
               "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
               "⚪ No event that day")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
@@ -5237,6 +5240,7 @@ _MS_DISPATCH = {
     "aiabot_fail_intent": ("aiabot_fail_intent",   "aiabot"),
     "aiabot_cohort_intent":  ("aiabot_cohort_intent",  "aiabot"),
     "aiabot_cohort_company": ("aiabot_cohort_company", "aiabot"),
+    "aiabot_cohort_csm":     ("aiabot_cohort_csm",     "aiabot"),
     "aiabot_cohort_view":    ("aiabot_cohort_view",    "aiabot"),
     "va_owner":       ("va_selected_owner",      "va"),
     "va_campaign":    ("va_selected_campaign",   "va"),
@@ -5400,6 +5404,7 @@ def _sync_ms(state):
     state.aiabot_fail_intent_ms = _ms_json(state.aiabot_fail_intent_list, state.aiabot_fail_intent)
     state.aiabot_cohort_intent_ms  = _ms_json(state.aiabot_cohort_intent_list,  state.aiabot_cohort_intent)
     state.aiabot_cohort_company_ms = _ms_json(state.aiabot_cohort_company_list, state.aiabot_cohort_company)
+    state.aiabot_cohort_csm_ms     = _ms_json(state.aiabot_cohort_csm_list,     state.aiabot_cohort_csm)
     state.aiabot_cohort_view_ms    = _ms_json(aiabot_cohort_view_list, state.aiabot_cohort_view)
 
     # VA Deal Name options depend on the selected Recurring Type(s)
@@ -5747,13 +5752,14 @@ def _build_aiabot():
         src = None
         if acct is not None and acct in by_acct.index:  src = by_acct.loc[acct]
         elif em is not None and em in by_em.index:       src = by_em.loc[em]
-        seg, dname, stage, rid = "Unknown", None, None, None
+        seg, dname, stage, rid, csm = "Unknown", None, None, None, None
         if src is not None:
             stage = src["deal_stage"]; dname = src["deal_name"]; rid = src["record_id"]
+            csm = src["cs_owner"] if "cs_owner" in src.index else None
             if   pd.notna(src["payment_date"]):   seg = "Paid"
             elif pd.notna(src["ft_start_date"]):  seg = "FT"
             else:                                 seg = "Unknown"
-        return seg, cname, dname, stage, rid
+        return seg, cname, dname, stage, rid, csm
     attr = {c: _co_attr(c) for c in m["cuid"].dropna().unique().tolist()}
     def _pick(i):
         return m["cuid"].map(lambda c: attr[c][i] if (pd.notna(c) and c in attr) else None)
@@ -5762,6 +5768,7 @@ def _build_aiabot():
     m["deal_name"]    = _pick(2)
     m["deal_stage"]   = _pick(3)
     m["record_id"]    = _pick(4)
+    m["cs_owner"]     = _pick(5)
     m["segment"] = m["segment"].fillna("Unknown")
     # ── Phone fallback ── messages with no company_uuid match still carry a WA
     # number; match it to aia_live.poc_number so a WA-only user resolves to their
@@ -5775,6 +5782,7 @@ def _build_aiabot():
             m.at[idx, "record_id"]  = src["record_id"]
             m.at[idx, "deal_name"]  = src["deal_name"]
             m.at[idx, "deal_stage"] = src["deal_stage"]
+            m.at[idx, "cs_owner"]   = src["cs_owner"] if "cs_owner" in src.index else None
             m.at[idx, "segment"]    = ("Paid" if pd.notna(src["payment_date"])
                                        else "FT" if pd.notna(src["ft_start_date"]) else "Unknown")
     # blank company_uuid -> keyed per phone so each unknown number is its own "company"
@@ -6041,17 +6049,26 @@ def _aiabot_refresh(state):
     # cohort Intent filter; Company filter also applies here) ──
     _c_company = _sel(state.aiabot_cohort_company)
     _c_intent  = _sel(state.aiabot_cohort_intent)   # synced with aiabot_fail_intent
-    # Company ↔ Intent cross-filter each other's option lists: each list narrows by
-    # the OTHER's selection, so picking an intent trims the Company dropdown & vice versa.
-    _int_scoped  = base if not _c_company else base[base["co_name"].isin(_c_company)]
-    _co_scoped   = base if not _c_intent  else base[base["intent"].isin(_c_intent)]
-    _intent_lov  = sorted(_int_scoped["intent"].dropna().unique().tolist())
-    _company_lov = sorted(_co_scoped["co_name"].dropna().unique().tolist())
+    _c_csm     = _sel(state.aiabot_cohort_csm)
+    # Company ↔ Intent ↔ CSM cross-filter each other's option lists: each list
+    # narrows by the OTHER selections, so picking one trims the rest & vice versa.
+    def _wa_scope(exclude):
+        z = base
+        if exclude != "co_name"  and _c_company: z = z[z["co_name"].isin(_c_company)]
+        if exclude != "intent"   and _c_intent:  z = z[z["intent"].isin(_c_intent)]
+        if exclude != "cs_owner" and _c_csm and "cs_owner" in z.columns:
+            z = z[z["cs_owner"].isin(_c_csm)]
+        return z
+    _intent_lov  = sorted(_wa_scope("intent")["intent"].dropna().unique().tolist())
+    _company_lov = sorted(_wa_scope("co_name")["co_name"].dropna().unique().tolist())
+    _csm_lov     = (sorted(_wa_scope("cs_owner")["cs_owner"].dropna().unique().tolist())
+                    if "cs_owner" in base.columns else [])
     state.aiabot_fail_intent_list = _intent_lov
     fail = d[d["answer_status"].notna() & (d["answer_status"] != "success")].copy()
     _fi = _sel(state.aiabot_fail_intent)
     if _fi:        fail = fail[fail["intent"].isin(_fi)]
     if _c_company: fail = fail[fail["co_name"].isin(_c_company)]
+    if _c_csm and "cs_owner" in fail.columns: fail = fail[fail["cs_owner"].isin(_c_csm)]
     if len(fail):
         fail = fail.sort_values("sent_date", ascending=False)
         fdf = pd.DataFrame({
@@ -6075,12 +6092,14 @@ def _aiabot_refresh(state):
     # ── AIA Bot Activity Cohort ──
     state.aiabot_cohort_intent_list = _intent_lov
     state.aiabot_cohort_company_list = _company_lov
+    state.aiabot_cohort_csm_list = _csm_lov
 
     _c_view = _sel(state.aiabot_cohort_view)
     # View: "Cohort %" -> % only, "Users" -> counts only, else both (default).
     _c_mode = ("pct" if _c_view == ["Cohort %"] else "count" if _c_view == ["Users"] else "all")
 
-    coh_df, coh_heat_from = _aiabot_cohort_matrix(base, intent_filter=_c_intent,
+    cbase = base[base["cs_owner"].isin(_c_csm)] if (_c_csm and "cs_owner" in base.columns) else base
+    coh_df, coh_heat_from = _aiabot_cohort_matrix(cbase, intent_filter=_c_intent,
                                                   company_filter=_c_company, mode=_c_mode)
     _coh_heat = {c: "green" for c in coh_df.columns if str(c).startswith("W")}
 
@@ -6094,10 +6113,11 @@ def _aiabot_refresh(state):
     else:
         state.aiabot_cohort_json = grid_payload_b64(pd.DataFrame())
     
-    # ── Per-Company Detail ── also respects the cohort Company + Intent filters
+    # ── Per-Company Detail ── also respects the cohort Company + Intent + CSM filters
     dpc = d
     if _c_company: dpc = dpc[dpc["co_name"].isin(_c_company)]
     if _c_intent:  dpc = dpc[dpc["intent"].isin(_c_intent)]
+    if _c_csm and "cs_owner" in dpc.columns: dpc = dpc[dpc["cs_owner"].isin(_c_csm)]
     rows = []
     for ck, grp in dpc.groupby("co_key"):
         st2 = grp["answer_status"]; tots = int(st2.notna().sum())

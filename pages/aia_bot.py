@@ -104,10 +104,14 @@ Success Rate
 <|part|class_name=chart-card|
 **AIA Bot Activity Cohort**
 
-<|layout|columns=1 1 1|gap=12px|
+<|layout|columns=1 1 1 1|gap=12px|
 <|part|
 <div class="msc wide" data-key="aiabot_cohort_company"><div class="msc-cap">Company</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
 <|{aiabot_cohort_company_ms}|text|mode=raw|class_name=msc-data msc-data-aiabot_cohort_company|>
+|>
+<|part|
+<div class="msc wide" data-key="aiabot_cohort_csm"><div class="msc-cap">CSM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aiabot_cohort_csm_ms}|text|mode=raw|class_name=msc-data msc-data-aiabot_cohort_csm|>
 |>
 <|part|
 <div class="msc wide" data-key="aiabot_cohort_intent"><div class="msc-cap">Intent</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
