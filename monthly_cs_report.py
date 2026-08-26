@@ -67,7 +67,7 @@ def build_rows(cohort, ev_lu, scores, today):
     for _, row in cohort.iterrows():
         email = row.get("login_email_id", "")
         acct = m._acct_for(email)
-        active_days, _streak = m._usage_28(email, ev_lu)
+        active_days, _streak, _botq, _botu = m._usage_28(email, ev_lu)
         activity_score = int(scores.get(acct, 0)) if acct else 0
         intd = row.get("integration_done_date")
         cad = row.get("cadence") or "Monthly"
