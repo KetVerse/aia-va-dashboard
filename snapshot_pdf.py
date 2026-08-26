@@ -49,15 +49,15 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # a payload edit is picked up as a normal update (and keeps the Total row, the
 # row numbering and the frame auto-height all consistent with what's shown).
 GRID_FILTERS = {
-    # name: (column header, mode, values)   mode: "drop" | "keep" | "date_max"
-    # date_max keeps only rows dated <= yesterday (drops today's partial data);
+    # name: (column header, mode, values)   mode: "drop" | "keep" | "date_eq"
+    # date_eq keeps only rows whose date equals YESTERDAY (the daily-snapshot day);
     # the date cell must be a "dd-MMM-yy" string. The values entry is ignored.
     "cs_usage":     ("Usage Active Days (28d)", "drop", ["0"]),
     "aia_ft":       ("Usage Active Days (28d)", "drop", ["0"]),   # Free Trial Usage & Health
     "vaf_tat":      ("TAT Status",              "drop", ["Parked", "Churned"]),
     "vaf_ar":       ("Due Status",              "drop", ["Churned"]),
-    "aiabot_fail":  ("Date",                    "date_max", ["yesterday"]),  # Where the Bot Falls Short
-    "aiabot_table": ("Last Seen",               "date_max", ["yesterday"]),  # Per-Company Detail
+    "aiabot_fail":  ("Date",                    "date_eq", ["yesterday"]),  # Where the Bot Falls Short — yesterday only
+    "aiabot_table": ("Last Seen",               "date_eq", ["yesterday"]),  # Per-Company Detail — last seen yesterday
 }
 
 _FILTER_JS = """
@@ -74,9 +74,10 @@ _FILTER_JS = """
     const i = (d.columns || []).indexOf(col);
     if (i < 0) { out.push(name + ': no column "' + col + '"'); continue; }
     const before = (d.rows || []).length;
-    if (mode === 'date_max') {
-      // keep only rows dated on/before YESTERDAY (drop today's partial data).
-      // date cells are "dd-MMM-yy" strings; unparseable/blank cells are kept.
+    if (mode === 'date_eq') {
+      // keep only rows dated exactly YESTERDAY (the daily-snapshot day).
+      // date cells are "dd-MMM-yy" strings; unparseable/blank cells are dropped
+      // (they can't be yesterday), so the table shows only yesterday's rows.
       const MON = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
       const now = new Date();
       const cut = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
@@ -85,11 +86,11 @@ _FILTER_JS = """
         let c = r[i];
         if (c && typeof c === 'object') c = ('v' in c) ? c.v : ('t' in c ? c.t : '');
         const m = String(c == null ? '' : c).trim().match(/^(\\d{1,2})-([A-Za-z]{3})-(\\d{2})$/);
-        if (!m) return true;
+        if (!m) return false;
         const mo = MON[m[2].toLowerCase()];
-        if (mo == null) return true;
+        if (mo == null) return false;
         const num = (2000 + (+m[3]))*10000 + (mo+1)*100 + (+m[1]);
-        return num <= cutNum;
+        return num === cutNum;
       });
     } else {
       const want = values.map(v => String(v).trim().toLowerCase());
