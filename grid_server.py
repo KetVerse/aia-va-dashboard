@@ -178,6 +178,72 @@ def grid_page(name):
                     mimetype="text/html")
 
 
+# Streak-token field index -> label, in the SAME order/labels as the streak-dot
+# hover tooltip (see the tooltip builder above), so Activity Notes read identically
+# to what a human sees hovering the dots. Only non-zero metrics are emitted.
+_NOTE_FIELDS = [
+    (2, "Accounting Syncs"), (3, "Items Synced"), (1, "Uploads"),
+    (18, "Bot Queries"), (19, "Bot Uploads"), (14, "Line Items"),
+    (15, "Tnx Lines"), (16, "Reviewed"), (17, "Needs Review"),
+    (13, "Transaction status"), (5, "Transactions updated"), (6, "Entities created"),
+    (10, "Invoices created / bulk-edited"), (7, "Recon processed"),
+    (8, "Vendor mismatches resolved"), (9, "Mapping completed"),
+    (11, "Deletes"), (12, "Logins"), (4, "Dashboard Viewed"),
+]
+
+
+def _streak_to_notes(streak, anchor):
+    """Render a 28-day streak token (index 0 = yesterday) into dated activity notes:
+    one block per ACTIVE day, most-recent first, blank line between blocks:
+
+        26-Aug-2026
+        Accounting Syncs: 2
+        Uploads: 3
+
+        24-Aug-2026
+        Dashboard Viewed: 5
+    """
+    import pandas as _pd
+    blocks = []
+    for i, day in enumerate((streak or "").split(";")):
+        p = day.split(",")
+        lines = []
+        for idx, label in _NOTE_FIELDS:
+            v = int(p[idx]) if (idx < len(p) and p[idx].strip()) else 0
+            if v:
+                lines.append(f"{label}: {v}")
+        if lines:
+            d = (anchor - _pd.Timedelta(days=i)).strftime("%d-%b-%Y")
+            blocks.append(d + "\n" + "\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+@grid_bp.route("/api/ft-activity-scores")
+def ft_activity_scores():
+    """JSON feed for the FT Live Tracker daily sync. For every Free-Trial deal (the
+    same population + numbers as the dashboard's Free Trial Usage & Health table),
+    returns record_id, Activity Score (28-day weighted, anchored to yesterday) and
+    Activity Notes (the streak-dot activities per active day). An external job (n8n)
+    matches record_id -> the tracker's Deal ID and writes the two columns."""
+    from datetime import date as _date
+    import main
+    df = main._build_ft_health_df()           # cached; record_id + Activity Score + streak
+    anchor = pd.Timestamp(_date.today()).normalize() - pd.Timedelta(days=1)   # yesterday
+    out = []
+    if df is not None and len(df):
+        for _, r in df.iterrows():
+            rid = str(r.get("record_id") or "").strip()
+            if not rid:
+                continue
+            out.append({
+                "record_id": rid,
+                "deal_name": str(r.get("Deal Name", "")),
+                "activity_score": int(r.get("Activity Score", 0) or 0),
+                "activity_notes": _streak_to_notes(r.get("Usage Streak Last 28D (desc)", ""), anchor),
+            })
+    return Response(json.dumps(out), mimetype="application/json")
+
+
 _PIE_COLORS = ["#42a5f5", "#16a34a", "#ea580c", "#8b5cf6", "#dc2626",
                "#0891b2", "#ca8a04", "#475569", "#db2777", "#65a30d"]
 
