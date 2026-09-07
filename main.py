@@ -616,14 +616,15 @@ def _make_funnel(stages, values, labels):
     return fig
 
 
-def _make_trend(labels, ds, dc, qual=None, ds_name="DS"):
+def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None):
     """Overlay column + optional line (Power BI style): DS as blue bars in the BACK
     and DC as orange bars in FRONT, both on the 0 baseline (so DC reads as a portion
     of DS, not added to it); Qualified — when given — as a navy spline with boxed
     values. DS labels sit above each bar; DC numbers sit just above the orange bar,
-    adaptively lifted so they never overlap the Qualified boxes. Bold labels + ticks."""
+    adaptively lifted so they never overlap the Qualified boxes. Bold labels + ticks.
+    bar_color overrides the primary (DS) bar colour (e.g. a distinct hue for FT)."""
     xb = [f"<b>{l}</b>" for l in labels]   # slightly bold date ticks
-    ds_c, dc_c, line_c = "#1a7fc4", "#ed7d31", "#1f4e79"   # DS blue, DC orange, line navy
+    ds_c, dc_c, line_c = (bar_color or "#1a7fc4"), "#ed7d31", "#1f4e79"   # DS blue, DC orange, line navy
     fig = go.Figure()
     # DS behind (full-height bar) — the only bars that carry value labels
     fig.add_bar(x=xb, y=ds, name=ds_name, marker_color=ds_c, marker_line_width=0,
@@ -634,16 +635,18 @@ def _make_trend(labels, ds, dc, qual=None, ds_name="DS"):
     # ABOVE the orange bar, adaptively lifted so it never overlaps the Qualified box
     # below it (Conducted >= Qualified); dark text on the rare DC >= DS day (sits on
     # white). White reads on the blue DS bar.
-    fig.add_bar(x=xb, y=dc, name="DC", marker_color=dc_c, marker_line_width=0,
-                cliponaxis=False)
+    if dc is not None:
+        fig.add_bar(x=xb, y=dc, name="DC", marker_color=dc_c, marker_line_width=0,
+                    cliponaxis=False)
 
     # Stack bottom -> top: Qualified box, DC number, DS label — never overlapping. Use
     # an estimate of px-per-data-unit to lift the DC number clear of the Qualified box.
-    _qs = list(qual) if qual is not None else [0] * len(dc)
-    _ymax = max([v for v in list(ds) + list(dc) + _qs if v] + [1])
+    _dc = list(dc) if dc is not None else []
+    _qs = list(qual) if qual is not None else [0] * len(ds)
+    _ymax = max([v for v in list(ds) + _dc + _qs if v] + [1])
     _ppu = 240.0 / (_ymax * 1.12)          # ~plot-area px per unit (h360 - t30 - b90)
     anns = []
-    for i, (x, d) in enumerate(zip(xb, dc)):
+    for i, (x, d) in enumerate(zip(xb, _dc)):
         if not d:
             continue
         q   = _qs[i] if i < len(_qs) else 0
@@ -2757,6 +2760,24 @@ def _aia_ops_refresh(state):
     state.aia_trend_fig = _make_trend(trend["date_label"].tolist(), trend["DS"].tolist(),
                                       trend["DC"].tolist(), trend["Qualified"].tolist(),
                                       ds_name="DB")   # Demos Booked (by ds_for)
+
+    # FT Started (green columns, by ft_start_date) vs Qualified — Qualified here is the
+    # subset of those FT-started deals that are qualified (prospect_score >= 60), by
+    # ft_start_date. Same date axis / filtering / styling as the demos trend, single bar.
+    _ftr = _rng(df, "ft_start_date", s, e_cap).copy()
+    if len(_ftr):
+        _ftr["date"] = _ftr["ft_start_date"].dt.normalize()
+        _ft_d = _ftr.groupby("date")["record_id"].nunique().reset_index(name="FT")
+        _ftq_d = (_ftr[_ftr["prospect_score"] >= 60].groupby("date")["record_id"]
+                  .nunique().reset_index(name="Qualified"))
+    else:
+        _ft_d = pd.DataFrame(columns=["date", "FT"]); _ftq_d = pd.DataFrame(columns=["date", "Qualified"])
+    ftt = (trend[["date", "date_label"]].merge(_ft_d, on="date", how="left")
+           .merge(_ftq_d, on="date", how="left").fillna(0))
+    ftt[["FT", "Qualified"]] = ftt[["FT", "Qualified"]].astype(int)
+    state.aia_ft_trend_fig = _make_trend(ftt["date_label"].tolist(), ftt["FT"].tolist(),
+                                         None, ftt["Qualified"].tolist(),
+                                         ds_name="FT Started", bar_color="#17a589")
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
     ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
@@ -4945,6 +4966,7 @@ aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
 aia_kpi_collected="₹0"; aia_kpi_collected_exact="₹0"; aia_kpi_mrr="₹0"; aia_kpi_mrr_exact="₹0"
 aia_funnel_fig = go.Figure()
 aia_trend_fig = go.Figure()
+aia_ft_trend_fig = go.Figure()
 aia_channel_pie_json = ""
 aia_channel_filter = "All"; aia_channel_order = []; aia_filter_label = ""
 aia_channel_click = ""; aia_channel_click_last = ""

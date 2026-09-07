@@ -77,17 +77,16 @@ Refunds
 |>
 |>
 
-<|layout|columns=1 2|gap=16px|
-<|part|class_name=chart-card|
-**Marketing Funnel (Cohort)** <|ⓘ|text|hover_text=All leads that entered HI stage in the selected cohort, regardless of current stage.|class_name=info-ico|>
-
-<|chart|figure={aia_funnel_fig}|plot_config={chart_config}|>
-|>
 <|part|class_name=chart-card|
 **Demos Booked vs Conducted vs Qualified Trend**
 
 <|chart|figure={aia_trend_fig}|plot_config={trend_config}|>
 |>
+
+<|part|class_name=chart-card|
+**FT Started vs Qualified Trend**
+
+<|chart|figure={aia_ft_trend_fig}|plot_config={trend_config}|>
 |>
 
 <|part|class_name=chart-card|
