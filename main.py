@@ -616,7 +616,7 @@ def _make_funnel(stages, values, labels):
     return fig
 
 
-def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None):
+def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None, line_name="Qualified"):
     """Overlay column + optional line (Power BI style): DS as blue bars in the BACK
     and DC as orange bars in FRONT, both on the 0 baseline (so DC reads as a portion
     of DS, not added to it); Qualified — when given — as a navy spline with boxed
@@ -660,7 +660,7 @@ def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None):
         anns.append(dict(x=x, y=d, text=f"<b>{d}</b>", showarrow=False, yshift=round(dc_ys),
                          font=dict(size=10, color=_col, family="Inter,sans-serif")))
     if qual is not None:
-        fig.add_scatter(x=xb, y=qual, name="Qualified", mode="lines+markers",
+        fig.add_scatter(x=xb, y=qual, name=line_name, mode="lines+markers",
                         line={"color": line_c, "width": 3, "shape": "spline"},
                         marker={"size": 7, "color": line_c})
         # soft rounded label boxes for the LINE points only
@@ -2761,23 +2761,27 @@ def _aia_ops_refresh(state):
                                       trend["DC"].tolist(), trend["Qualified"].tolist(),
                                       ds_name="DB")   # Demos Booked (by ds_for)
 
-    # FT Started (green columns, by ft_start_date) vs Qualified — Qualified here is the
-    # subset of those FT-started deals that are qualified (prospect_score >= 60), by
-    # ft_start_date. Same date axis / filtering / styling as the demos trend, single bar.
+    # FT Started (teal columns, by ft_start_date) vs Activated — Activated here is the
+    # subset of those FT-started deals whose 28-day Activity Score > 50 (login-email ->
+    # account -> score). Same date axis / filtering / styling as the demos trend.
+    _ft_scores = _activity_scores()
     _ftr = _rng(df, "ft_start_date", s, e_cap).copy()
     if len(_ftr):
         _ftr["date"] = _ftr["ft_start_date"].dt.normalize()
+        _ftr["_sc"] = _ftr["login_email_id"].map(
+            lambda em: _ft_scores.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0)
         _ft_d = _ftr.groupby("date")["record_id"].nunique().reset_index(name="FT")
-        _ftq_d = (_ftr[_ftr["prospect_score"] >= 60].groupby("date")["record_id"]
-                  .nunique().reset_index(name="Qualified"))
+        _fta_d = (_ftr[_ftr["_sc"] > 50].groupby("date")["record_id"]
+                  .nunique().reset_index(name="Activated"))
     else:
-        _ft_d = pd.DataFrame(columns=["date", "FT"]); _ftq_d = pd.DataFrame(columns=["date", "Qualified"])
+        _ft_d = pd.DataFrame(columns=["date", "FT"]); _fta_d = pd.DataFrame(columns=["date", "Activated"])
     ftt = (trend[["date", "date_label"]].merge(_ft_d, on="date", how="left")
-           .merge(_ftq_d, on="date", how="left").fillna(0))
-    ftt[["FT", "Qualified"]] = ftt[["FT", "Qualified"]].astype(int)
+           .merge(_fta_d, on="date", how="left").fillna(0))
+    ftt[["FT", "Activated"]] = ftt[["FT", "Activated"]].astype(int)
     state.aia_ft_trend_fig = _make_trend(ftt["date_label"].tolist(), ftt["FT"].tolist(),
-                                         None, ftt["Qualified"].tolist(),
-                                         ds_name="FT Started", bar_color="#17a589")
+                                         None, ftt["Activated"].tolist(),
+                                         ds_name="FT Started", bar_color="#17a589",
+                                         line_name="Activated (Score>50)")
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
     ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()

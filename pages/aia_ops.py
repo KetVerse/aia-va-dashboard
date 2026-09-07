@@ -84,7 +84,7 @@ Refunds
 |>
 
 <|part|class_name=chart-card|
-**FT Started vs Qualified Trend**
+**FT Started vs Activated Trend**
 
 <|chart|figure={aia_ft_trend_fig}|plot_config={trend_config}|>
 |>
