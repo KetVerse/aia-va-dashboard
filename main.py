@@ -2801,13 +2801,18 @@ def _aia_ops_refresh(state):
                           &(_AIA_LI["date_paid"]>=s)&(_AIA_LI["date_paid"]<=e)]
         new_li = li_sub[li_sub["recurring_type"]=="New"] if "recurring_type" in li_sub.columns and len(li_sub[li_sub["recurring_type"]=="New"]) else li_sub
         paid_no_refund = pd2[pd2["asked_refund"] != "Yes"] if "asked_refund" in pd2.columns else pd2
+        _o_ft = _rng(o, "ft_start_date", s, e)   # FT started in range; Activated = 28d Activity Score > 50
+        _o_ft_act = (_o_ft[_o_ft["login_email_id"].map(
+            lambda em: _ft_scores.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
+            ["record_id"].nunique() if len(_o_ft) else 0)
         rows.append({
             "GM":         owner,
             "AIA Bot":    _rng(o,"aia_bot_date",s,e)["record_id"].nunique(),
             "DS":         _rng(o,"ds_date",s,e)["record_id"].nunique(),
             "DC":         _rng(o,"dc_date",s,e)["record_id"].nunique(),
             "HI (ATP)":   _rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
-            "FT Started": _rng(o,"ft_start_date",s,e)["record_id"].nunique(),
+            "FT Started": _o_ft["record_id"].nunique(),
+            "FT Activated": _o_ft_act,
             "Tot Paid":   pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
             "Revenue":    int(pd2.groupby("record_id")["amount_paid"].max().sum()),
             "MRR":        int(new_li["mrr"].sum()) if len(new_li) else 0,
