@@ -2157,6 +2157,28 @@ def _build_real_dates():
     return m
 _REAL_DATES = _build_real_dates()
 
+
+def _load_integ_funnel():
+    """Onboarding funnel (aia_onboarding_funnel — internal + karboncard/korefi already
+    excluded): one row per email with first_integration_success_at. Returns [acct, day]
+    (day = IST date) for rows that reached integration success. Drives the AIA Ops FT
+    trend as the true account/email-based, first-time new-integration count."""
+    try:
+        d = _q(SUPABASE_URL,
+               "SELECT account_id::text AS acct, first_integration_success_at AS ts "
+               "FROM public.aia_onboarding_funnel WHERE first_integration_success_at IS NOT NULL")
+    except Exception as ex:
+        print(f"[WARN] integ_funnel load failed: {ex}")
+        return pd.DataFrame(columns=["acct", "day"])
+    if d is None or len(d) == 0:
+        return pd.DataFrame(columns=["acct", "day"])
+    day = (pd.to_datetime(d["ts"], errors="coerce", utc=True)
+             .dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize())
+    return pd.DataFrame({"acct": d["acct"].astype(str), "day": day}).dropna(subset=["day"])
+
+
+_INTEG_FUNNEL = _load_integ_funnel()
+
 def _build_company_bill():
     """Per (account_id, day) bill-review counts from company_daily_bill_summary,
     which is keyed by company_id (no account_id) — linked to account via
@@ -2254,7 +2276,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT, _GM_SLOTS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -2289,6 +2311,7 @@ def _reload_data():
     _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV = _build_activity_lookups()
     _ACCT_DATES = _build_acct_dates()
     _REAL_DATES = _build_real_dates()
+    _INTEG_FUNNEL = _load_integ_funnel()
     _CBILL = _build_company_bill()
     _DB_EVENTS = _build_db_bookings()
     _BILLING_END = _build_billing_end()
@@ -2761,18 +2784,19 @@ def _aia_ops_refresh(state):
                                       trend["DC"].tolist(), trend["Qualified"].tolist(),
                                       ds_name="DB")   # Demos Booked (by ds_for)
 
-    # FT Started (teal columns, by ft_start_date) vs Activated — Activated here is the
-    # subset of those FT-started deals whose 28-day Activity Score > 50 (login-email ->
-    # account -> score). Same date axis / filtering / styling as the demos trend.
+    # Trend "New Integrations" = first-ever integration success per account from the
+    # onboarding funnel (aia_onboarding_funnel; internal excluded, first-success) — an
+    # account/email count, so it isn't dropped for accounts without a matching AiA deal.
+    # Activated = those with a 28-day Activity Score > 50. Same axis/filtering as demos.
+    # NOTE: the GM table below keeps its "FT Started" column on ft_start_date (unchanged).
     _ft_scores = _activity_scores()
-    _ftr = _rng(df, "ft_start_date", s, e_cap).copy()
-    if len(_ftr):
-        _ftr["date"] = _ftr["ft_start_date"].dt.normalize()
-        _ftr["_sc"] = _ftr["login_email_id"].map(
-            lambda em: _ft_scores.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0)
-        _ft_d = _ftr.groupby("date")["record_id"].nunique().reset_index(name="FT")
-        _fta_d = (_ftr[_ftr["_sc"] > 50].groupby("date")["record_id"]
-                  .nunique().reset_index(name="Activated"))
+    _fn = _INTEG_FUNNEL
+    if _fn is not None and len(_fn):
+        _fn = _fn[(_fn["day"] >= s) & (_fn["day"] <= e_cap)].copy()
+        _fn["_sc"] = _fn["acct"].map(lambda a: _ft_scores.get(a, 0))
+        _ft_d = _fn.groupby("day").size().reset_index(name="FT").rename(columns={"day": "date"})
+        _fta_d = (_fn[_fn["_sc"] > 50].groupby("day").size().reset_index(name="Activated")
+                  .rename(columns={"day": "date"}))
     else:
         _ft_d = pd.DataFrame(columns=["date", "FT"]); _fta_d = pd.DataFrame(columns=["date", "Activated"])
     ftt = (trend[["date", "date_label"]].merge(_ft_d, on="date", how="left")
@@ -2780,7 +2804,7 @@ def _aia_ops_refresh(state):
     ftt[["FT", "Activated"]] = ftt[["FT", "Activated"]].astype(int)
     state.aia_ft_trend_fig = _make_trend(ftt["date_label"].tolist(), ftt["FT"].tolist(),
                                          None, ftt["Activated"].tolist(),
-                                         ds_name="FT Started", bar_color="#17a589",
+                                         ds_name="New Integrations", bar_color="#17a589",
                                          line_name="Activated (Score>50)")
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
@@ -5047,6 +5071,8 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "🔵 Login / Dashboard-viewed\n"
               "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
               "⚪ No event that day")
+aia_ft_trend_tip = ("• New Integrations = first-ever successful integration per account (internal excluded), counted on that day\n"
+                    "• Activated = of those, accounts with a 28-day Activity Score > 50")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"

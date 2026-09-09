@@ -84,7 +84,7 @@ Refunds
 |>
 
 <|part|class_name=chart-card|
-**FT Started vs Activated Trend**
+**New Integrations vs Activated Trend** <|ⓘ|text|hover_text={aia_ft_trend_tip}|class_name=info-ico|>
 
 <|chart|figure={aia_ft_trend_fig}|plot_config={trend_config}|>
 |>
