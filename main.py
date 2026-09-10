@@ -1687,13 +1687,22 @@ def _load_acct_by_email():
     m = {}
     try:
         df = _q(SUPABASE_URL,
-            "SELECT account_id, hubspot_login_email, account_email FROM public.aia_accounts",
+            "SELECT account_id, hubspot_login_email, account_email, is_internal_override "
+            "FROM public.aia_accounts",
             statement_timeout_ms=15000)
     except Exception as ex:
         print(f"[WARN] aia_accounts email map failed: {ex}")
         return m
     if df is None or not len(df):
         return m
+    # Suppressed (orphan) accounts must NOT win an email→account mapping. The daily
+    # Identity Sync flags a member's spurious standalone account is_internal_override
+    # and migrates its companies/usage to the real firm account — but it leaves the
+    # orphan's hubspot_login_email in place, so a HubSpot deal whose login_email_id is
+    # that member would otherwise resolve to the empty orphan (0 usage). Drop them here.
+    if "is_internal_override" in df.columns:
+        df = df[df["is_internal_override"].fillna(False).astype(bool) == False]  # noqa: E712
+    valid_accts = set(df["account_id"].dropna().astype(str))
     # hubspot_login_email first (first-wins), then account_email as fallback
     for col in ("hubspot_login_email", "account_email"):
         if col not in df.columns:
@@ -1701,6 +1710,23 @@ def _load_acct_by_email():
         for ac, em in df[["account_id", col]].dropna().itertuples(index=False):
             em = _clean_email(em)
             if em and em not in m:
+                m[em] = ac
+    # Membership fallback: an invited member's email → the firm account they belong to
+    # (aia_memberships), for emails not already mapped by a non-suppressed account.
+    # Lets a deal whose login_email_id is an invited teammate (e.g. a CA firm's staff)
+    # resolve to the firm's active account instead of that teammate's orphan account.
+    try:
+        mem = _q(SUPABASE_URL,
+            "SELECT email, account_id FROM public.aia_memberships "
+            "WHERE email IS NOT NULL AND account_id IS NOT NULL ORDER BY first_seen",
+            statement_timeout_ms=15000)
+    except Exception as ex:
+        print(f"[WARN] aia_memberships fallback failed: {ex}")
+        mem = None
+    if mem is not None and len(mem):
+        for em, ac in mem[["email", "account_id"]].dropna().itertuples(index=False):
+            em = _clean_email(em); ac = str(ac)
+            if em and em not in m and ac in valid_accts:
                 m[em] = ac
     return m
 
@@ -2179,6 +2205,49 @@ def _load_integ_funnel():
 
 _INTEG_FUNNEL = _load_integ_funnel()
 
+
+def _load_onboarding_dates():
+    """account_id -> (signed_up_at, first_integration_success_at, email) as IST dates
+    from aia_onboarding_funnel — feeds the gap table's Sign Up / Integration columns
+    and the fully-untracked signup rows (their email in place of a deal name).
+    Earliest dates per account. Empty dict on any failure."""
+    try:
+        d = _q(SUPABASE_URL,
+               "SELECT account_id::text AS acct, MIN(signed_up_at) AS su, "
+               "MIN(first_integration_success_at) AS ig, MIN(email) AS email "
+               "FROM public.aia_onboarding_funnel WHERE account_id IS NOT NULL GROUP BY account_id")
+    except Exception as ex:
+        print(f"[WARN] onboarding dates load failed: {ex}")
+        return {}
+    if d is None or len(d) == 0:
+        return {}
+    def _norm(s):
+        return (pd.to_datetime(s, errors="coerce", utc=True)
+                  .dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize())
+    su = _norm(d["su"]); ig = _norm(d["ig"])
+    return {a: (s, i, em) for a, s, i, em in zip(d["acct"].astype(str), su, ig, d["email"])}
+
+
+_ONBOARD_DATES = _load_onboarding_dates()
+
+
+def _load_internal_accts():
+    """account_ids flagged internal in aia_accounts (is_internal_override = true) —
+    test / employee / suppressed-orphan accounts. Kept OUT of the poc_email gap table.
+    Flip the flag in aia_accounts to add/remove one; no code change needed."""
+    try:
+        d = _q(SUPABASE_URL,
+               "SELECT account_id::text acct FROM public.aia_accounts WHERE is_internal_override = true")
+    except Exception as ex:
+        print(f"[WARN] internal accts load failed: {ex}")
+        return set()
+    if d is None or len(d) == 0:
+        return set()
+    return set(d["acct"].astype(str))
+
+
+_INTERNAL_ACCTS = _load_internal_accts()
+
 def _build_company_bill():
     """Per (account_id, day) bill-review counts from company_daily_bill_summary,
     which is keyed by company_id (no account_id) — linked to account via
@@ -2276,9 +2345,10 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _aiaBOT, _GM_SLOTS
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
+    _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
@@ -2312,6 +2382,8 @@ def _reload_data():
     _ACCT_DATES = _build_acct_dates()
     _REAL_DATES = _build_real_dates()
     _INTEG_FUNNEL = _load_integ_funnel()
+    _ONBOARD_DATES = _load_onboarding_dates()
+    _INTERNAL_ACCTS = _load_internal_accts()
     _CBILL = _build_company_bill()
     _DB_EVENTS = _build_db_bookings()
     _BILLING_END = _build_billing_end()
@@ -2606,6 +2678,7 @@ def _customer_status(row, upl, syn):
 # ═══════════════════════════════════════════════════════════════════
 
 _FT_HEALTH_DF = None
+_POCGAP_DF = None
 
 def _build_ft_health_df():
     """Free-Trial Customers Usage & Health data (AIA Ops): every AIA deal with a
@@ -2660,6 +2733,109 @@ def _build_ft_health_df():
     return _FT_HEALTH_DF
 
 
+def _build_pocgap_df():
+    """poc_email fallback gap table (AIA Ops): AIA deals whose login_email_id does
+    NOT resolve to a product account, but whose poc_email DOES — i.e. accounts we
+    currently miss with the login_email_id join alone. Same 28-day usage streak /
+    Activity Score / Active-Days measures as the FT Usage & Health table, computed
+    off the recovered (poc_email) account. Cached; rebuilt on data reload."""
+    global _POCGAP_DF
+    if _POCGAP_DF is not None:
+        return _POCGAP_DF
+    base = (_AIA.dropna(subset=["record_id"]).drop_duplicates("record_id")
+            if "poc_email" in _AIA.columns else _AIA.iloc[0:0])
+    if len(base) == 0:
+        _POCGAP_DF = pd.DataFrame()
+        return _POCGAP_DF
+    _ev_lu = _recent_event_lookup()
+    _scores = _activity_scores()
+    # Accounts already reachable via ANY deal's login_email_id. A HubSpot contact
+    # owns many deals (marketing form-fills, repeat leads AND the real paid deal),
+    # and poc_email is that contact's email — so a junk lead deal can "recover" an
+    # account that a *different* (paid) deal already maps. Those are NOT gaps.
+    _mapped = set()
+    if "login_email_id" in base.columns:
+        for _le in base["login_email_id"]:
+            if pd.notna(_le) and str(_le).strip():
+                _a = _acct_for(_le)
+                if _a is not None:
+                    _mapped.add(_a)
+    rows = []
+    for _, row in base.iterrows():
+        _le = row.get("login_email_id")
+        la = _acct_for(_le) if (pd.notna(_le) and str(_le).strip()) else None
+        if la is not None:
+            continue                        # login_email_id already maps — not a gap
+        poc = row.get("poc_email")
+        pa = _acct_for(poc) if (pd.notna(poc) and str(poc).strip()) else None
+        if pa is None or pa in _mapped or pa in _INTERNAL_ACCTS:
+            continue                        # no account, already mapped, or flagged internal
+        active_days, streak, bot_q, bot_u = _usage_28(poc, _ev_lu)
+        _su, _ig, _ = _ONBOARD_DATES.get(pa, (pd.NaT, pd.NaT, ""))
+        _fmt = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
+        rows.append({
+            "Deal / Signup Email": row.get("deal_name", ""),
+            "record_id": row.get("record_id", ""),
+            "GM": row.get("deal_owner", ""),
+            "Stage": row.get("deal_stage", ""),
+            "Sign Up Date": _fmt(_su),
+            "Integration Date": _fmt(_ig),
+            "Usage Active Days (28d)": active_days,
+            "__botTip": (f"Bot Queries: {bot_q} · Bot Uploads: {bot_u}" if (bot_q or bot_u) else ""),
+            "Activity Score": int(_scores.get(pa, 0)),
+            "Usage Streak Last 28D (desc)": streak,
+            "__acct": pa,
+            "__cd": row.get("create_date"),
+        })
+    g = pd.DataFrame(rows)
+    # One contact -> many deals: collapse to ONE row per recovered account, keeping
+    # the most recently created deal as the representative link.
+    if len(g):
+        g = g.sort_values("__cd", na_position="first").drop_duplicates("__acct", keep="last")
+    _rec = set(g["__acct"]) if len(g) else set()
+    if len(g):
+        g = g.drop(columns=["__acct", "__cd"]).reset_index(drop=True)
+
+    # Fully-untracked signups: onboarding accounts with NO HubSpot deal at all
+    # (neither login_email_id nor poc_email reaches them). No deal -> show the signup
+    # email in place of a deal name, GM "—", Stage "Untracked". Usage / Activity Score
+    # / streak still computed off the account (resolved via any of its known emails).
+    _a2e = {}
+    for _em, _ac in _EMAIL_ACCT.items():
+        if _ac is not None and _ac not in _a2e:
+            _a2e[_ac] = _em
+    _ufmt = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
+    urows = []
+    for acct, (su, ig, email) in _ONBOARD_DATES.items():
+        # Judge tracked-ness by the RESOLVED account, not the raw funnel account_id: a
+        # funnel account is often a duplicate self-signup under a firm that's already
+        # tracked (e.g. svgassociates23 signs up on its own account but resolves to the
+        # firm account the paid deal points at). _acct_for folds in memberships/events.
+        canon = (_acct_for(email) if email else None) or acct
+        if (canon in _mapped or canon in _rec or canon in _INTERNAL_ACCTS
+                or acct in _mapped or acct in _rec or acct in _INTERNAL_ACCTS):
+            continue                        # tracked/recovered/internal under the resolved account
+        active_days, streak, bot_q, bot_u = _usage_28(email or _a2e.get(canon, ""), _ev_lu)
+        if active_days <= 0:
+            continue                        # untracked signups only when they show real 28d usage
+        urows.append({
+            "Deal / Signup Email": email or "",
+            "record_id": "",
+            "GM": "—",
+            "Stage": "Untracked",
+            "Sign Up Date": _ufmt(su),
+            "Integration Date": _ufmt(ig),
+            "Usage Active Days (28d)": active_days,
+            "__botTip": (f"Bot Queries: {bot_q} · Bot Uploads: {bot_u}" if (bot_q or bot_u) else ""),
+            "Activity Score": int(_scores.get(canon, 0)),
+            "Usage Streak Last 28D (desc)": streak,
+        })
+    if urows:
+        g = pd.concat([g, pd.DataFrame(urows)], ignore_index=True) if len(g) else pd.DataFrame(urows)
+    _POCGAP_DF = g.reset_index(drop=True)
+    return _POCGAP_DF
+
+
 def _apply_ft_filter(state):
     """Filter the Free Trial Usage & Health grid by Deal Name / GM / Deal Stage."""
     d = state.aia_ft_all
@@ -2690,6 +2866,35 @@ def _apply_ft_filter(state):
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
 
+def _apply_pocgap_filter(state):
+    """poc_email gap grid — filtered by the SAME Deal Name / GM / Deal Stage
+    selections as the Free Trial Usage & Health table (shared controls)."""
+    d = state.aia_pocgap_all
+    if d is None or len(d) == 0:
+        state.aia_pocgap_json = grid_payload_b64(pd.DataFrame())
+        return
+    _dl = _sel(state.aia_ft_deal)
+    if _dl:
+        d = d[d["Deal / Signup Email"].isin(_dl)]
+    _gm = _sel(state.aia_ft_gm)
+    if _gm:
+        d = d[d["GM"].isin(_gm)]
+    _st = _sel(state.aia_ft_stage)
+    if _st:
+        d = d[d["Stage"].isin(_st)]
+    d = d.reset_index(drop=True)
+    d.insert(0, "Sl no", range(1, len(d) + 1))
+    state.aia_pocgap_json = grid_payload_b64(
+        d, sort_default_col="Activity Score", rownum_col="Sl no",
+        col_w={"Deal / Signup Email": 300},
+        streak_cols=["Usage Streak Last 28D (desc)"],
+        center_cols=["Sign Up Date", "Integration Date"],
+        date_cols=["Sign Up Date", "Integration Date"],
+        heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
+        tip_cols={"Usage Active Days (28d)": "__botTip"},
+        link_cols={"Deal / Signup Email": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
+
+
 def _aia_ops_refresh(state):
     s = pd.Timestamp(state.aia_start_date)
     e = pd.Timestamp(state.aia_end_date)
@@ -2699,6 +2904,8 @@ def _aia_ops_refresh(state):
     state.aia_ft_gm_list    = sorted(_ftdf["GM"].dropna().unique().tolist()) if len(_ftdf) else []
     state.aia_ft_stage_list = sorted(_ftdf["Stage"].dropna().unique().tolist()) if len(_ftdf) else []
     _apply_ft_filter(state)
+    state.aia_pocgap_all = _build_pocgap_df()
+    _apply_pocgap_filter(state)
     df = _AIA.copy()
     _o = _sel(state.aia_selected_owner)
     if _o:    df = df[df["deal_owner"].isin(_o)]
@@ -4963,6 +5170,7 @@ aia_campaign_list = sorted(_AIA["utm_campaign"].dropna().unique().tolist())
 aia_selected_owner = [];  aia_selected_campaign = []
 # Free Trial Usage & Health filters (Deal Name / GM / Deal Stage)
 aia_ft_all = None
+aia_pocgap_all = None
 aia_ft_deal = []; aia_ft_gm = []; aia_ft_stage = []
 aia_ft_deal_list = []; aia_ft_gm_list = []; aia_ft_stage_list = []
 aia_ft_deal_ms = _ms_json([], []); aia_ft_gm_ms = _ms_json([], []); aia_ft_stage_ms = _ms_json([], [])
@@ -5003,7 +5211,7 @@ aia_ft_trend_fig = go.Figure()
 aia_channel_pie_json = ""
 aia_channel_filter = "All"; aia_channel_order = []; aia_filter_label = ""
 aia_channel_click = ""; aia_channel_click_last = ""
-aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""; aia_ft_json=""
+aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""; aia_ft_json=""; aia_pocgap_json=""
 aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.DataFrame()
 
 # Page 2
@@ -5071,6 +5279,8 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "🔵 Login / Dashboard-viewed\n"
               "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
               "⚪ No event that day")
+aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no referencing deal.\n"
+                  "Uses the FT filters.")
 aia_ft_trend_tip = ("• New Integrations = first-ever successful integration per account (internal excluded), counted on that day\n"
                     "• Activated = of those, accounts with a 28-day Activity Score > 50")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
@@ -5423,23 +5633,36 @@ def _sync_ms(state):
     # empty Status "" is included as a real, selectable option (an empty box)
     state.cs_usage_status_ms = _ms_json(_ulov("Status"), state.cs_usage_status)
 
-    # Free Trial Usage & Health: Deal Name / GM / Deal Stage cross-filter each other
-    _fa = state.aia_ft_all
-    def _flov(target):
-        d = _fa
-        if d is None or len(d) == 0:
-            return []
-        for col, sv in (("Deal Name", state.aia_ft_deal), ("GM", state.aia_ft_gm),
-                        ("Stage", state.aia_ft_stage)):
-            if col == target:
+    # Free Trial Usage & Health AND the poc_email gap table share these filters, so the
+    # option lists are the UNION of both frames (the gap table adds stages like
+    # "Untracked"/"Discard", extra GMs, and its recovered deal names). The gap frame's
+    # deal column is "Deal / Signup Email"; its untracked rows hold an email there, so
+    # the Deal Name picker drops Stage=="Untracked" rows (deal names only, no emails).
+    _sd = _sel(state.aia_ft_deal); _sg = _sel(state.aia_ft_gm); _ss = _sel(state.aia_ft_stage)
+    def _lov(target):
+        vals = set()
+        for df, dealcol in ((state.aia_ft_all, "Deal Name"),
+                            (state.aia_pocgap_all, "Deal / Signup Email")):
+            if df is None or len(df) == 0:
                 continue
-            s = _sel(sv)
-            if s:
-                d = d[d[col].isin(s)]
-        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.aia_ft_deal_ms  = _ms_json(_flov("Deal Name"), state.aia_ft_deal)
-    state.aia_ft_gm_ms    = _ms_json(_flov("GM"),        state.aia_ft_gm)
-    state.aia_ft_stage_ms = _ms_json(_flov("Stage"),     state.aia_ft_stage)
+            d = df
+            if target == "Deal" and "Stage" in d.columns:
+                d = d[d["Stage"] != "Untracked"]          # deal-name picker: real deals only
+            if target != "Deal" and _sd:
+                d = d[d[dealcol].isin(_sd)]
+            if target != "GM" and _sg and "GM" in d.columns:
+                d = d[d["GM"].isin(_sg)]
+            if target != "Stage" and _ss and "Stage" in d.columns:
+                d = d[d["Stage"].isin(_ss)]
+            col = dealcol if target == "Deal" else ("GM" if target == "GM" else "Stage")
+            if col in d.columns:
+                vals |= set(d[col].dropna().astype(str))
+        if target == "GM":
+            vals.discard("—")                              # placeholder for untracked rows, not a real GM
+        return sorted(vals)
+    state.aia_ft_deal_ms  = _ms_json(_lov("Deal"),  state.aia_ft_deal)
+    state.aia_ft_gm_ms    = _ms_json(_lov("GM"),    state.aia_ft_gm)
+    state.aia_ft_stage_ms = _ms_json(_lov("Stage"), state.aia_ft_stage)
 
     # AIA Bot: Segment (fixed lov) / Deal Stage / Deal Name cross-filter
     _wa = state.aiabot_all
@@ -5543,7 +5766,7 @@ def on_ms_change(state):
     elif key == "aiabot_fail_intent":
         state.aiabot_cohort_intent = sel
     if scope == "aia":     on_aia_filter_change(state)
-    elif scope == "aiaft": _apply_ft_filter(state)
+    elif scope == "aiaft": _apply_ft_filter(state); _apply_pocgap_filter(state)
     elif scope == "aiabot": _aiabot_refresh(state)
     elif scope == "va":    on_va_filter_change(state)
     elif scope == "mkt":   _mkt_refresh(state)
