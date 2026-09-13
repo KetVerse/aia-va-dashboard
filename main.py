@@ -304,26 +304,43 @@ _COPYBTN_SCRIPT = """
   // thead/tbody/tfoot only contain VISIBLE columns, so header/rows/total stay
   // aligned; we strip the sort-arrow (.arr) and priority (.pri) markers from
   // header cells. This avoids depending on the iframe's JS internals.
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
   function cells(tr, sel){
+    // Each cell -> {text, href}. href is the linked column's absolute URL (e.g. the
+    // HubSpot deal link) so paste keeps the hyperlink, not just the label.
     return Array.prototype.map.call(tr.querySelectorAll(sel), function(c){
       var t=c.cloneNode(true);
       var junk=t.querySelectorAll(".arr, .pri");
       for(var i=0;i<junk.length;i++) junk[i].remove();
-      return (t.textContent||"").replace(/\\s+/g," ").trim();
+      var a=c.querySelector("a[href]");
+      return { text:(t.textContent||"").replace(/\\s+/g," ").trim(),
+               href:(a?a.getAttribute("href"):"") };
     });
   }
+  function tsvRow(cs){ return cs.map(function(c){ return c.text; }).join("\\t"); }
+  function htmlRow(cs,tag){
+    return "<tr>"+cs.map(function(c){
+      var inner=c.href ? ('<a href="'+esc(c.href).replace(/"/g,"&quot;")+'">'+esc(c.text)+'</a>')
+                       : esc(c.text);
+      return "<"+tag+">"+inner+"</"+tag+">";
+    }).join("")+"</tr>";
+  }
   function build(f){
+    // Returns {tsv, html}: TSV for text/plain, an HTML table (with <a> anchors) for
+    // text/html so Excel & Google Sheets keep the hyperlink attached to the cell.
     var doc;
     try{ doc=f.contentDocument; }catch(e){ return null; }
     if(!doc) return null;
     var head=doc.querySelector("#h tr");
     var brows=doc.querySelectorAll("#b tr");
     if(!head || !brows.length) return null;
-    var lines=[cells(head,"th").join("\\t")];
-    for(var i=0;i<brows.length;i++) lines.push(cells(brows[i],"td").join("\\t"));
+    var hc=cells(head,"th");
+    var tsv=[tsvRow(hc)], html="<table><thead>"+htmlRow(hc,"th")+"</thead><tbody>";
+    for(var i=0;i<brows.length;i++){ var rc=cells(brows[i],"td"); tsv.push(tsvRow(rc)); html+=htmlRow(rc,"td"); }
+    html+="</tbody>";
     var ft=doc.querySelector("#f tr");
-    if(ft) lines.push(cells(ft,"td").join("\\t"));
-    return lines.join("\\n");
+    if(ft){ var fc=cells(ft,"td"); tsv.push(tsvRow(fc)); html+="<tfoot>"+htmlRow(fc,"td")+"</tfoot>"; }
+    return { tsv:tsv.join("\\n"), html:html+"</table>" };
   }
   function fb(text,done){
     var ta=document.createElement("textarea"); ta.value=text;
@@ -332,12 +349,27 @@ _COPYBTN_SCRIPT = """
     try{ document.execCommand("copy"); }catch(e){}
     ta.remove(); if(done) done();
   }
-  function copyText(text,btn){
+  function copyText(data,btn){
     var done=function(){ if(btn){ btn.classList.add("copied");
       setTimeout(function(){ btn.classList.remove("copied"); },1200); } };
+    var tsv=data.tsv, html=data.html;
+    // Prefer clipboard.write with BOTH text/html (keeps hyperlinks) and text/plain.
+    if(navigator.clipboard && window.ClipboardItem){
+      try{
+        var item=new ClipboardItem({
+          "text/html": new Blob([html],{type:"text/html"}),
+          "text/plain": new Blob([tsv],{type:"text/plain"})
+        });
+        navigator.clipboard.write([item]).then(done).catch(function(){
+          if(navigator.clipboard.writeText){ navigator.clipboard.writeText(tsv).then(done).catch(function(){ fb(tsv,done); }); }
+          else fb(tsv,done);
+        });
+        return;
+      }catch(e){}
+    }
     if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(text).then(done).catch(function(){ fb(text,done); });
-    } else { fb(text,done); }
+      navigator.clipboard.writeText(tsv).then(done).catch(function(){ fb(tsv,done); });
+    } else { fb(tsv,done); }
   }
   function attach(){
     var frames=document.querySelectorAll("iframe.grid-frame");
