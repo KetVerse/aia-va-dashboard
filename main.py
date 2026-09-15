@@ -1845,7 +1845,7 @@ def _load_all():
         aia = _q(NEON_URL, "SELECT * FROM public.aia_live WHERE is_deleted IS NULL")
         va  = _q(NEON_URL, "SELECT * FROM public.va_live WHERE is_deleted IS NULL")
         li  = _q(NEON_URL, "SELECT * FROM public.line_items WHERE deleted IS NULL")
-        inc = _q(NEON_URL, "SELECT gm_combined, month, monthly_mrr_target, is_gap_carry_forwarded FROM public.incentive_targets ORDER BY month, gm_combined")
+        inc = _q(NEON_URL, "SELECT * FROM public.incentive_targets ORDER BY month, gm_combined")
         mkt = _q(SUPABASE_URL, "SELECT * FROM public.marketing_spends ORDER BY day ASC")
         upl = _q(SUPABASE_URL, "SELECT * FROM public.user_daily_upload_summary ORDER BY date ASC")
         syn = _q(SUPABASE_URL, "SELECT * FROM public.accounting_sync_mixpanel")
@@ -1874,7 +1874,7 @@ def _load_all():
         cols_mkt = ["day","ad_campaign","campaign_type","cost","conversions","impressions","channel"]
         cols_upl = ["id","date","email","account_id","total_uploads","bill_uploads","statement_uploads"]
         cols_syn = ["email","items_count","event_date","account_id","sync_type"]
-        cols_inc = ["gm_combined","month","monthly_mrr_target","is_gap_carry_forwarded"]
+        cols_inc = ["gm_combined","month","monthly_mrr_target","is_gap_carry_forwarded","incentive_type"]
         return (pd.DataFrame(columns=cols_aia), pd.DataFrame(columns=cols_va),
                 pd.DataFrame(columns=cols_li),  pd.DataFrame(columns=cols_inc),
                 pd.DataFrame(columns=cols_mkt), pd.DataFrame(columns=cols_upl),
@@ -2054,6 +2054,12 @@ _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
 _INCENTIVE_TARGETS = _RAW_INC.copy()
 if "month" in _INCENTIVE_TARGETS.columns:
     _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
+# incentive_type per row: 'Revenue' (target = ₹) or 'Customers' (target = # customers).
+# Default to Revenue so the tracker is unchanged until the DB column is added/set.
+if "incentive_type" in _INCENTIVE_TARGETS.columns:
+    _INCENTIVE_TARGETS["incentive_type"] = _INCENTIVE_TARGETS["incentive_type"].fillna("Revenue")
+else:
+    _INCENTIVE_TARGETS["incentive_type"] = "Revenue"
 
 _MKT = _RAW_MKT.copy()
 if "day" in _MKT.columns:
@@ -2392,6 +2398,10 @@ def _reload_data():
     _INCENTIVE_TARGETS = _RAW_INC.copy()
     if "month" in _INCENTIVE_TARGETS.columns:
         _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
+    if "incentive_type" in _INCENTIVE_TARGETS.columns:
+        _INCENTIVE_TARGETS["incentive_type"] = _INCENTIVE_TARGETS["incentive_type"].fillna("Revenue")
+    else:
+        _INCENTIVE_TARGETS["incentive_type"] = "Revenue"
     _MKT = _RAW_MKT.copy()
     if "day" in _MKT.columns:
         _MKT["day"] = pd.to_datetime(_MKT["day"], errors="coerce")
@@ -3138,7 +3148,7 @@ def _aia_ops_refresh(state):
     state.aia_parked_df  = _reason("parked_date",      "Parked",      "aia_parked_reason")
 
     # ── Incentive Tracker ────────────────────────────────────────────
-    _INC_COLS = ["GM","Gap (Prev Month)","AIA+VA Revenue","Combined MRR",
+    _INC_COLS = ["GM","Gap (Prev Month)","AIA+VA Revenue","Combined MRR","Customers",
                  "Base Target","Adjusted Target","Achievement %","Incentive Tier","Incentive Payout"]
     if len(_INCENTIVE_TARGETS) == 0:
         state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
@@ -3156,6 +3166,11 @@ def _aia_ops_refresh(state):
             va_c  = _rng(_VA,  "payment_date", m_start, m_end)
             aia_p = _rng(_AIA, "payment_date", pm_start, pm_end)
             va_p  = _rng(_VA,  "payment_date", pm_start, pm_end)
+            # Customers-brought-in basis: count of AIA + VA deals paid in the month
+            # (payment_date), per GM (deal_owner). aia_c / va_c above are the month's
+            # paid deals. Used when a target row's incentive_type = 'Customers'.
+            _cust_c = (aia_c.groupby("deal_owner")["record_id"].nunique()
+                       .add(va_c.groupby("deal_owner")["record_id"].nunique(), fill_value=0).astype(int))
             # Per-GM hover breakdown, one line per DEAL:
             #   "₹price[, OT ₹ot] (date, term) – Deal Name"
             # rec_frame carries the main price in `val_col`; ot_frame supplies the
@@ -3193,6 +3208,9 @@ def _aia_ops_refresh(state):
                 gm        = tr["gm_combined"]
                 base_tgt  = int(tr["monthly_mrr_target"])
                 carry_fwd = bool(tr["is_gap_carry_forwarded"])
+                itype     = str(tr.get("incentive_type", "Revenue") or "Revenue")
+                is_cust   = itype.strip().lower().startswith("cust")   # target is a customer count
+                cust_n    = int(_cust_c.get(gm, 0))
                 prev_tr   = prev_t[prev_t["gm_combined"] == gm]
                 prev_tgt  = int(prev_tr["monthly_mrr_target"].iloc[0]) if len(prev_tr) else 0
                 aia_pg    = aia_p[aia_p["deal_owner"] == gm]
@@ -3201,7 +3219,7 @@ def _aia_ops_refresh(state):
                              + va_pg["amount_paid"].sum()
                              + (va_pg["ot_amount_paid"].sum() if "ot_amount_paid" in va_pg.columns else 0))
                 gap = (max(0, prev_tgt * 0.70 - prev_rev)
-                       if carry_fwd and prev_tgt > 0 and prev_rev < prev_tgt * 0.70 else 0)
+                       if (not is_cust) and carry_fwd and prev_tgt > 0 and prev_rev < prev_tgt * 0.70 else 0)
                 adj_tgt   = base_tgt + gap
                 aia_cg    = aia_c[aia_c["deal_owner"] == gm]
                 va_cg     = va_c[va_c["deal_owner"] == gm]
@@ -3239,9 +3257,10 @@ def _aia_ops_refresh(state):
                 ])
                 rev_tip = "\n".join(_tip_lines(_rev_rec, _ot, "tipval"))
                 mrr_tip = "\n".join(_tip_lines(_mrr_rec, _ot, "tipval"))
-                ach = total_rev / adj_tgt if adj_tgt > 0 else 0
-                if base_tgt == 0:    tier = "No Target Set"
-                elif total_rev == 0: tier = "No Revenue"
+                ach = (((cust_n / adj_tgt) if is_cust else (total_rev / adj_tgt)) if adj_tgt > 0 else 0)
+                if base_tgt == 0:              tier = "No Target Set"
+                elif is_cust and cust_n == 0:  tier = "No Customers"
+                elif (not is_cust) and total_rev == 0: tier = "No Revenue"
                 elif ach < 0.70:     tier = "Under (<70%)"
                 elif ach <= 1.30:    tier = "Base (70-130%)"
                 else:                tier = "Accelerated (>130%)"
@@ -3258,6 +3277,7 @@ def _aia_ops_refresh(state):
                     "Gap (Prev Month)": int(gap),
                     "AIA+VA Revenue":   int(total_rev),
                     "Combined MRR":     int(comb_mrr),
+                    "Customers":        cust_n,
                     "Base Target":      base_tgt,
                     "Adjusted Target":  int(adj_tgt),
                     "Achievement %":    f"{ach*100:.1f}%",
@@ -3271,6 +3291,7 @@ def _aia_ops_refresh(state):
                 tot_row = {"GM":"Total","Gap (Prev Month)":inc_df["Gap (Prev Month)"].sum(),
                            "AIA+VA Revenue":inc_df["AIA+VA Revenue"].sum(),
                            "Combined MRR":inc_df["Combined MRR"].sum(),
+                           "Customers":inc_df["Customers"].sum(),
                            "Base Target":inc_df["Base Target"].sum(),
                            "Adjusted Target":inc_df["Adjusted Target"].sum(),
                            "Achievement %":"","Incentive Tier":"",
