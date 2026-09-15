@@ -3067,8 +3067,6 @@ def _aia_ops_refresh(state):
     rows = []
     for owner in sorted(df["deal_owner"].dropna().unique()):
         o   = df[df["deal_owner"]==owner]
-        l   = _rng(o,"create_date",s,e)["record_id"].nunique()
-        if l == 0: continue
         pd2 = _rng(o,"payment_date",s,e)
         li_sub = _AIA_LI[_AIA_LI["record_id"].isin(pd2["record_id"])
                           &(_AIA_LI["date_paid"]>=s)&(_AIA_LI["date_paid"]<=e)]
@@ -3078,7 +3076,7 @@ def _aia_ops_refresh(state):
         _o_ft_act = (_o_ft[_o_ft["login_email_id"].map(
             lambda em: _ft_scores.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
             ["record_id"].nunique() if len(_o_ft) else 0)
-        rows.append({
+        rd = {
             "GM":         owner,
             "AIA Bot":    _rng(o,"aia_bot_date",s,e)["record_id"].nunique(),
             "DS":         _rng(o,"ds_date",s,e)["record_id"].nunique(),
@@ -3090,7 +3088,10 @@ def _aia_ops_refresh(state):
             "Revenue":    int(pd2.groupby("record_id")["amount_paid"].max().sum()),
             "MRR":        int(new_li["mrr"].sum()) if len(new_li) else 0,
             "ATP":        _atp_amount(o, s, e),
-        })
+        }
+        # Hide GMs with nothing to show this period (every displayed metric is 0).
+        if any(v for k, v in rd.items() if k != "GM"):
+            rows.append(rd)
     gm = pd.DataFrame(rows)
     if len(gm):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
