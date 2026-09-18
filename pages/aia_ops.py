@@ -61,9 +61,9 @@ DC
 <|{aia_kpi_dc}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-blue|
-HI (ATP)
+FT Started
 
-<|{aia_kpi_hi}|text|class_name=kpi-value|hover_text=Active HI deals with payment ETA in the selected period.|>
+<|{aia_kpi_ft_started}|text|class_name=kpi-value|hover_text=Deals with an FT start date in the selected period.|>
 |>
 <|part|class_name=kpi-card kpi-grey|
 GST Paid
@@ -75,12 +75,6 @@ Refunds
 
 <|{aia_kpi_refunds}|text|class_name=kpi-value|>
 |>
-|>
-
-<|part|class_name=chart-card|
-**Demos Booked vs Conducted vs Qualified Trend**
-
-<|chart|figure={aia_trend_fig}|plot_config={trend_config}|>
 |>
 
 <|part|class_name=chart-card|

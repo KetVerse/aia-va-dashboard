@@ -648,7 +648,8 @@ def _make_funnel(stages, values, labels):
     return fig
 
 
-def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None, line_name="Qualified"):
+def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None, line_name="Qualified",
+                dc_name="DC", dc_color="#ed7d31"):
     """Overlay column + optional line (Power BI style): DS as blue bars in the BACK
     and DC as orange bars in FRONT, both on the 0 baseline (so DC reads as a portion
     of DS, not added to it); Qualified — when given — as a navy spline with boxed
@@ -656,7 +657,7 @@ def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None, line_na
     adaptively lifted so they never overlap the Qualified boxes. Bold labels + ticks.
     bar_color overrides the primary (DS) bar colour (e.g. a distinct hue for FT)."""
     xb = [f"<b>{l}</b>" for l in labels]   # slightly bold date ticks
-    ds_c, dc_c, line_c = (bar_color or "#1a7fc4"), "#ed7d31", "#1f4e79"   # DS blue, DC orange, line navy
+    ds_c, dc_c, line_c = (bar_color or "#1a7fc4"), dc_color, "#1f4e79"   # DS blue, DC orange, line navy
     fig = go.Figure()
     # DS behind (full-height bar) — the only bars that carry value labels
     fig.add_bar(x=xb, y=ds, name=ds_name, marker_color=ds_c, marker_line_width=0,
@@ -668,7 +669,7 @@ def _make_trend(labels, ds, dc, qual=None, ds_name="DS", bar_color=None, line_na
     # below it (Conducted >= Qualified); dark text on the rare DC >= DS day (sits on
     # white). White reads on the blue DS bar.
     if dc is not None:
-        fig.add_bar(x=xb, y=dc, name="DC", marker_color=dc_c, marker_line_width=0,
+        fig.add_bar(x=xb, y=dc, name=dc_name, marker_color=dc_c, marker_line_width=0,
                     cliponaxis=False)
 
     # Stack bottom -> top: Qualified box, DC number, DS label — never overlapping. Use
@@ -2962,8 +2963,7 @@ def _aia_ops_refresh(state):
     state.aia_kpi_leads       = _rng(df,"create_date",s,e)["record_id"].nunique()
     state.aia_kpi_ds          = _rng(df,"ds_date",s,e)["record_id"].nunique()
     state.aia_kpi_dc          = _rng(df,"dc_date",s,e)["record_id"].nunique()
-    hi = _rng(df,"eta_pay_date",s,e)
-    state.aia_kpi_hi          = hi[hi["deal_stage"]=="High Intent"]["record_id"].nunique()
+    state.aia_kpi_ft_started  = _rng(df,"ft_start_date",s,e)["record_id"].nunique()
     pd_                       = _rng(df,"payment_date",s,e)
     state.aia_kpi_aia_paid    = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
     state.aia_kpi_gst_paid    = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
@@ -2999,39 +2999,15 @@ def _aia_ops_refresh(state):
         ["Leads", "DS", "DC", "HI", "Paid"],
         [leads, ds_n, dc_n, hi2, paid2], _labels)
 
-    # Booked/Conducted/Qualified trend — DS (blue) behind DC (orange) overlay
-    # bars + Qualified line, capped at today. DS = demos BOOKED, counted by the day
-    # they are scheduled FOR (ds_for), NOT the booking day (ds_date). ds_for carries
-    # a timestamp + future appointments, so normalise to date before filtering so
-    # today's later-in-the-day demos aren't dropped by the midnight cap.
-    # DC/Qualified by dc_date.
-    e_cap  = min(e, pd.Timestamp(date.today()))
-    dc_sub = _rng(df,"dc_date",s,e_cap).copy()
-    dc_sub["date"] = dc_sub["dc_date"].dt.normalize()
-    daily_dc = dc_sub.groupby("date")["record_id"].nunique().reset_index(name="DC")
-    daily_q  = dc_sub[dc_sub["prospect_score"]>=60].groupby("date")["record_id"].nunique().reset_index(name="Qualified")
-    # DB (Demos Booked): booking EVENTS from hubspot_deal_logs — each reschedule keeps
-    # the original date's count and adds one on the new date (vs aia_live.ds_for, which
-    # overwrites). Restricted to this page's deals (respects filters + is_deleted).
-    # Deals with no non-null ds_for in the logs fall back to their aia_live.ds_for.
-    _ids    = set(df["record_id"].astype(str))
-    _logged = set(_DB_EVENTS["record_id"]) if len(_DB_EVENTS) else set()
-    _ev = (_DB_EVENTS[_DB_EVENTS["record_id"].isin(_ids)][["ds_for_date"]]
-           .rename(columns={"ds_for_date": "date"}))
-    _fb = df[~df["record_id"].astype(str).isin(_logged)]
-    _fbd = pd.to_datetime(_fb["ds_for"], errors="coerce").dt.normalize() if "ds_for" in _fb.columns else pd.Series(pd.NaT, index=_fb.index)
-    _fb_ev = pd.DataFrame({"date": _fbd[_fbd.notna()].values})
-    _all_ev = pd.concat([_ev, _fb_ev], ignore_index=True)
-    _all_ev = _all_ev[(_all_ev["date"] >= s) & (_all_ev["date"] <= e_cap)]
-    daily_ds = _all_ev.groupby("date").size().reset_index(name="DS")
+    # Date axis for the trend below (capped at today) + Total Leads per day (deals
+    # created, by create_date). The Demos Booked/Conducted/Qualified trend was removed.
+    e_cap = min(e, pd.Timestamp(date.today()))
     trend = pd.DataFrame({"date": pd.date_range(s, e_cap, freq="D")})
-    trend = (trend.merge(daily_ds,on="date",how="left").merge(daily_dc,on="date",how="left")
-                  .merge(daily_q,on="date",how="left").fillna(0))
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
-    trend = trend.astype({"DS":int,"DC":int,"Qualified":int})
-    state.aia_trend_fig = _make_trend(trend["date_label"].tolist(), trend["DS"].tolist(),
-                                      trend["DC"].tolist(), trend["Qualified"].tolist(),
-                                      ds_name="DB")   # Demos Booked (by ds_for)
+    _lc = coh.copy()
+    _lc["date"] = _lc["create_date"].dt.normalize()
+    daily_leads = (_lc[(_lc["date"] >= s) & (_lc["date"] <= e_cap)]
+                   .groupby("date")["record_id"].nunique().reset_index(name="Leads"))
 
     # Trend "New Integrations" = first-ever integration success per account from the
     # onboarding funnel (aia_onboarding_funnel; internal excluded, first-success) — an
@@ -3048,13 +3024,69 @@ def _aia_ops_refresh(state):
                   .rename(columns={"day": "date"}))
     else:
         _ft_d = pd.DataFrame(columns=["date", "FT"]); _fta_d = pd.DataFrame(columns=["date", "Activated"])
-    ftt = (trend[["date", "date_label"]].merge(_ft_d, on="date", how="left")
-           .merge(_fta_d, on="date", how="left").fillna(0))
-    ftt[["FT", "Activated"]] = ftt[["FT", "Activated"]].astype(int)
-    state.aia_ft_trend_fig = _make_trend(ftt["date_label"].tolist(), ftt["FT"].tolist(),
-                                         None, ftt["Activated"].tolist(),
-                                         ds_name="New Integrations", bar_color="#17a589",
-                                         line_name="Activated (Score>50)")
+    # FT Started per day (deal-based, by ft_start_date) — orange line.
+    _fts = _rng(df, "ft_start_date", s, e_cap).copy()
+    if len(_fts):
+        _fts["date"] = _fts["ft_start_date"].dt.normalize()
+        _fts_d = _fts.groupby("date")["record_id"].nunique().reset_index(name="FTStart")
+    else:
+        _fts_d = pd.DataFrame(columns=["date", "FTStart"])
+    ftt = (trend[["date", "date_label"]].merge(daily_leads, on="date", how="left")
+           .merge(_ft_d, on="date", how="left").merge(_fta_d, on="date", how="left")
+           .merge(_fts_d, on="date", how="left").fillna(0))
+    ftt[["Leads", "FT", "Activated", "FTStart"]] = ftt[["Leads", "FT", "Activated", "FTStart"]].astype(int)
+    # Single axis: New Integrations as teal bars, Activated as a navy line. Total Leads
+    # (deals created) is shown as a grey number ABOVE each bar (context only, not
+    # plotted) so lead volume never dwarfs the small integration/activated counts.
+    _xb = [f"<b>{l}</b>" for l in ftt["date_label"].tolist()]
+    _ymax = float(max(ftt["FT"].max(), ftt["FTStart"].max(), ftt["Activated"].max()) or 1)
+    _INTER = "Inter,sans-serif"
+    figFT = go.Figure()
+    # Overlay bars (like the old DC-vs-Qualified trend): New Integrations (teal) in the
+    # BACK with its count above the bar; FT Started (orange) drawn IN FRONT on the same
+    # baseline with its count inside near the top. Legend order: New Integrations,
+    # FT Started, Activated, Total Deals.
+    figFT.add_bar(x=_xb, y=ftt["FT"].tolist(), name="New Integrations", marker_color="#17a589",
+                  marker_line_width=0,
+                  text=[f"<b>{v}</b>" if v else "" for v in ftt["FT"]], textposition="outside",
+                  textfont={"size": 10, "color": "#0f5c4a", "family": _INTER}, cliponaxis=False)
+    figFT.add_bar(x=_xb, y=ftt["FTStart"].tolist(), name="FT Started", marker_color="#ed7d31",
+                  marker_line_width=0,
+                  text=[f"<b>{v}</b>" if v else "" for v in ftt["FTStart"]], textposition="inside",
+                  insidetextanchor="end",
+                  textfont={"size": 10, "color": "#ffffff", "family": _INTER}, cliponaxis=False)
+    # Activated line
+    figFT.add_scatter(x=_xb, y=ftt["Activated"].tolist(), name="Activated (Score>50)",
+                      legendgroup="act", mode="lines+markers",
+                      line={"color": "#1f4e79", "width": 2, "shape": "spline"},
+                      marker={"size": 5, "color": "#1f4e79"})
+    # Activated value boxes as a legend-grouped TRACE (hides with the line).
+    _ax = [x for x, v in zip(_xb, ftt["Activated"]) if v]
+    _av = [int(v) for v in ftt["Activated"] if v]
+    figFT.add_scatter(x=_ax, y=_av, legendgroup="act", showlegend=False,
+                      mode="markers+text", cliponaxis=False, hoverinfo="skip",
+                      marker={"symbol": "square", "size": 15, "color": "#e6edf6",
+                              "line": {"color": "#9fb6d4", "width": 1}},
+                      text=[f"<b>{v}</b>" for v in _av], textposition="middle center",
+                      textfont={"size": 8, "color": "#1f4e79", "family": _INTER})
+    # Total Deals (deals created) count as a toggleable TEXT row above the bars.
+    _row_y = _ymax * 1.5
+    figFT.add_scatter(x=_xb, y=[_row_y] * len(_xb), name="Leads",
+                      mode="text", cliponaxis=False, hoverinfo="skip",
+                      text=[str(v) for v in ftt["Leads"]],
+                      textfont={"size": 10, "color": "#1a7fc4", "family": _INTER})
+    figFT.update_layout(
+        height=360, dragmode="pan", barmode="overlay",
+        uniformtext={"minsize": 8, "mode": "hide"},
+        margin={"l": 40, "r": 20, "t": 40, "b": 90},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": _INTER, "size": 12},
+        legend={"orientation": "h", "y": -0.34, "x": 0},
+        xaxis={"title": "", "tickangle": -45,
+               "tickfont": {"size": 11, "family": _INTER, "color": "#1a3a6b"}},
+        yaxis={"tickfont": {"size": 11, "color": "#1a3a6b"}, "fixedrange": True,
+               "range": [0, _ymax * 1.75]})
+    state.aia_ft_trend_fig = figFT
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
     ch = _rng(df_allchan,"create_date",s,e).groupby("deal_source_group")["record_id"].nunique().reset_index()
@@ -3078,10 +3110,11 @@ def _aia_ops_refresh(state):
             ["record_id"].nunique() if len(_o_ft) else 0)
         rd = {
             "GM":         owner,
+            "Leads":      _rng(o,"create_date",s,e)["record_id"].nunique(),
+            "Self OB":    _rng(o,"self_onboarding_date",s,e)["record_id"].nunique(),
             "AIA Bot":    _rng(o,"aia_bot_date",s,e)["record_id"].nunique(),
             "DS":         _rng(o,"ds_date",s,e)["record_id"].nunique(),
             "DC":         _rng(o,"dc_date",s,e)["record_id"].nunique(),
-            "HI (ATP)":   _rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
             "FT Started": _o_ft["record_id"].nunique(),
             "FT Activated": _o_ft_act,
             "Tot Paid":   pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
@@ -3100,8 +3133,7 @@ def _aia_ops_refresh(state):
     _gm_mrr = int(gm.iloc[-1]["MRR"]) if len(gm) else 0
     state.aia_kpi_mrr = _fmt2(_gm_mrr)
     state.aia_kpi_mrr_exact = f"{_inr(_gm_mrr)} · Acquired MRR (includes refunds)"
-    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["HI (ATP)", "ATP"], fixed=True,
-        header_tips={"HI (ATP)": "Active HI deals with payment ETA in the selected period"})
+    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["ATP"], fixed=True)
 
     # UTM cohort
     rows2 = []
@@ -5255,7 +5287,7 @@ aiabot_cohort_view = []
 aiabot_cohort_view_list = ["Cohort %", "Users"]
 aiabot_cohort_view_ms = _ms_json(aiabot_cohort_view_list, [])
 
-aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_hi=0
+aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_ft_started=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
 aia_kpi_collected="₹0"; aia_kpi_collected_exact="₹0"; aia_kpi_mrr="₹0"; aia_kpi_mrr_exact="₹0"
@@ -5335,8 +5367,10 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "⚪ No event that day")
 aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no referencing deal.\n"
                   "Uses the FT filters.")
-aia_ft_trend_tip = ("• New Integrations = first-ever successful integration per account (internal excluded), counted on that day\n"
-                    "• Activated = of those, accounts with a 28-day Activity Score > 50")
+aia_ft_trend_tip = ("• Leads = deals created that day\n"
+                    "• New Integrations = first-ever successful integration per account (internal excluded), counted on that day\n"
+                    "• Activated = of those, accounts with a 28-day Activity Score > 50\n"
+                    "• FT Started = deals with an FT start date that day")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
