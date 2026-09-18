@@ -3041,51 +3041,59 @@ def _aia_ops_refresh(state):
     _xb = [f"<b>{l}</b>" for l in ftt["date_label"].tolist()]
     _ymax = float(max(ftt["FT"].max(), ftt["FTStart"].max(), ftt["Activated"].max()) or 1)
     _INTER = "Inter,sans-serif"
+    _leadmax = float(ftt["Leads"].max() or 1)
     figFT = go.Figure()
-    # Overlay bars (like the old DC-vs-Qualified trend): New Integrations (teal) in the
-    # BACK with its count above the bar; FT Started (orange) drawn IN FRONT on the same
-    # baseline with its count inside near the top. Legend order: New Integrations,
-    # FT Started, Activated, Total Deals.
-    figFT.add_bar(x=_xb, y=ftt["FT"].tolist(), name="New Integrations", marker_color="#17a589",
-                  marker_line_width=0,
+    # Layer trick: Plotly always paints the OVERLAYING axis on top of the base axis.
+    # So Leads goes on the BASE axis "y" (shown on the RIGHT) and every count series —
+    # bars + FT / Activated numbers — goes on the OVERLAY axis "y2" (shown on the LEFT),
+    # which guarantees the counts/numbers render ON TOP of the Leads line + squares.
+    figFT.add_scatter(x=_xb, y=ftt["Leads"].tolist(), name="Leads", legendrank=4,
+                      legendgroup="leads", mode="lines+markers",
+                      line={"color": "#1a7fc4", "width": 1.5, "shape": "spline"},
+                      marker={"size": 5, "color": "#1a7fc4"})
+    figFT.add_scatter(x=_xb, y=ftt["Leads"].tolist(), legendgroup="leads",
+                      showlegend=False, mode="markers+text", cliponaxis=False, hoverinfo="skip",
+                      marker={"symbol": "square", "size": 15, "color": "#dbeafe",
+                              "line": {"color": "#1a7fc4", "width": 1}},
+                      text=[str(v) for v in ftt["Leads"]], textposition="middle center",
+                      textfont={"size": 8, "color": "#000000", "family": _INTER})
+    # Counts on the overlay axis y2 (on top): FT Started (teal) behind with its count
+    # above; FT Started (GM) (orange) in front with its count inside; Activated line.
+    figFT.add_bar(x=_xb, y=ftt["FT"].tolist(), name="FT Started", marker_color="#17a589",
+                  marker_line_width=0, legendrank=1, yaxis="y2", cliponaxis=False,
                   text=[f"<b>{v}</b>" if v else "" for v in ftt["FT"]], textposition="outside",
-                  textfont={"size": 10, "color": "#0f5c4a", "family": _INTER}, cliponaxis=False)
-    figFT.add_bar(x=_xb, y=ftt["FTStart"].tolist(), name="FT Started", marker_color="#ed7d31",
-                  marker_line_width=0,
+                  textfont={"size": 10, "color": "#0f5c4a", "family": _INTER})
+    figFT.add_bar(x=_xb, y=ftt["FTStart"].tolist(), name="FT Started (GM)", marker_color="#ed7d31",
+                  marker_line_width=0, legendrank=2, yaxis="y2", cliponaxis=False,
                   text=[f"<b>{v}</b>" if v else "" for v in ftt["FTStart"]], textposition="inside",
                   insidetextanchor="end",
-                  textfont={"size": 10, "color": "#ffffff", "family": _INTER}, cliponaxis=False)
-    # Activated line
+                  textfont={"size": 10, "color": "#ffffff", "family": _INTER})
     figFT.add_scatter(x=_xb, y=ftt["Activated"].tolist(), name="Activated (Score>50)",
-                      legendgroup="act", mode="lines+markers",
-                      line={"color": "#1f4e79", "width": 2, "shape": "spline"},
+                      yaxis="y2", legendgroup="act", legendrank=3, mode="lines+markers",
+                      line={"color": "#1f4e79", "width": 1.5, "shape": "spline"},
                       marker={"size": 5, "color": "#1f4e79"})
-    # Activated value boxes as a legend-grouped TRACE (hides with the line).
     _ax = [x for x, v in zip(_xb, ftt["Activated"]) if v]
     _av = [int(v) for v in ftt["Activated"] if v]
-    figFT.add_scatter(x=_ax, y=_av, legendgroup="act", showlegend=False,
+    figFT.add_scatter(x=_ax, y=_av, yaxis="y2", legendgroup="act", showlegend=False,
                       mode="markers+text", cliponaxis=False, hoverinfo="skip",
                       marker={"symbol": "square", "size": 15, "color": "#e6edf6",
                               "line": {"color": "#9fb6d4", "width": 1}},
                       text=[f"<b>{v}</b>" for v in _av], textposition="middle center",
                       textfont={"size": 8, "color": "#1f4e79", "family": _INTER})
-    # Total Deals (deals created) count as a toggleable TEXT row above the bars.
-    _row_y = _ymax * 1.5
-    figFT.add_scatter(x=_xb, y=[_row_y] * len(_xb), name="Leads",
-                      mode="text", cliponaxis=False, hoverinfo="skip",
-                      text=[str(v) for v in ftt["Leads"]],
-                      textfont={"size": 10, "color": "#1a7fc4", "family": _INTER})
     figFT.update_layout(
         height=360, dragmode="pan", barmode="overlay",
         uniformtext={"minsize": 8, "mode": "hide"},
-        margin={"l": 40, "r": 20, "t": 40, "b": 90},
+        margin={"l": 40, "r": 44, "t": 40, "b": 90},
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font={"family": _INTER, "size": 12},
         legend={"orientation": "h", "y": -0.34, "x": 0},
         xaxis={"title": "", "tickangle": -45,
                "tickfont": {"size": 11, "family": _INTER, "color": "#1a3a6b"}},
-        yaxis={"tickfont": {"size": 11, "color": "#1a3a6b"}, "fixedrange": True,
-               "range": [0, _ymax * 1.75]})
+        yaxis={"tickfont": {"size": 11, "color": "#000000"}, "side": "right",
+               "showgrid": False, "fixedrange": True, "range": [0, _leadmax * 1.25]},
+        yaxis2={"tickfont": {"size": 11, "color": "#1a3a6b"}, "overlaying": "y",
+                "side": "left", "showgrid": False, "fixedrange": True,
+                "range": [0, _ymax * 1.35]})
     state.aia_ft_trend_fig = figFT
 
     # Channel pie — always from the channel-unfiltered frame, sorted desc
@@ -5368,9 +5376,9 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
 aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no referencing deal.\n"
                   "Uses the FT filters.")
 aia_ft_trend_tip = ("• Leads = deals created that day\n"
-                    "• New Integrations = first-ever successful integration per account (internal excluded), counted on that day\n"
+                    "• FT Started = first-ever successful integration per account (internal excluded), counted on that day\n"
                     "• Activated = of those, accounts with a 28-day Activity Score > 50\n"
-                    "• FT Started = deals with an FT start date that day")
+                    "• FT Started (GM) = deals with an FT start date that day")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
