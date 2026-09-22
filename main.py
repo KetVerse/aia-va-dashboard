@@ -2225,13 +2225,17 @@ _REAL_DATES = _build_real_dates()
 
 def _load_integ_funnel():
     """Onboarding funnel (aia_onboarding_funnel — internal + karboncard/korefi already
-    excluded): one row per email with first_integration_success_at. Returns [acct, day]
-    (day = IST date) for rows that reached integration success. Drives the AIA Ops FT
-    trend as the true account/email-based, first-time new-integration count."""
+    excluded). Returns [acct, day] (day = IST date) — ONE row per ACCOUNT at its
+    EARLIEST integration-success date. Deliberately per-account, not per-email: the
+    funnel stores one row per email, so a firm with several teammates that each
+    integrate would otherwise be counted as a "new integration" on several days
+    (e.g. AJC & Co counted on 06-Aug, 14-Aug AND 17-Sep). MIN() collapses those to the
+    account's first-ever integration so the FT trend counts each firm once."""
     try:
         d = _q(SUPABASE_URL,
-               "SELECT account_id::text AS acct, first_integration_success_at AS ts "
-               "FROM public.aia_onboarding_funnel WHERE first_integration_success_at IS NOT NULL")
+               "SELECT account_id::text AS acct, MIN(first_integration_success_at) AS ts "
+               "FROM public.aia_onboarding_funnel WHERE first_integration_success_at IS NOT NULL "
+               "AND account_id IS NOT NULL GROUP BY account_id")
     except Exception as ex:
         print(f"[WARN] integ_funnel load failed: {ex}")
         return pd.DataFrame(columns=["acct", "day"])
