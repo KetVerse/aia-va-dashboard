@@ -748,7 +748,7 @@ def _activity_scores():
     """Per-account Activity Score over the last 28 days: sum over days & events of
     weight * min(daily_count, cap_per_day). One vectorized pass over the in-memory
     _ACT_EVENTS (no DB). Returns {account_id: score}."""
-    today = pd.Timestamp(date.today()).normalize() - pd.Timedelta(days=1)   # anchor to YESTERDAY (last complete day)
+    today = pd.Timestamp(date.today()).normalize()   # anchor to TODAY (index 0 = today, in progress)
     start = today - pd.Timedelta(days=27)
     ev = _ACT_EVENTS
     if ev is None or len(ev) == 0:
@@ -768,7 +768,7 @@ def _recent_event_lookup():
     """Per (account_id, day) counts of the streak's event-table events for the last
     28 days, computed ONCE from the in-memory _ACT_EVENTS so _usage_28 is a cheap
     dict lookup per customer (no DB, no 124k-row rescan per account)."""
-    today = pd.Timestamp(date.today()).normalize() - pd.Timedelta(days=1)   # anchor to YESTERDAY
+    today = pd.Timestamp(date.today()).normalize()   # anchor to TODAY
     start = today - pd.Timedelta(days=27)
     ev = _ACT_EVENTS
     if ev is None or len(ev) == 0:
@@ -797,7 +797,7 @@ def _usage_28(email, ev_lu):
     dashboard-viewed). The grid colours the dot: green=accounting sync,
     yellow=any other event, grey=nothing."""
     ac = _EMAIL_ACCT.get(_clean_email(email))
-    today = pd.Timestamp(date.today()).normalize() - pd.Timedelta(days=1)   # anchor to YESTERDAY (index 0 = yesterday)
+    today = pd.Timestamp(date.today()).normalize()   # anchor to TODAY (index 0 = today, in progress)
     blank = ";".join([",".join(["0"] * 20)] * 28)
     if ac is None:
         return 0, blank, 0, 0
@@ -2947,7 +2947,6 @@ def _aia_ops_refresh(state):
     e = pd.Timestamp(state.aia_end_date)
     _ftdf = _build_ft_health_df()
     state.aia_ft_all = _ftdf
-    state.aia_ft_deal_list  = sorted(_ftdf["Deal Name"].dropna().unique().tolist()) if len(_ftdf) else []
     state.aia_ft_gm_list    = sorted(_ftdf["GM"].dropna().unique().tolist()) if len(_ftdf) else []
     state.aia_ft_stage_list = sorted(_ftdf["Stage"].dropna().unique().tolist()) if len(_ftdf) else []
     _apply_ft_filter(state)
@@ -5736,8 +5735,9 @@ def _sync_ms(state):
     # Free Trial Usage & Health AND the poc_email gap table share these filters, so the
     # option lists are the UNION of both frames (the gap table adds stages like
     # "Untracked"/"Discard", extra GMs, and its recovered deal names). The gap frame's
-    # deal column is "Deal / Signup Email"; its untracked rows hold an email there, so
-    # the Deal Name picker drops Stage=="Untracked" rows (deal names only, no emails).
+    # deal column is "Deal / Signup Email"; its untracked rows hold the raw signup
+    # email there, and those emails are included in the Deal picker too, so a fully-
+    # untracked signup (no deal at all) can still be picked/filtered by its email.
     _sd = _sel(state.aia_ft_deal); _sg = _sel(state.aia_ft_gm); _ss = _sel(state.aia_ft_stage)
     def _lov(target):
         vals = set()
@@ -5746,8 +5746,6 @@ def _sync_ms(state):
             if df is None or len(df) == 0:
                 continue
             d = df
-            if target == "Deal" and "Stage" in d.columns:
-                d = d[d["Stage"] != "Untracked"]          # deal-name picker: real deals only
             if target != "Deal" and _sd:
                 d = d[d[dealcol].isin(_sd)]
             if target != "GM" and _sg and "GM" in d.columns:

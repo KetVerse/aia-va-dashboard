@@ -193,7 +193,7 @@ _NOTE_FIELDS = [
 
 
 def _streak_to_notes(streak, anchor):
-    """Render a 28-day streak token (index 0 = yesterday) into dated activity notes:
+    """Render a 28-day streak token (index 0 = today) into dated activity notes:
     one block per ACTIVE day, most-recent first, blank line between blocks:
 
         26-Aug-2026
@@ -222,13 +222,13 @@ def _streak_to_notes(streak, anchor):
 def ft_activity_scores():
     """JSON feed for the FT Live Tracker daily sync. For every Free-Trial deal (the
     same population + numbers as the dashboard's Free Trial Usage & Health table),
-    returns record_id, Activity Score (28-day weighted, anchored to yesterday) and
+    returns record_id, Activity Score (28-day weighted, anchored to today) and
     Activity Notes (the streak-dot activities per active day). An external job (n8n)
     matches record_id -> the tracker's Deal ID and writes the two columns."""
     from datetime import date as _date
     import main
     df = main._build_ft_health_df()           # cached; record_id + Activity Score + streak
-    anchor = pd.Timestamp(_date.today()).normalize() - pd.Timedelta(days=1)   # yesterday
+    anchor = pd.Timestamp(_date.today()).normalize()   # today
     out = []
     if df is not None and len(df):
         for _, r in df.iterrows():
@@ -575,7 +575,7 @@ function rowHeatMax(r){
 }
 const _MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function dateLabel(offset){
-  const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-offset-1);   // index 0 = yesterday
+  const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()-offset);   // index 0 = today
   return d.getDate()+" "+_MON[d.getMonth()]+" "+d.getFullYear();
 }
 function streakHtml(s){
@@ -626,7 +626,7 @@ function streakHtml(s){
     var t=el(); if(!t) return;
     clearTimeout(hideT);
     var i=+dot.getAttribute("data-i");
-    var html=dateLabel(i)+(i===0?" (yesterday)":"");
+    var html=dateLabel(i)+(i===0?" (today)":"");
     var on=dot.getAttribute("data-on")==="1";
     html+=metricLine("Accounting Syncs", dot.getAttribute("data-syncs"))   // ungated & on top so a purple (sync) dot always explains itself first
          +(on?metricLine("Items Synced", dot.getAttribute("data-items")):"")   // right under Accounting Syncs
