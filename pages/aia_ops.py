@@ -78,12 +78,6 @@ Refunds
 |>
 
 <|part|class_name=chart-card|
-**FT Started vs Activated Trend** <|ⓘ|text|hover_text={aia_ft_trend_tip}|class_name=info-ico|>
-
-<|chart|figure={aia_ft_trend_fig}|plot_config={trend_config}|>
-|>
-
-<|part|class_name=chart-card|
 **Free Trial Customers Usage & Health** <|ⓘ|text|hover_text={aia_ft_tip}|class_name=info-ico|>
 
 <|layout|columns=1 1 1|gap=12px|
@@ -105,6 +99,12 @@ Refunds
 <|{aia_ft_json}|text|mode=raw|>
 |>
 <iframe src="/grid/aia_ft" class="grid-frame" style="width:100%;height:620px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**FT Started vs Activated Trend** <|ⓘ|text|hover_text={aia_ft_trend_tip}|class_name=info-ico|>
+
+<|chart|figure={aia_ft_trend_fig}|plot_config={trend_config}|>
 |>
 
 <|part|class_name=chart-card|
