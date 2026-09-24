@@ -56,14 +56,14 @@ DS
 <|{aia_kpi_ds}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-blue|
-DC
-
-<|{aia_kpi_dc}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-blue|
 FT Started
 
 <|{aia_kpi_ft_started}|text|class_name=kpi-value|hover_text=Deals with an FT start date in the selected period.|>
+|>
+<|part|class_name=kpi-card kpi-blue|
+FT Activated
+
+<|{aia_kpi_ft_activated}|text|class_name=kpi-value|hover_text=FT-started deals whose account has a 28-day Activity Score > 50.|>
 |>
 <|part|class_name=kpi-card kpi-grey|
 GST Paid
@@ -81,24 +81,6 @@ Refunds
 **FT Started vs Activated Trend** <|ⓘ|text|hover_text={aia_ft_trend_tip}|class_name=info-ico|>
 
 <|chart|figure={aia_ft_trend_fig}|plot_config={trend_config}|>
-|>
-
-<|part|class_name=chart-card|
-**GM Performance**
-
-<|part|class_name=gridholder gridholder-aia_gm|
-<|{aia_gm_json}|text|mode=raw|>
-|>
-<iframe src="/grid/aia_gm" class="grid-frame" style="width:100%;height:560px;border:none;"></iframe>
-|>
-
-<|part|class_name=chart-card|
-**AIA + VA Incentive Tracker**
-
-<|part|class_name=gridholder gridholder-aia_incentive|
-<|{aia_incentive_json}|text|mode=raw|>
-|>
-<iframe src="/grid/aia_incentive" class="grid-frame" style="width:100%;height:480px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|
@@ -126,7 +108,40 @@ Refunds
 |>
 
 <|part|class_name=chart-card|
+**GM Performance**
+
+<|part|class_name=gridholder gridholder-aia_gm|
+<|{aia_gm_json}|text|mode=raw|>
+|>
+<iframe src="/grid/aia_gm" class="grid-frame" style="width:100%;height:560px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**AIA + VA Incentive Tracker**
+
+<|part|class_name=gridholder gridholder-aia_incentive|
+<|{aia_incentive_json}|text|mode=raw|>
+|>
+<iframe src="/grid/aia_incentive" class="grid-frame" style="width:100%;height:480px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
 **Unmapped Deals & Signups** <|ⓘ|text|hover_text={aia_pocgap_tip}|class_name=info-ico|>
+
+<|layout|columns=1 1 1|gap=12px|
+<|part|
+<div class="msc wide" data-key="aia_um_deal"><div class="msc-cap">Deal Name / Email</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_um_deal_ms}|text|mode=raw|class_name=msc-data msc-data-aia_um_deal|>
+|>
+<|part|
+<div class="msc" data-key="aia_um_gm"><div class="msc-cap">GM</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_um_gm_ms}|text|mode=raw|class_name=msc-data msc-data-aia_um_gm|>
+|>
+<|part|
+<div class="msc" data-key="aia_um_stage"><div class="msc-cap">Deal Stage</div><div class="msc-box"><span class="msc-text">All</span><span class="msc-arrow">▾</span></div><div class="msc-panel"></div></div>
+<|{aia_um_stage_ms}|text|mode=raw|class_name=msc-data msc-data-aia_um_stage|>
+|>
+|>
 
 <|part|class_name=gridholder gridholder-aia_pocgap|
 <|{aia_pocgap_json}|text|mode=raw|>

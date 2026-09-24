@@ -2900,10 +2900,14 @@ def _apply_ft_filter(state):
         d = d[d["Stage"].isin(_st)]
     # Sl no re-numbers 1..N over the current view (see rownum_col), so it stays
     # pinned top-to-bottom through any re-sort.
-    d = d.reset_index(drop=True)
+    # Default order: FT Start Date descending (parse the dd-MMM-yy display string
+    # so it sorts chronologically, not alphabetically) — newest trials on top.
+    _k = pd.to_datetime(d["FT Start Date"], format="%d-%b-%y", errors="coerce")
+    d = (d.assign(__k=_k).sort_values("__k", ascending=False, na_position="last")
+           .drop(columns="__k").reset_index(drop=True))
     d.insert(0, "Sl no", range(1, len(d) + 1))
     state.aia_ft_json = grid_payload_b64(
-        d, sort_default_col="Usage Active Days (28d)", rownum_col="Sl no",
+        d, no_sort=True, rownum_col="Sl no",
         col_w={"Deal Name": 300},
         streak_cols=["Usage Streak Last 28D (desc)"],
         center_cols=["FT Start Date", "FT End Date"], date_cols=["FT Start Date", "FT End Date"],
@@ -2914,25 +2918,31 @@ def _apply_ft_filter(state):
 
 
 def _apply_pocgap_filter(state):
-    """poc_email gap grid — filtered by the SAME Deal Name / GM / Deal Stage
-    selections as the Free Trial Usage & Health table (shared controls)."""
+    """Unmapped Deals & Signups grid — its OWN Deal Name/Email / GM / Deal Stage
+    filters (independent of the Free Trial table)."""
     d = state.aia_pocgap_all
     if d is None or len(d) == 0:
         state.aia_pocgap_json = grid_payload_b64(pd.DataFrame())
         return
-    _dl = _sel(state.aia_ft_deal)
+    _dl = _sel(state.aia_um_deal)
     if _dl:
         d = d[d["Deal / Signup Email"].isin(_dl)]
-    _gm = _sel(state.aia_ft_gm)
+    _gm = _sel(state.aia_um_gm)
     if _gm:
         d = d[d["GM"].isin(_gm)]
-    _st = _sel(state.aia_ft_stage)
+    _st = _sel(state.aia_um_stage)
     if _st:
         d = d[d["Stage"].isin(_st)]
-    d = d.reset_index(drop=True)
+    # Default order: Integration Date desc, then Sign Up Date desc (parse the
+    # dd-MMM-yy display strings so they sort chronologically).
+    _ig = pd.to_datetime(d["Integration Date"], format="%d-%b-%y", errors="coerce")
+    _su = pd.to_datetime(d["Sign Up Date"], format="%d-%b-%y", errors="coerce")
+    d = (d.assign(__ig=_ig, __su=_su)
+           .sort_values(["__ig", "__su"], ascending=[False, False], na_position="last")
+           .drop(columns=["__ig", "__su"]).reset_index(drop=True))
     d.insert(0, "Sl no", range(1, len(d) + 1))
     state.aia_pocgap_json = grid_payload_b64(
-        d, sort_default_col="Activity Score", rownum_col="Sl no",
+        d, no_sort=True, rownum_col="Sl no",
         col_w={"Deal / Signup Email": 300},
         streak_cols=["Usage Streak Last 28D (desc)"],
         center_cols=["Sign Up Date", "Integration Date"],
@@ -2966,7 +2976,13 @@ def _aia_ops_refresh(state):
     state.aia_kpi_leads       = _rng(df,"create_date",s,e)["record_id"].nunique()
     state.aia_kpi_ds          = _rng(df,"ds_date",s,e)["record_id"].nunique()
     state.aia_kpi_dc          = _rng(df,"dc_date",s,e)["record_id"].nunique()
-    state.aia_kpi_ft_started  = _rng(df,"ft_start_date",s,e)["record_id"].nunique()
+    _ft_started_k = _rng(df,"ft_start_date",s,e)
+    state.aia_kpi_ft_started  = _ft_started_k["record_id"].nunique()
+    # FT Activated = FT-started deals whose account has a 28-day Activity Score > 50.
+    _sc_k = _activity_scores()
+    state.aia_kpi_ft_activated = (_ft_started_k[_ft_started_k["login_email_id"].map(
+        lambda em: _sc_k.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
+        ["record_id"].nunique() if len(_ft_started_k) else 0)
     pd_                       = _rng(df,"payment_date",s,e)
     state.aia_kpi_aia_paid    = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
     state.aia_kpi_gst_paid    = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
@@ -3042,7 +3058,7 @@ def _aia_ops_refresh(state):
     # (deals created) is shown as a grey number ABOVE each bar (context only, not
     # plotted) so lead volume never dwarfs the small integration/activated counts.
     _xb = [f"<b>{l}</b>" for l in ftt["date_label"].tolist()]
-    _ymax = float(max(ftt["FT"].max(), ftt["FTStart"].max(), ftt["Activated"].max()) or 1)
+    _ymax = float(max(ftt["FT"].max(), ftt["Activated"].max()) or 1)
     _INTER = "Inter,sans-serif"
     _leadmax = float(ftt["Leads"].max() or 1)
     figFT = go.Figure()
@@ -3060,17 +3076,12 @@ def _aia_ops_refresh(state):
                               "line": {"color": "#1a7fc4", "width": 1}},
                       text=[str(v) for v in ftt["Leads"]], textposition="middle center",
                       textfont={"size": 8, "color": "#000000", "family": _INTER})
-    # Counts on the overlay axis y2 (on top): FT Started (teal) behind with its count
-    # above; FT Started (GM) (orange) in front with its count inside; Activated line.
+    # Counts on the overlay axis y2 (on top): FT Started (teal) with its count above,
+    # then the Activated line.
     figFT.add_bar(x=_xb, y=ftt["FT"].tolist(), name="FT Started", marker_color="#17a589",
                   marker_line_width=0, legendrank=1, yaxis="y2", cliponaxis=False,
                   text=[f"<b>{v}</b>" if v else "" for v in ftt["FT"]], textposition="outside",
                   textfont={"size": 10, "color": "#0f5c4a", "family": _INTER})
-    figFT.add_bar(x=_xb, y=ftt["FTStart"].tolist(), name="FT Started (GM)", marker_color="#ed7d31",
-                  marker_line_width=0, legendrank=2, yaxis="y2", cliponaxis=False,
-                  text=[f"<b>{v}</b>" if v else "" for v in ftt["FTStart"]], textposition="inside",
-                  insidetextanchor="end",
-                  textfont={"size": 10, "color": "#ffffff", "family": _INTER})
     figFT.add_scatter(x=_xb, y=ftt["Activated"].tolist(), name="Activated (Score>50)",
                       yaxis="y2", legendgroup="act", legendrank=3, mode="lines+markers",
                       line={"color": "#1f4e79", "width": 1.5, "shape": "spline"},
@@ -3119,19 +3130,22 @@ def _aia_ops_refresh(state):
         _o_ft_act = (_o_ft[_o_ft["login_email_id"].map(
             lambda em: _ft_scores.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
             ["record_id"].nunique() if len(_o_ft) else 0)
+        # VA revenue for this GM (same paid basis as AIA: max amount_paid per deal,
+        # paid within range), and Tot Revenue = AIA + VA.
+        vo  = _VA[_VA["deal_owner"] == owner] if len(_VA) else _VA
+        vpd = _rng(vo, "payment_date", s, e)
+        _aia_rev = int(pd2.groupby("record_id")["amount_paid"].max().sum()) if len(pd2) else 0
+        _va_rev  = int(vpd.groupby("record_id")["amount_paid"].max().sum()) if len(vpd) else 0
         rd = {
-            "GM":         owner,
-            "Leads":      _rng(o,"create_date",s,e)["record_id"].nunique(),
-            "Self OB":    _rng(o,"self_onboarding_date",s,e)["record_id"].nunique(),
-            "AIA Bot":    _rng(o,"aia_bot_date",s,e)["record_id"].nunique(),
-            "DS":         _rng(o,"ds_date",s,e)["record_id"].nunique(),
-            "DC":         _rng(o,"dc_date",s,e)["record_id"].nunique(),
-            "FT Started": _o_ft["record_id"].nunique(),
+            "GM":           owner,
+            "Leads":        _rng(o,"create_date",s,e)["record_id"].nunique(),
+            "FT Started":   _o_ft["record_id"].nunique(),
             "FT Activated": _o_ft_act,
-            "Tot Paid":   pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
-            "Revenue":    int(pd2.groupby("record_id")["amount_paid"].max().sum()),
-            "MRR":        int(new_li["mrr"].sum()) if len(new_li) else 0,
-            "ATP":        _atp_amount(o, s, e),
+            "AIA Paid":     pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
+            "AIA MRR":      int(new_li["mrr"].sum()) if len(new_li) else 0,
+            "AIA Revenue":  _aia_rev,
+            "VA Revenue":   _va_rev,
+            "Tot Revenue":  _aia_rev + _va_rev,
         }
         # Hide GMs with nothing to show this period (every displayed metric is 0).
         if any(v for k, v in rd.items() if k != "GM"):
@@ -3141,10 +3155,10 @@ def _aia_ops_refresh(state):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
     # MRR KPI = Acquired MRR from the GM Performance Total row (includes refunds).
-    _gm_mrr = int(gm.iloc[-1]["MRR"]) if len(gm) else 0
+    _gm_mrr = int(gm.iloc[-1]["AIA MRR"]) if len(gm) else 0
     state.aia_kpi_mrr = _fmt2(_gm_mrr)
     state.aia_kpi_mrr_exact = f"{_inr(_gm_mrr)} · Acquired MRR (includes refunds)"
-    state.aia_gm_json = grid_payload_b64(gm, "GM", bar_cols=["ATP"], fixed=True)
+    state.aia_gm_json = grid_payload_b64(gm, "GM", sort_default_col="Tot Revenue", fixed=True)
 
     # UTM cohort
     rows2 = []
@@ -5271,6 +5285,8 @@ aia_pocgap_all = None
 aia_ft_deal = []; aia_ft_gm = []; aia_ft_stage = []
 aia_ft_deal_list = []; aia_ft_gm_list = []; aia_ft_stage_list = []
 aia_ft_deal_ms = _ms_json([], []); aia_ft_gm_ms = _ms_json([], []); aia_ft_stage_ms = _ms_json([], [])
+aia_um_deal = []; aia_um_gm = []; aia_um_stage = []
+aia_um_deal_ms = _ms_json([], []); aia_um_gm_ms = _ms_json([], []); aia_um_stage_ms = _ms_json([], [])
 # AIA Bot tracker
 aiabot_all = None
 aiabot_segment = []; aiabot_stage = []; aiabot_deal = []
@@ -5298,7 +5314,7 @@ aiabot_cohort_view = []
 aiabot_cohort_view_list = ["Cohort %", "Users"]
 aiabot_cohort_view_ms = _ms_json(aiabot_cohort_view_list, [])
 
-aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_ft_started=0
+aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_ft_started=0; aia_kpi_ft_activated=0
 aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
 aia_kpi_collected="₹0"; aia_kpi_collected_exact="₹0"; aia_kpi_mrr="₹0"; aia_kpi_mrr_exact="₹0"
@@ -5380,8 +5396,7 @@ aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no re
                   "Uses the FT filters.")
 aia_ft_trend_tip = ("• Leads = deals created that day\n"
                     "• FT Started = first-ever successful integration per account (internal excluded), counted on that day\n"
-                    "• Activated = of those, accounts with a 28-day Activity Score > 50\n"
-                    "• FT Started (GM) = deals with an FT start date that day")
+                    "• Activated = of those, accounts with a 28-day Activity Score > 50")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
@@ -5600,6 +5615,9 @@ _MS_DISPATCH = {
     "aia_ft_deal":    ("aia_ft_deal",            "aiaft"),
     "aia_ft_gm":      ("aia_ft_gm",              "aiaft"),
     "aia_ft_stage":   ("aia_ft_stage",           "aiaft"),
+    "aia_um_deal":    ("aia_um_deal",            "aiaum"),
+    "aia_um_gm":      ("aia_um_gm",              "aiaum"),
+    "aia_um_stage":   ("aia_um_stage",           "aiaum"),
     "aiabot_segment":  ("aiabot_segment",          "aiabot"),
     "aiabot_stage":    ("aiabot_stage",            "aiabot"),
     "aiabot_deal":     ("aiabot_deal",             "aiabot"),
@@ -5732,35 +5750,43 @@ def _sync_ms(state):
     # empty Status "" is included as a real, selectable option (an empty box)
     state.cs_usage_status_ms = _ms_json(_ulov("Status"), state.cs_usage_status)
 
-    # Free Trial Usage & Health AND the poc_email gap table share these filters, so the
-    # option lists are the UNION of both frames (the gap table adds stages like
-    # "Untracked"/"Discard", extra GMs, and its recovered deal names). The gap frame's
-    # deal column is "Deal / Signup Email"; its untracked rows hold the raw signup
-    # email there, and those emails are included in the Deal picker too, so a fully-
-    # untracked signup (no deal at all) can still be picked/filtered by its email.
+    # Free Trial Usage & Health — its own Deal Name / GM / Deal Stage filters,
+    # cascading over the FT frame only.
     _sd = _sel(state.aia_ft_deal); _sg = _sel(state.aia_ft_gm); _ss = _sel(state.aia_ft_stage)
     def _lov(target):
-        vals = set()
-        for df, dealcol in ((state.aia_ft_all, "Deal Name"),
-                            (state.aia_pocgap_all, "Deal / Signup Email")):
-            if df is None or len(df) == 0:
-                continue
-            d = df
-            if target != "Deal" and _sd:
-                d = d[d[dealcol].isin(_sd)]
-            if target != "GM" and _sg and "GM" in d.columns:
-                d = d[d["GM"].isin(_sg)]
-            if target != "Stage" and _ss and "Stage" in d.columns:
-                d = d[d["Stage"].isin(_ss)]
-            col = dealcol if target == "Deal" else ("GM" if target == "GM" else "Stage")
-            if col in d.columns:
-                vals |= set(d[col].dropna().astype(str))
-        if target == "GM":
-            vals.discard("—")                              # placeholder for untracked rows, not a real GM
-        return sorted(vals)
+        df = state.aia_ft_all
+        if df is None or len(df) == 0:
+            return []
+        d = df
+        if target != "Deal"  and _sd: d = d[d["Deal Name"].isin(_sd)]
+        if target != "GM"    and _sg: d = d[d["GM"].isin(_sg)]
+        if target != "Stage" and _ss: d = d[d["Stage"].isin(_ss)]
+        col = {"Deal": "Deal Name", "GM": "GM", "Stage": "Stage"}[target]
+        return sorted(set(d[col].dropna().astype(str))) if col in d.columns else []
     state.aia_ft_deal_ms  = _ms_json(_lov("Deal"),  state.aia_ft_deal)
     state.aia_ft_gm_ms    = _ms_json(_lov("GM"),    state.aia_ft_gm)
     state.aia_ft_stage_ms = _ms_json(_lov("Stage"), state.aia_ft_stage)
+
+    # Unmapped Deals & Signups — its OWN filters, cascading over the gap frame only.
+    # The deal column holds a deal name OR a raw signup email (so an untracked signup
+    # is pickable by its email); the "—" GM placeholder is not a real GM.
+    _ud = _sel(state.aia_um_deal); _ug = _sel(state.aia_um_gm); _us = _sel(state.aia_um_stage)
+    def _umlov(target):
+        df = state.aia_pocgap_all
+        if df is None or len(df) == 0:
+            return []
+        d = df
+        if target != "Deal"  and _ud: d = d[d["Deal / Signup Email"].isin(_ud)]
+        if target != "GM"    and _ug and "GM" in d.columns:    d = d[d["GM"].isin(_ug)]
+        if target != "Stage" and _us and "Stage" in d.columns: d = d[d["Stage"].isin(_us)]
+        col = {"Deal": "Deal / Signup Email", "GM": "GM", "Stage": "Stage"}[target]
+        vals = set(d[col].dropna().astype(str)) if col in d.columns else set()
+        if target == "GM":
+            vals.discard("—")
+        return sorted(vals)
+    state.aia_um_deal_ms  = _ms_json(_umlov("Deal"),  state.aia_um_deal)
+    state.aia_um_gm_ms    = _ms_json(_umlov("GM"),    state.aia_um_gm)
+    state.aia_um_stage_ms = _ms_json(_umlov("Stage"), state.aia_um_stage)
 
     # AIA Bot: Segment (fixed lov) / Deal Stage / Deal Name cross-filter
     _wa = state.aiabot_all
@@ -5864,7 +5890,8 @@ def on_ms_change(state):
     elif key == "aiabot_fail_intent":
         state.aiabot_cohort_intent = sel
     if scope == "aia":     on_aia_filter_change(state)
-    elif scope == "aiaft": _apply_ft_filter(state); _apply_pocgap_filter(state)
+    elif scope == "aiaft": _apply_ft_filter(state)
+    elif scope == "aiaum": _apply_pocgap_filter(state)
     elif scope == "aiabot": _aiabot_refresh(state)
     elif scope == "va":    on_va_filter_change(state)
     elif scope == "mkt":   _mkt_refresh(state)
@@ -5953,6 +5980,7 @@ def on_reset_filters(state, *_):
     state.aia_start_date     = ms;  state.aia_end_date     = me
     state.aia_selected_owner = []; state.aia_selected_campaign = []
     state.aia_ft_deal = []; state.aia_ft_gm = []; state.aia_ft_stage = []
+    state.aia_um_deal = []; state.aia_um_gm = []; state.aia_um_stage = []
     state.aia_channel_filter = "All"; state.aia_filter_label = ""
     # VA Ops
     state.va_start_date      = ms;  state.va_end_date      = me
