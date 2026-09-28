@@ -44,16 +44,11 @@ MRR
 |>
 |>
 
-<|layout|columns=1 1 1 1 1 1|gap=8px|
+<|layout|columns=1 1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Leads
 
 <|{aia_kpi_leads}|text|class_name=kpi-value|>
-|>
-<|part|class_name=kpi-card kpi-blue|
-DS
-
-<|{aia_kpi_ds}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-blue|
 FT Started

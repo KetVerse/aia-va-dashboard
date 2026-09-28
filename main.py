@@ -3134,17 +3134,21 @@ def _aia_ops_refresh(state):
         # paid within range), and Tot Revenue = AIA + VA.
         vo  = _VA[_VA["deal_owner"] == owner] if len(_VA) else _VA
         vpd = _rng(vo, "payment_date", s, e)
-        _aia_rev = int(pd2.groupby("record_id")["amount_paid"].max().sum()) if len(pd2) else 0
-        _va_rev  = int(vpd.groupby("record_id")["amount_paid"].max().sum()) if len(vpd) else 0
+        _aia_rev  = int(pd2.groupby("record_id")["amount_paid"].max().sum()) if len(pd2) else 0
+        _va_rev   = int(vpd.groupby("record_id")["amount_paid"].max().sum()) if len(vpd) else 0
+        _aia_paid = pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique()
+        _va_paid  = vpd["record_id"].nunique()
         rd = {
             "GM":           owner,
             "Leads":        _rng(o,"create_date",s,e)["record_id"].nunique(),
             "FT Started":   _o_ft["record_id"].nunique(),
             "FT Activated": _o_ft_act,
-            "AIA Paid":     pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique(),
+            "AIA Paid":     _aia_paid,
             "AIA MRR":      int(new_li["mrr"].sum()) if len(new_li) else 0,
             "AIA Revenue":  _aia_rev,
+            "VA Paid":      _va_paid,
             "VA Revenue":   _va_rev,
+            "Tot Paid":     _aia_paid + _va_paid,
             "Tot Revenue":  _aia_rev + _va_rev,
         }
         # Hide GMs with nothing to show this period (every displayed metric is 0).
