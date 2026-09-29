@@ -2658,21 +2658,22 @@ def _rng(df, col, s, e):
     except Exception:
         return df.iloc[0:0]
 
-_WA_BIZ_START_H, _WA_BIZ_END_H = 10, 18   # WhatsApp Reply TAT business window: 10:00-18:00 IST
+_WA_BIZ_START = pd.Timedelta(hours=9, minutes=30)   # WhatsApp Reply TAT business window:
+_WA_BIZ_END   = pd.Timedelta(hours=18, minutes=30)   # 9:30-18:30 IST, Mon-Fri
 
 def _business_minutes(start, end):
     """Elapsed minutes between two naive IST timestamps, counting ONLY the part
-    that falls inside the 10:00-18:00 business window on Mon-Sat -- nights and
-    all of Sunday (holiday) don't count at all (not clamped, fully skipped)."""
+    that falls inside the 9:30-18:30 business window on Mon-Fri -- nights and all
+    of Saturday/Sunday don't count at all (not clamped, fully skipped)."""
     if pd.isna(start) or pd.isna(end) or end <= start:
         return 0.0
     total = 0.0
     day = start.normalize()
     end_day = end.normalize()
     while day <= end_day:
-        if day.weekday() != 6:   # Sunday == 6
-            biz_open  = day + pd.Timedelta(hours=_WA_BIZ_START_H)
-            biz_close = day + pd.Timedelta(hours=_WA_BIZ_END_H)
+        if day.weekday() < 5:   # Mon-Fri == 0-4
+            biz_open  = day + _WA_BIZ_START
+            biz_close = day + _WA_BIZ_END
             seg_start = max(start, biz_open)
             seg_end   = min(end, biz_close)
             if seg_end > seg_start:
@@ -3300,7 +3301,7 @@ def _aia_ops_refresh(state):
         gm, "GM", sort_default_col="Tot Revenue", fixed=True,
         header_tips={
             "WA Reply Rate": "Customers who sent the pre-typed WhatsApp message ÷ how many got a GM/CSM reply. Date filter applies; campaign/channel filters don't. Data from 22 Sep 2026.",
-            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6pm, Mon-Sat; Sunday excluded) from the customer's WhatsApp message to the GM/CSM's first reply. Nights and Sundays don't count. Unreplied messages excluded.",
+            "WA Reply TAT (mins)": "Median BUSINESS minutes (9:30am-6:30pm, Mon-Fri) from the customer's WhatsApp message to the GM/CSM's first reply. Nights, Saturdays and Sundays don't count. Unreplied messages excluded.",
         },
         tip_cols={"WA Reply Rate": "__waTip"})
 
