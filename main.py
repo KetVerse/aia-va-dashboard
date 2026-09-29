@@ -1822,6 +1822,56 @@ def _load_gm_slots():
         print(f"[WARN] gm_slots_inventory load failed: {ex} -- using empty frame")
     return df
 
+def _load_wa_replies():
+    """AIA Ops: GM/CSM WhatsApp reply-rate & TAT (public.lr_wa_inbound), joined to
+    lr_gms for the deal_owner-matching full_name and left-joined to lr_submissions
+    to drop test submissions. sent_at/first_reply_at are shifted to IST (naive) so
+    they line up with the page's date filter via _rng. Data starts 22 Sep 2026.
+    Guarded so a failure just yields an empty frame."""
+    cols = ["message_id", "gm_id", "gm_full_name", "lead10", "sent_ist", "reply_ist", "reply_tat_mins"]
+    df = pd.DataFrame(columns=cols)
+    try:
+        df = _q(SUPABASE_URL, r"""
+            SELECT i.message_id, i.gm_id, g.full_name AS gm_full_name,
+                   right(regexp_replace(i.sender_phone,'\D','','g'),10) AS lead10,
+                   (i.sent_at AT TIME ZONE 'Asia/Kolkata')        AS sent_ist,
+                   (i.first_reply_at AT TIME ZONE 'Asia/Kolkata') AS reply_ist,
+                   i.reply_tat_mins
+            FROM public.lr_wa_inbound i
+            JOIN public.lr_gms g ON g.id = i.gm_id
+            LEFT JOIN public.lr_submissions s ON s.id = i.submission_id
+            WHERE coalesce(s.is_test, false) = false
+              AND i.sent_at >= '2026-09-22 00:00:00+00'
+        """, statement_timeout_ms=20000)
+    except Exception as ex:
+        print(f"[WARN] lr_wa_inbound load failed: {ex} -- using empty frame")
+    return df
+
+def _prep_wa_replies(df):
+    """gm_full_name/lead10 as clean strings; sent_ist/reply_ist as naive IST
+    datetimes; reply_tat_mins numeric. Drops rows with no sent_ist."""
+    df = df.copy() if df is not None else pd.DataFrame()
+    if not len(df):
+        return df
+    df["gm_full_name"] = df.get("gm_full_name").astype(str).str.strip()
+    df["lead10"] = df.get("lead10").astype(str).str.strip()
+    df["sent_ist"] = pd.to_datetime(df.get("sent_ist"), errors="coerce")
+    df["reply_ist"] = pd.to_datetime(df.get("reply_ist"), errors="coerce")
+    df["reply_tat_mins"] = pd.to_numeric(df.get("reply_tat_mins"), errors="coerce")
+    return df[df["sent_ist"].notna()]
+
+def _check_wa_gm_match(wa_df, aia_df):
+    """Warn (once per load) about any lr_gms.full_name in the WA data that doesn't
+    match an aia_live.deal_owner -- a silent mismatch would drop that GM/CSM's
+    WhatsApp numbers from the GM Performance table."""
+    if wa_df is None or not len(wa_df) or "deal_owner" not in aia_df.columns:
+        return
+    wa_gms = set(wa_df["gm_full_name"].dropna().unique())
+    deal_owners = set(aia_df["deal_owner"].dropna().unique())
+    unmatched = wa_gms - deal_owners
+    if unmatched:
+        print(f"[WARN] lr_wa_inbound gm_full_name not found in aia_live.deal_owner: {sorted(unmatched)}")
+
 def _prep_gm_slots(df):
     """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
     same-day re-write via created_at doesn't double-count."""
@@ -2048,10 +2098,12 @@ def _prep_signals(ga, conv, contacts=None):
 _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
 _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
 _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
+_WA_REPLIES = _prep_wa_replies(_load_wa_replies())
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
 _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
+_check_wa_gm_match(_WA_REPLIES, _AIA)
 _INCENTIVE_TARGETS = _RAW_INC.copy()
 if "month" in _INCENTIVE_TARGETS.columns:
     _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
@@ -2389,7 +2441,7 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_REPLIES
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -2397,9 +2449,11 @@ def _reload_data():
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
     _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
+    _WA_REPLIES = _prep_wa_replies(_load_wa_replies())
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
+    _check_wa_gm_match(_WA_REPLIES, _AIA)
     _INCENTIVE_TARGETS = _RAW_INC.copy()
     if "month" in _INCENTIVE_TARGETS.columns:
         _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
@@ -2603,6 +2657,28 @@ def _rng(df, col, s, e):
         return df[m]
     except Exception:
         return df.iloc[0:0]
+
+_WA_BIZ_START_H, _WA_BIZ_END_H = 10, 18   # WhatsApp Reply TAT business window: 10:00-18:00 IST
+
+def _business_minutes(start, end):
+    """Elapsed minutes between two naive IST timestamps, counting ONLY the part
+    that falls inside the 10:00-18:00 business window on Mon-Sat -- nights and
+    all of Sunday (holiday) don't count at all (not clamped, fully skipped)."""
+    if pd.isna(start) or pd.isna(end) or end <= start:
+        return 0.0
+    total = 0.0
+    day = start.normalize()
+    end_day = end.normalize()
+    while day <= end_day:
+        if day.weekday() != 6:   # Sunday == 6
+            biz_open  = day + pd.Timedelta(hours=_WA_BIZ_START_H)
+            biz_close = day + pd.Timedelta(hours=_WA_BIZ_END_H)
+            seg_start = max(start, biz_open)
+            seg_end   = min(end, biz_close)
+            if seg_end > seg_start:
+                total += (seg_end - seg_start).total_seconds() / 60.0
+        day += pd.Timedelta(days=1)
+    return total
 
 def _sel(v):
     """Normalise a multi-select filter value to a list of chosen options.
@@ -3128,6 +3204,26 @@ def _aia_ops_refresh(state):
     # GM table
     rows = []
     _mrr_total = 0
+    # WhatsApp reply-rate/TAT (public.lr_wa_inbound): date-range filter only (NOT
+    # UTM Campaign / the channel pie). Dedupe to the earliest message per (gm,
+    # lead) within the range so a repeat send doesn't double-count.
+    # sent_ist carries real clock time (unlike aia_live's date-only columns), so
+    # extend the shared end-of-range `e` (midnight) through the end of that day —
+    # otherwise the End Date's own day is almost entirely excluded.
+    _wa_e = e + pd.Timedelta(hours=23, minutes=59, seconds=59)
+    _wa_rng = _rng(_WA_REPLIES, "sent_ist", s, _wa_e) if len(_WA_REPLIES) else _WA_REPLIES
+    if len(_wa_rng):
+        _wa_rng = _wa_rng.sort_values("sent_ist").drop_duplicates(subset=["gm_id", "lead10"], keep="first")
+        # TAT = business minutes (10:00-18:00 Mon-Sat, Sunday excluded) from the
+        # customer's message to the first reply -- NOT raw wall-clock elapsed, so a
+        # message sent at midnight and replied at 10:01am counts as ~1 min, not 9.5 hrs.
+        _wa_rng = _wa_rng.copy()
+        _wa_rng["biz_tat_mins"] = _wa_rng.apply(
+            lambda r: _business_minutes(r["sent_ist"], r["reply_ist"]) if pd.notna(r["reply_ist"]) else np.nan,
+            axis=1)
+    _wa_received_total = 0
+    _wa_replied_total = 0
+    _wa_tat_values = []
     for owner in sorted(df["deal_owner"].dropna().unique()):
         o   = df[df["deal_owner"]==owner]
         pd2 = _rng(o,"payment_date",s,e)
@@ -3148,9 +3244,25 @@ def _aia_ops_refresh(state):
         _aia_paid = pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique()
         _va_paid  = vpd["record_id"].nunique()
         _mrr_total += int(new_li["mrr"].sum()) if len(new_li) else 0
+        # WhatsApp reply rate / TAT for this GM/CSM (already date-ranged + deduped above).
+        wa_o = _wa_rng[_wa_rng["gm_full_name"] == owner] if len(_wa_rng) else _wa_rng
+        _wa_received = len(wa_o)
+        _wa_replied_mask = wa_o["reply_ist"].notna() if _wa_received else None
+        _wa_replied = int(_wa_replied_mask.sum()) if _wa_received else 0
+        _wa_rate = f"{_wa_replied/_wa_received*100:.1f}%" if _wa_received else ""
+        _wa_tip = (f"{_wa_received} WhatsApp message{'s' if _wa_received != 1 else ''} received"
+                   if _wa_received else "")
+        _wa_tat = None
+        if _wa_replied:
+            _wa_tat_vals = wa_o.loc[_wa_replied_mask, "biz_tat_mins"].dropna()
+            if len(_wa_tat_vals):
+                _wa_tat = round(float(_wa_tat_vals.median()), 1)
         rd = {
-            "GM":           owner,
-            "Leads":        _rng(o,"create_date",s,e)["record_id"].nunique(),
+            "GM":                  owner,
+            "Leads":               _rng(o,"create_date",s,e)["record_id"].nunique(),
+            "WA Reply Rate":       _wa_rate,
+            "WA Reply TAT (mins)": _wa_tat,
+            "__waTip":             _wa_tip,
             "FT Started":   _o_ft["record_id"].nunique(),
             "FT Activated": _o_ft_act,
             "AIA Paid":     _aia_paid,
@@ -3163,15 +3275,34 @@ def _aia_ops_refresh(state):
         # Hide GMs with nothing to show this period (every displayed metric is 0).
         if any(v for k, v in rd.items() if k != "GM"):
             rows.append(rd)
+            _wa_received_total += _wa_received
+            _wa_replied_total  += _wa_replied
+            if _wa_replied:
+                _wa_tat_values.extend(wa_o.loc[_wa_replied_mask, "biz_tat_mins"].dropna().tolist())
     gm = pd.DataFrame(rows)
     if len(gm):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
+        # WA Reply Rate/TAT can't be summed like the other columns — override with
+        # the real aggregate (rate = total replied/received; TAT = median of ALL
+        # replied rows in range, not a median of the per-GM medians).
+        tot["WA Reply Rate"] = (f"{_wa_replied_total/_wa_received_total*100:.1f}%"
+                                 if _wa_received_total else "")
+        tot["WA Reply TAT (mins)"] = (round(float(pd.Series(_wa_tat_values).median()), 1)
+                                       if _wa_tat_values else None)
+        tot["__waTip"] = (f"{_wa_received_total} WhatsApp message{'s' if _wa_received_total != 1 else ''} received"
+                           if _wa_received_total else "")
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
     # MRR KPI = Acquired MRR summed across GMs (includes refunds).
     _gm_mrr = _mrr_total
     state.aia_kpi_mrr = _fmt2(_gm_mrr)
     state.aia_kpi_mrr_exact = f"{_inr(_gm_mrr)} · Acquired MRR (includes refunds)"
-    state.aia_gm_json = grid_payload_b64(gm, "GM", sort_default_col="Tot Revenue", fixed=True)
+    state.aia_gm_json = grid_payload_b64(
+        gm, "GM", sort_default_col="Tot Revenue", fixed=True,
+        header_tips={
+            "WA Reply Rate": "Customers who sent the pre-typed WhatsApp message ÷ how many got a GM/CSM reply. Date filter applies; campaign/channel filters don't. Data from 22 Sep 2026.",
+            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6pm, Mon-Sat; Sunday excluded) from the customer's WhatsApp message to the GM/CSM's first reply. Nights and Sundays don't count. Unreplied messages excluded.",
+        },
+        tip_cols={"WA Reply Rate": "__waTip"})
 
     # UTM cohort
     rows2 = []
