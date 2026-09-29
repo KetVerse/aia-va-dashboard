@@ -2984,8 +2984,16 @@ def _aia_ops_refresh(state):
         lambda em: _sc_k.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
         ["record_id"].nunique() if len(_ft_started_k) else 0)
     pd_                       = _rng(df,"payment_date",s,e)
-    state.aia_kpi_aia_paid    = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
-    state.aia_kpi_gst_paid    = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
+    _aia_paid_n               = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
+    _gst_paid_n               = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
+    state.aia_kpi_aia_paid    = _aia_paid_n + _gst_paid_n
+    if _aia_paid_n and _gst_paid_n:
+        state.aia_kpi_aia_paid_exact = f"{_aia_paid_n} AIA + {_gst_paid_n} GST Module"
+    elif _gst_paid_n:
+        state.aia_kpi_aia_paid_exact = f"{_gst_paid_n} GST Module"
+    else:
+        state.aia_kpi_aia_paid_exact = f"{_aia_paid_n} AIA Module"
+    state.aia_kpi_gst_paid    = _gst_paid_n
     if "asked_refund" in pd_.columns:
         state.aia_kpi_paid    = pd_[pd_["asked_refund"] != "Yes"]["record_id"].nunique()
     else:
@@ -3119,6 +3127,7 @@ def _aia_ops_refresh(state):
 
     # GM table
     rows = []
+    _mrr_total = 0
     for owner in sorted(df["deal_owner"].dropna().unique()):
         o   = df[df["deal_owner"]==owner]
         pd2 = _rng(o,"payment_date",s,e)
@@ -3138,13 +3147,13 @@ def _aia_ops_refresh(state):
         _va_rev   = int(vpd.groupby("record_id")["amount_paid"].max().sum()) if len(vpd) else 0
         _aia_paid = pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique()
         _va_paid  = vpd["record_id"].nunique()
+        _mrr_total += int(new_li["mrr"].sum()) if len(new_li) else 0
         rd = {
             "GM":           owner,
             "Leads":        _rng(o,"create_date",s,e)["record_id"].nunique(),
             "FT Started":   _o_ft["record_id"].nunique(),
             "FT Activated": _o_ft_act,
             "AIA Paid":     _aia_paid,
-            "AIA MRR":      int(new_li["mrr"].sum()) if len(new_li) else 0,
             "AIA Revenue":  _aia_rev,
             "VA Paid":      _va_paid,
             "VA Revenue":   _va_rev,
@@ -3158,8 +3167,8 @@ def _aia_ops_refresh(state):
     if len(gm):
         tot = gm.select_dtypes("number").sum().to_dict(); tot["GM"] = "Total"
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
-    # MRR KPI = Acquired MRR from the GM Performance Total row (includes refunds).
-    _gm_mrr = int(gm.iloc[-1]["AIA MRR"]) if len(gm) else 0
+    # MRR KPI = Acquired MRR summed across GMs (includes refunds).
+    _gm_mrr = _mrr_total
     state.aia_kpi_mrr = _fmt2(_gm_mrr)
     state.aia_kpi_mrr_exact = f"{_inr(_gm_mrr)} · Acquired MRR (includes refunds)"
     state.aia_gm_json = grid_payload_b64(gm, "GM", sort_default_col="Tot Revenue", fixed=True)
@@ -5319,7 +5328,7 @@ aiabot_cohort_view_list = ["Cohort %", "Users"]
 aiabot_cohort_view_ms = _ms_json(aiabot_cohort_view_list, [])
 
 aia_kpi_leads=0; aia_kpi_ds=0; aia_kpi_dc=0; aia_kpi_ft_started=0; aia_kpi_ft_activated=0
-aia_kpi_aia_paid=0; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
+aia_kpi_aia_paid=0; aia_kpi_aia_paid_exact=""; aia_kpi_gst_paid=0; aia_kpi_paid=0; aia_kpi_refunds=0
 aia_kpi_parked=0; aia_kpi_discards=0; aia_kpi_closed_lost=0
 aia_kpi_collected="₹0"; aia_kpi_collected_exact="₹0"; aia_kpi_mrr="₹0"; aia_kpi_mrr_exact="₹0"
 aia_funnel_fig = go.Figure()

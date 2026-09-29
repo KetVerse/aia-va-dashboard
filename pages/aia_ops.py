@@ -30,7 +30,7 @@ AIA_OPS_PAGE = """
 <|part|class_name=kpi-card kpi-blue|
 AIA Paid
 
-<|{aia_kpi_aia_paid}|text|class_name=kpi-value|>
+<|{aia_kpi_aia_paid}|text|class_name=kpi-value|hover_text={aia_kpi_aia_paid_exact}|>
 |>
 <|part|class_name=kpi-card kpi-green|
 Revenue Collected
@@ -44,7 +44,7 @@ MRR
 |>
 |>
 
-<|layout|columns=1 1 1 1 1|gap=8px|
+<|layout|columns=1 1 1 1|gap=8px|
 <|part|class_name=kpi-card kpi-blue|
 Leads
 
@@ -59,11 +59,6 @@ FT Started
 FT Activated
 
 <|{aia_kpi_ft_activated}|text|class_name=kpi-value|hover_text=FT-started deals whose account has a 28-day Activity Score > 50.|>
-|>
-<|part|class_name=kpi-card kpi-grey|
-GST Paid
-
-<|{aia_kpi_gst_paid}|text|class_name=kpi-value|>
 |>
 <|part|class_name=kpi-card kpi-red|
 Refunds
