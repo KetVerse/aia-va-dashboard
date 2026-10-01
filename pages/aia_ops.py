@@ -58,7 +58,7 @@ FT Started
 <|part|class_name=kpi-card kpi-blue|
 FT Activated
 
-<|{aia_kpi_ft_activated}|text|class_name=kpi-value|hover_text=FT-started deals whose account has a 28-day Activity Score > 50.|>
+<|{aia_kpi_ft_activated}|text|class_name=kpi-value|hover_text=FT-started deals whose account has 2+ real-usage days (green/amber) in the last 28.|>
 |>
 <|part|class_name=kpi-card kpi-red|
 Refunds

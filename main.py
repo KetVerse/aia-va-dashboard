@@ -792,7 +792,7 @@ def _recent_event_lookup():
         lu.setdefault(ac, {}).setdefault(d, {})[b] = int(n)
     return lu
 
-def _usage_28(email, ev_lu):
+def _usage_28(email, ev_lu, acct=None):
     """Usage in the last 28 days for a customer's account. Returns
     (active_days_count, streak, bot_query_28d_total, bot_upload_28d_total). `streak`
     encodes 28 days as ';'-joined 20-field tokens (index 0 = today .. 27 = today-27d):
@@ -803,8 +803,11 @@ def _usage_28(email, ev_lu):
     sync, any work event (transactions / entities / invoices / recon /
     vendor-mismatch / mapping / delete), OR a presence event (login /
     dashboard-viewed). The grid colours the dot: green=accounting sync,
-    yellow=any other event, grey=nothing."""
-    ac = _EMAIL_ACCT.get(_clean_email(email))
+    yellow=any other event, grey=nothing.
+    `acct`: pass a pre-resolved account_id to skip the email->account lookup
+    (for callers, e.g. the onboarding-funnel trend, that already have the
+    account and no login email to resolve it from)."""
+    ac = acct if acct else _EMAIL_ACCT.get(_clean_email(email))
     today = pd.Timestamp(date.today()).normalize()   # anchor to TODAY (index 0 = today, in progress)
     blank = ";".join([",".join(["0"] * 20)] * 28)
     if ac is None:
@@ -850,6 +853,34 @@ def _usage_28(email, ev_lu):
         toks.append("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d" % (
             on, up, sc, it, vw, txn, ent, rec, vmr, mp, inv, dele, log, ts, li, tl, rv, nr, bq, bu))
     return active, ";".join(toks), botq_tot, botu_tot
+
+
+def _real_usage_days_from_streak(streak):
+    """Count days (of the 28 in `streak`, _usage_28()'s token string) where the
+    Usage Streak dot is GREEN (accounting sync or recon) or AMBER (any other
+    real work event: upload, transactions, entities, invoices, vendor-mismatch,
+    mapping, delete, transaction-status, WhatsApp bot). Excludes BLUE (login /
+    dashboard-view only -- not real usage) and grey (nothing) days. Mirrors
+    streakHtml()'s dot-colour split in grid_server.py exactly, so this always
+    matches what's shown in the Usage Streak column. Used for the FT Activated
+    rule: >=2 real-usage days in the last 28."""
+    if not streak:
+        return 0
+    n = 0
+    for day in streak.split(";"):
+        p = day.split(",")
+        if len(p) < 20:
+            continue
+        def gi(i):
+            try: return int(p[i])
+            except (ValueError, IndexError): return 0
+        green = gi(2) > 0 or gi(7) > 0                                  # syncs, recon
+        amber = (gi(1) > 0 or gi(5) > 0 or gi(6) > 0 or gi(8) > 0        # uploads, txns, entities, vmr
+                 or gi(9) > 0 or gi(10) > 0 or gi(11) > 0 or gi(13) > 0  # mapping, invoices, deletes, txnstatus
+                 or gi(18) > 0 or gi(19) > 0)                           # bot query, bot upload
+        if green or amber:
+            n += 1
+    return n
 
 
 def _va_mrr(record_ids):
@@ -2666,12 +2697,12 @@ def _rng(df, col, s, e):
     except Exception:
         return df.iloc[0:0]
 
-_WA_BIZ_START = pd.Timedelta(hours=9, minutes=30)   # WhatsApp Reply TAT business window:
-_WA_BIZ_END   = pd.Timedelta(hours=18, minutes=30)   # 9:30-18:30 IST, Mon-Fri
+_WA_BIZ_START = pd.Timedelta(hours=10, minutes=0)    # WhatsApp Reply TAT business window:
+_WA_BIZ_END   = pd.Timedelta(hours=18, minutes=30)   # 10:00-18:30 IST, Mon-Fri
 
 def _business_minutes(start, end):
     """Elapsed minutes between two naive IST timestamps, counting ONLY the part
-    that falls inside the 9:30-18:30 business window on Mon-Fri -- nights and all
+    that falls inside the 10:00-18:30 business window on Mon-Fri -- nights and all
     of Saturday/Sunday don't count at all (not clamped, fully skipped)."""
     if pd.isna(start) or pd.isna(end) or end <= start:
         return 0.0
@@ -3040,6 +3071,25 @@ def _apply_pocgap_filter(state):
 def _aia_ops_refresh(state):
     s = pd.Timestamp(state.aia_start_date)
     e = pd.Timestamp(state.aia_end_date)
+    # FT Activated rule: >=2 real-usage days (green/amber Usage Streak dots --
+    # accounting sync, recon, or any other real work event) in the last 28 days.
+    # Login/dashboard-view-only days (the blue dot) don't count. Replaces the
+    # old "28-day Activity Score > 50" rule. Memoized per account (one _usage_28
+    # call per account, however many times it's checked across the KPI card,
+    # trend chart and GM Performance table below).
+    _ev_lu_ft = _recent_event_lookup()
+    _ft_act_cache = {}
+    def _ft_activated_acct(acct):
+        if not acct:
+            return False
+        if acct not in _ft_act_cache:
+            _, _streak, _, _ = _usage_28(None, _ev_lu_ft, acct=acct)
+            _ft_act_cache[acct] = _real_usage_days_from_streak(_streak) >= 2
+        return _ft_act_cache[acct]
+    def _ft_activated_email(em):
+        if pd.isna(em):
+            return False
+        return _ft_activated_acct(_EMAIL_ACCT.get(_clean_email(em)))
     _ftdf = _build_ft_health_df()
     state.aia_ft_all = _ftdf
     state.aia_ft_gm_list    = sorted(_ftdf["GM"].dropna().unique().tolist()) if len(_ftdf) else []
@@ -3063,10 +3113,8 @@ def _aia_ops_refresh(state):
     state.aia_kpi_dc          = _rng(df,"dc_date",s,e)["record_id"].nunique()
     _ft_started_k = _rng(df,"ft_start_date",s,e)
     state.aia_kpi_ft_started  = _ft_started_k["record_id"].nunique()
-    # FT Activated = FT-started deals whose account has a 28-day Activity Score > 50.
-    _sc_k = _activity_scores()
-    state.aia_kpi_ft_activated = (_ft_started_k[_ft_started_k["login_email_id"].map(
-        lambda em: _sc_k.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
+    # FT Activated = FT-started deals whose account has >=2 real-usage days in 28d.
+    state.aia_kpi_ft_activated = (_ft_started_k[_ft_started_k["login_email_id"].map(_ft_activated_email)]
         ["record_id"].nunique() if len(_ft_started_k) else 0)
     pd_                       = _rng(df,"payment_date",s,e)
     _aia_paid_n               = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
@@ -3124,15 +3172,14 @@ def _aia_ops_refresh(state):
     # Trend "New Integrations" = first-ever integration success per account from the
     # onboarding funnel (aia_onboarding_funnel; internal excluded, first-success) — an
     # account/email count, so it isn't dropped for accounts without a matching AiA deal.
-    # Activated = those with a 28-day Activity Score > 50. Same axis/filtering as demos.
+    # Activated = those with >=2 real-usage days in the last 28. Same axis/filtering as demos.
     # NOTE: the GM table below keeps its "FT Started" column on ft_start_date (unchanged).
-    _ft_scores = _activity_scores()
     _fn = _INTEG_FUNNEL
     if _fn is not None and len(_fn):
         _fn = _fn[(_fn["day"] >= s) & (_fn["day"] <= e_cap)].copy()
-        _fn["_sc"] = _fn["acct"].map(lambda a: _ft_scores.get(a, 0))
+        _fn["_act"] = _fn["acct"].map(_ft_activated_acct)
         _ft_d = _fn.groupby("day").size().reset_index(name="FT").rename(columns={"day": "date"})
-        _fta_d = (_fn[_fn["_sc"] > 50].groupby("day").size().reset_index(name="Activated")
+        _fta_d = (_fn[_fn["_act"]].groupby("day").size().reset_index(name="Activated")
                   .rename(columns={"day": "date"}))
     else:
         _ft_d = pd.DataFrame(columns=["date", "FT"]); _fta_d = pd.DataFrame(columns=["date", "Activated"])
@@ -3240,9 +3287,8 @@ def _aia_ops_refresh(state):
                           &(_AIA_LI["date_paid"]>=s)&(_AIA_LI["date_paid"]<=e)]
         new_li = li_sub[li_sub["recurring_type"]=="New"] if "recurring_type" in li_sub.columns and len(li_sub[li_sub["recurring_type"]=="New"]) else li_sub
         paid_no_refund = pd2[pd2["asked_refund"] != "Yes"] if "asked_refund" in pd2.columns else pd2
-        _o_ft = _rng(o, "ft_start_date", s, e)   # FT started in range; Activated = 28d Activity Score > 50
-        _o_ft_act = (_o_ft[_o_ft["login_email_id"].map(
-            lambda em: _ft_scores.get(_EMAIL_ACCT.get(_clean_email(em)), 0) if pd.notna(em) else 0) > 50]
+        _o_ft = _rng(o, "ft_start_date", s, e)   # FT started in range; Activated = >=2 real-usage days in 28d
+        _o_ft_act = (_o_ft[_o_ft["login_email_id"].map(_ft_activated_email)]
             ["record_id"].nunique() if len(_o_ft) else 0)
         # VA revenue for this GM (same paid basis as AIA: max amount_paid per deal,
         # paid within range), and Tot Revenue = AIA + VA.
@@ -3314,7 +3360,7 @@ def _aia_ops_refresh(state):
         gm, "GM", sort_default_col="Tot Revenue", fixed=True,
         header_tips={
             "WA Reply Rate": "Customers who sent the pre-typed WhatsApp message ÷ how many got a GM/CSM reply. Date filter applies; campaign/channel filters don't. Data from 22 Sep 2026.",
-            "WA Reply TAT (mins)": "Median BUSINESS minutes (9:30am-6:30pm, Mon-Fri) from the customer's WhatsApp message to the GM/CSM's first reply. Nights, Saturdays and Sundays don't count. Unreplied messages excluded.",
+            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6:30pm, Mon-Fri) from the customer's WhatsApp message to the GM/CSM's first reply. Nights, Saturdays and Sundays don't count. Unreplied messages excluded.",
         },
         tip_cols={"WA Reply Rate": "__waTip", "WA Reply TAT (mins)": "__waTatTip"})
 
@@ -5554,7 +5600,7 @@ aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no re
                   "Uses the FT filters.")
 aia_ft_trend_tip = ("• Leads = deals created that day\n"
                     "• FT Started = first-ever successful integration per account (internal excluded), counted on that day\n"
-                    "• Activated = of those, accounts with a 28-day Activity Score > 50")
+                    "• Activated = of those, accounts with 2+ real-usage days (green/amber) in the last 28")
 vaf_rev_tip = ("Revenue Matrix (₹)\n"
                "• Cohort Spread: Based on MRR + one-time revenue\n"
                "• Total MRR: Sum of MRR + one-time revenue\n"
