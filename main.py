@@ -5901,7 +5901,19 @@ def _sync_ms(state):
                 d = d[d[col].isin(s)]
         return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
     state.cs_usage_deal_ms   = _ms_json(_ulov("Deal Name"),  state.cs_usage_deal)
-    state.cs_usage_csm_ms    = _ms_json(_ulov("CSM"),        state.cs_usage_csm)
+    # Diagnostic: a GM reported the CSM dropdown on this table coming back empty
+    # for them specifically, even with every OTHER filter here reset to "All"
+    # (so the underlying data clearly has CSM values and no narrowing filter
+    # should be excluding them). Couldn't reproduce or find a server-side error,
+    # so log the exact filter state whenever this empty-despite-data case fires,
+    # to catch it with real evidence next time instead of guessing blind.
+    _csm_lov = _ulov("CSM")
+    if not _csm_lov and _ua is not None and len(_ua) and "CSM" in _ua.columns and _ua["CSM"].notna().any():
+        print(f"[WARN] cs_usage_csm_ms empty despite CSM data present -- rows={len(_ua)} "
+              f"deal={_sel(state.cs_usage_deal)!r} stage={_sel(state.cs_usage_stage)!r} "
+              f"owner={_sel(state.cs_usage_owner)!r} cadence={_sel(state.cs_usage_cadence)!r} "
+              f"status={state.cs_usage_status!r} csm_filter={_sel(state.cs_usage_csm)!r}")
+    state.cs_usage_csm_ms    = _ms_json(_csm_lov,             state.cs_usage_csm)
     state.cs_usage_stage_ms  = _ms_json(_ulov("Stage"),      state.cs_usage_stage)
     state.cs_usage_owner_ms  = _ms_json(_ulov("Deal Owner"), state.cs_usage_owner)
     state.cs_usage_cadence_ms = _ms_json(_ulov("Cadence"),   state.cs_usage_cadence)
