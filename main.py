@@ -601,6 +601,14 @@ _SPARK_TIP_SCRIPT = """
 
 @flask_app.after_request
 def _inject_zoom_lock(resp):
+    # Never let a browser or an intermediate proxy cache ANY response from this
+    # app -- the main page, the /grid/ and /pie/ iframes, all of it. Without this,
+    # a deploy can leave some users on stale HTML/JS that not even a hard refresh
+    # (Ctrl+Shift+R) necessarily clears if a corporate proxy/antivirus web filter
+    # is caching in between. Low-traffic internal dashboard, so always-fresh is
+    # worth more than any caching benefit.
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
     try:
         # The /grid/ and /pie/ iframes are self-contained pages with their own JS and
         # CSS. Injecting the main-page scripts there is wrong — e.g. the sparkline
