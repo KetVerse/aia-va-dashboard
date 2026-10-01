@@ -4778,7 +4778,7 @@ def _mkt_refresh(state):
         cs = cs.sort_values("Spend", ascending=False, ignore_index=True)
         state.mkt_channel_spend_json = pie_payload_b64(cs, "Channel", "Spend", money=True)
     else:
-        state.mkt_channel_spend_json = pie_payload_b64(pd.DataFrame())
+        state.mkt_channel_spend_json = pie_payload_b64(pd.DataFrame(columns=["Channel", "Spend"]), "Channel", "Spend")
 
     # Deals by channel (distinct deal records by create_date) — this counts DEALS.
     cl = _rng(_AIA,"create_date",_us,_ue).groupby("deal_source_group")["record_id"].nunique().reset_index()
@@ -6189,14 +6189,23 @@ def on_navigate(state, page_name, params):
     return page_name
 
 def _refresh_all(state):
+    # Each page's refresh runs isolated: a bug in ONE page (e.g. a bad fallback
+    # call) used to throw uncaught, which aborted this whole function -- silently
+    # skipping _sync_ms() below it and leaving EVERY page's filter dropdowns
+    # (not just the page that broke) stuck on stale/empty option lists for that
+    # session, with the broken page's own error never even surfacing. One
+    # try/except per page contains the blast radius to that page, and _sync_ms()
+    # (which every page's filter lists depend on) always still runs.
     state.last_synced = _fmt_sync()
-    _aia_ops_refresh(state)
-    _cs_refresh(state)
-    _mkt_refresh(state)
-    _va_ops_refresh(state)
-    _vaf_refresh(state)
-    _ar_refresh(state)
-    _aiabot_refresh(state)
+    for _name, _fn in (("aia_ops", _aia_ops_refresh), ("cs", _cs_refresh),
+                        ("mkt", _mkt_refresh), ("va_ops", _va_ops_refresh),
+                        ("vaf", _vaf_refresh), ("ar", _ar_refresh),
+                        ("aiabot", _aiabot_refresh)):
+        try:
+            _fn(state)
+        except Exception as ex:
+            print(f"[WARN] _refresh_all: {_name} refresh failed, other pages/filters still "
+                  f"refresh normally -- {ex}")
     _sync_ms(state)
 
 def _refresh_signal_date_bounds(state):
