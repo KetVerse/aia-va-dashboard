@@ -3251,19 +3251,22 @@ def _aia_ops_refresh(state):
         _wa_replied_mask = wa_o["reply_ist"].notna() if _wa_received else None
         _wa_replied = int(_wa_replied_mask.sum()) if _wa_received else 0
         _wa_rate = f"{_wa_replied/_wa_received*100:.1f}%" if _wa_received else ""
-        _wa_tip = (f"{_wa_received} WhatsApp message{'s' if _wa_received != 1 else ''} received"
+        _wa_tip = (f"{_wa_received} WA message{'s' if _wa_received != 1 else ''} received"
                    if _wa_received else "")
         _wa_tat = None
         if _wa_replied:
             _wa_tat_vals = wa_o.loc[_wa_replied_mask, "biz_tat_mins"].dropna()
             if len(_wa_tat_vals):
                 _wa_tat = round(float(_wa_tat_vals.median()), 1)
+        _wa_tat_tip = (f"Based on {_wa_replied} replied message{'s' if _wa_replied != 1 else ''}"
+                       if _wa_replied else "")
         rd = {
             "GM":                  owner,
             "Leads":               _rng(o,"create_date",s,e)["record_id"].nunique(),
             "WA Reply Rate":       _wa_rate,
             "WA Reply TAT (mins)": _wa_tat,
             "__waTip":             _wa_tip,
+            "__waTatTip":          _wa_tat_tip,
             "FT Started":   _o_ft["record_id"].nunique(),
             "FT Activated": _o_ft_act,
             "AIA Paid":     _aia_paid,
@@ -3290,8 +3293,10 @@ def _aia_ops_refresh(state):
                                  if _wa_received_total else "")
         tot["WA Reply TAT (mins)"] = (round(float(pd.Series(_wa_tat_values).median()), 1)
                                        if _wa_tat_values else None)
-        tot["__waTip"] = (f"{_wa_received_total} WhatsApp message{'s' if _wa_received_total != 1 else ''} received"
+        tot["__waTip"] = (f"{_wa_received_total} WA message{'s' if _wa_received_total != 1 else ''} received"
                            if _wa_received_total else "")
+        tot["__waTatTip"] = (f"Based on {_wa_replied_total} replied message{'s' if _wa_replied_total != 1 else ''}"
+                              if _wa_replied_total else "")
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
     # MRR KPI = Acquired MRR summed across GMs (includes refunds).
     _gm_mrr = _mrr_total
@@ -3303,7 +3308,7 @@ def _aia_ops_refresh(state):
             "WA Reply Rate": "Customers who sent the pre-typed WhatsApp message ÷ how many got a GM/CSM reply. Date filter applies; campaign/channel filters don't. Data from 22 Sep 2026.",
             "WA Reply TAT (mins)": "Median BUSINESS minutes (9:30am-6:30pm, Mon-Fri) from the customer's WhatsApp message to the GM/CSM's first reply. Nights, Saturdays and Sundays don't count. Unreplied messages excluded.",
         },
-        tip_cols={"WA Reply Rate": "__waTip"})
+        tip_cols={"WA Reply Rate": "__waTip", "WA Reply TAT (mins)": "__waTatTip"})
 
     # UTM cohort
     rows2 = []
