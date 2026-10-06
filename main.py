@@ -1911,6 +1911,101 @@ def _check_wa_gm_match(wa_df, aia_df):
     if unmatched:
         print(f"[WARN] lr_wa_inbound gm_full_name not found in aia_live.deal_owner: {sorted(unmatched)}")
 
+# Lead messages that are pure acknowledgment -- "ok", "thanks" and the like --
+# never need a GM reply, so they shouldn't open (or count toward) a pending
+# reply item. Built from an actual frequency check of real lr_wa_logs bodies
+# (5-6 Oct 2026), kept deliberately conservative: anything even slightly
+# ambiguous (e.g. "sure", "done", "yes") stays classified as needing a reply,
+# since wrongly excluding a real question is worse than one extra harmless
+# pending item from a genuine "ok".
+_WA_LOG_FILLER_BODIES = {"ok", "okay", "okay.", "thanks", "thanks!", "thank you", "no issues"}
+
+def _load_wa_logs():
+    """AIA Ops: full WhatsApp message log (public.lr_wa_logs) -- every inbound AND
+    outbound message (not a one-row-per-lead summary like lr_wa_inbound), built
+    from Periskope's message created/updated webhooks. Joined to lr_gms by
+    normalised phone: lr_wa_logs.org_phone carries the WhatsApp "@c.us" suffix,
+    lr_gms.phone doesn't and is inconsistently +-prefixed, so match on the last
+    10 digits (same normalisation used elsewhere in this file). See
+    _wa_reply_events() for how a genuine reply is identified from the raw log.
+    Guarded so a failure just yields an empty frame."""
+    cols = ["message_id", "chat_id", "org_phone", "gm_full_name", "is_outbound", "is_auto", "sent_ist", "body"]
+    df = pd.DataFrame(columns=cols)
+    try:
+        df = _q(SUPABASE_URL, r"""
+            SELECT l.message_id, l.chat_id, l.org_phone, g.full_name AS gm_full_name,
+                   l.is_outbound, l.is_auto,
+                   (l.sent_at AT TIME ZONE 'Asia/Kolkata') AS sent_ist,
+                   l.body
+            FROM public.lr_wa_logs l
+            LEFT JOIN public.lr_gms g
+              ON right(regexp_replace(g.phone,'\D','','g'),10) = right(regexp_replace(l.org_phone,'\D','','g'),10)
+            ORDER BY l.org_phone, l.chat_id, l.sent_at
+        """, statement_timeout_ms=30000)
+    except Exception as ex:
+        print(f"[WARN] lr_wa_logs load failed: {ex} -- using empty frame")
+    return df
+
+def _prep_wa_logs(df):
+    """gm_full_name as a clean string; sent_ist as naive IST; is_outbound/is_auto
+    as booleans; body as a string (never NaN, so filler-matching is safe).
+    Drops rows with no sent_ist."""
+    df = df.copy() if df is not None else pd.DataFrame()
+    if not len(df):
+        return df
+    df["gm_full_name"] = df.get("gm_full_name").astype(str).str.strip()
+    df["sent_ist"] = pd.to_datetime(df.get("sent_ist"), errors="coerce")
+    df["is_outbound"] = df.get("is_outbound").fillna(False).astype(bool)
+    df["is_auto"] = df.get("is_auto").fillna(False).astype(bool)
+    df["body"] = df.get("body").fillna("")
+    return df[df["sent_ist"].notna()]
+
+def _wa_reply_events(log_df):
+    """Walk every (org_phone, chat_id) conversation in sent_ist order (stable,
+    since edits don't shift sent_at -- confirmed 5 Oct) and emit one row per
+    genuine lead message that needed a GM reply:
+      gm_full_name, chat_id, opened_ist (the question's sent_ist),
+      replied_ist (the resolving reply's sent_ist, or NaT if still open),
+      biz_tat_mins (business-minute gap, or NaN if still open)
+
+    Rules:
+    - A filler-only lead message (_WA_LOG_FILLER_BODIES) never opens a new
+      pending item and never resets one already open.
+    - A real lead message while one's already pending doesn't reset the clock
+      -- the ORIGINAL pending item keeps waiting, a second message doesn't
+      start a fresh timer.
+    - An auto-sent outbound message (is_auto=True, the instant template) does
+      NOT close a pending item -- it isn't a real reply.
+    - A human-sent outbound message (is_auto=False) closes whatever's
+      currently pending, if anything.
+    One row per GM question, so Reply Rate / TAT can be computed as a simple
+    count/median over this, instead of relying on one pre-baked field."""
+    cols = ["gm_full_name", "chat_id", "opened_ist", "replied_ist", "biz_tat_mins"]
+    if log_df is None or not len(log_df):
+        return pd.DataFrame(columns=cols)
+    events = []
+    for (org_phone, chat_id), g in log_df.sort_values(["sent_ist", "message_id"]).groupby(["org_phone", "chat_id"]):
+        gm = g["gm_full_name"].iloc[0] if len(g) else None
+        pending = None
+        for r in g.itertuples(index=False):
+            if not r.is_outbound:
+                if r.body.strip().lower() in _WA_LOG_FILLER_BODIES:
+                    continue
+                if pending is None:
+                    pending = r.sent_ist
+            else:
+                if r.is_auto:
+                    continue
+                if pending is not None:
+                    events.append({"gm_full_name": gm, "chat_id": chat_id,
+                                    "opened_ist": pending, "replied_ist": r.sent_ist,
+                                    "biz_tat_mins": _business_minutes(pending, r.sent_ist)})
+                    pending = None
+        if pending is not None:
+            events.append({"gm_full_name": gm, "chat_id": chat_id,
+                            "opened_ist": pending, "replied_ist": pd.NaT, "biz_tat_mins": np.nan})
+    return pd.DataFrame(events, columns=cols)
+
 def _prep_gm_slots(df):
     """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
     same-day re-write via created_at doesn't double-count."""
@@ -2138,6 +2233,8 @@ _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
 _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
 _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
 _WA_REPLIES = _prep_wa_replies(_load_wa_replies())
+_WA_LOG = _prep_wa_logs(_load_wa_logs())  # _wa_reply_events() runs later, per-refresh -- it needs
+                                           # _business_minutes(), defined further down this file
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -2480,7 +2577,7 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_REPLIES
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_REPLIES, _WA_LOG
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -2489,6 +2586,7 @@ def _reload_data():
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
     _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
     _WA_REPLIES = _prep_wa_replies(_load_wa_replies())
+    _WA_LOG = _prep_wa_logs(_load_wa_logs())
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -3179,8 +3277,16 @@ def _aia_ops_refresh(state):
         _fn = _fn[(_fn["day"] >= s) & (_fn["day"] <= e_cap)].copy()
         _fn["_act"] = _fn["acct"].map(_ft_activated_acct)
         _ft_d = _fn.groupby("day").size().reset_index(name="FT").rename(columns={"day": "date"})
+        # Boolean-masking an EMPTY frame with an EMPTY boolean Series (e.g. a
+        # narrow date range with zero funnel rows) drops ALL columns, not just
+        # rows -- the next .groupby("day") then throws KeyError: 'day' and
+        # aborts this whole function, silently freezing everything after it
+        # (the GM table, incentive tracker, etc.) on stale data. Guard with
+        # .any() so an empty/no-activated case short-circuits to an empty
+        # frame with the right columns instead of ever reaching that groupby.
         _fta_d = (_fn[_fn["_act"]].groupby("day").size().reset_index(name="Activated")
-                  .rename(columns={"day": "date"}))
+                  .rename(columns={"day": "date"})
+                  if _fn["_act"].any() else pd.DataFrame(columns=["date", "Activated"]))
     else:
         _ft_d = pd.DataFrame(columns=["date", "FT"]); _fta_d = pd.DataFrame(columns=["date", "Activated"])
     # FT Started per day (deal-based, by ft_start_date) — orange line.
@@ -3260,23 +3366,30 @@ def _aia_ops_refresh(state):
     # GM table
     rows = []
     _mrr_total = 0
-    # WhatsApp reply-rate/TAT (public.lr_wa_inbound): date-range filter only (NOT
-    # UTM Campaign / the channel pie). Dedupe to the earliest message per (gm,
-    # lead) within the range so a repeat send doesn't double-count.
-    # sent_ist carries real clock time (unlike aia_live's date-only columns), so
-    # extend the shared end-of-range `e` (midnight) through the end of that day —
-    # otherwise the End Date's own day is almost entirely excluded.
+    # WhatsApp reply-rate/TAT (public.lr_wa_logs, the real per-message log): date-
+    # range filter only (NOT UTM Campaign / the channel pie), scoped to when a
+    # question was OPENED (opened_ist), not when it was resolved -- a question
+    # asked near the end of the range still counts even if the reply landed just
+    # after. sent_ist carried real clock time (unlike aia_live's date-only
+    # columns); opened_ist does too, so extend the shared end-of-range `e`
+    # (midnight) through the end of that day -- otherwise the End Date's own day
+    # is almost entirely excluded.
+    # _wa_reply_events() walks the full conversation log and emits one row per
+    # genuine lead question (filler like "ok"/"thanks" excluded, repeat questions
+    # before a reply don't reset the clock, the auto-template send doesn't count
+    # as a reply) with biz_tat_mins already computed. A lead can ask more than
+    # one genuine question across a period though -- Reply Rate/TAT counts only
+    # their MOST RECENT one in range, since an old already-answered question is
+    # irrelevant to current responsiveness; an unanswered recent one is exactly
+    # what should show up as a miss, even if an earlier question that period got
+    # a fast reply. Earlier questions still sit in the full event log if ever
+    # needed, they just don't count toward the rate/TAT here.
     _wa_e = e + pd.Timedelta(hours=23, minutes=59, seconds=59)
-    _wa_rng = _rng(_WA_REPLIES, "sent_ist", s, _wa_e) if len(_WA_REPLIES) else _WA_REPLIES
+    _wa_ev = _wa_reply_events(_WA_LOG)
+    _wa_rng = _rng(_wa_ev, "opened_ist", s, _wa_e) if len(_wa_ev) else _wa_ev
     if len(_wa_rng):
-        _wa_rng = _wa_rng.sort_values("sent_ist").drop_duplicates(subset=["gm_id", "lead10"], keep="first")
-        # TAT = business minutes (10:00-18:00 Mon-Sat, Sunday excluded) from the
-        # customer's message to the first reply -- NOT raw wall-clock elapsed, so a
-        # message sent at midnight and replied at 10:01am counts as ~1 min, not 9.5 hrs.
-        _wa_rng = _wa_rng.copy()
-        _wa_rng["biz_tat_mins"] = _wa_rng.apply(
-            lambda r: _business_minutes(r["sent_ist"], r["reply_ist"]) if pd.notna(r["reply_ist"]) else np.nan,
-            axis=1)
+        _wa_rng = (_wa_rng.sort_values("opened_ist")
+                           .drop_duplicates(subset=["gm_full_name", "chat_id"], keep="last"))
     _wa_received_total = 0
     _wa_replied_total = 0
     _wa_tat_values = []
@@ -3302,17 +3415,17 @@ def _aia_ops_refresh(state):
         # WhatsApp reply rate / TAT for this GM/CSM (already date-ranged + deduped above).
         wa_o = _wa_rng[_wa_rng["gm_full_name"] == owner] if len(_wa_rng) else _wa_rng
         _wa_received = len(wa_o)
-        _wa_replied_mask = wa_o["reply_ist"].notna() if _wa_received else None
+        _wa_replied_mask = wa_o["replied_ist"].notna() if _wa_received else None
         _wa_replied = int(_wa_replied_mask.sum()) if _wa_received else 0
         _wa_rate = f"{_wa_replied/_wa_received*100:.1f}%" if _wa_received else ""
-        _wa_tip = (f"{_wa_received} WA message{'s' if _wa_received != 1 else ''} received"
+        _wa_tip = (f"{_wa_received} lead{'s' if _wa_received != 1 else ''} asked a question"
                    if _wa_received else "")
         _wa_tat = None
         if _wa_replied:
             _wa_tat_vals = wa_o.loc[_wa_replied_mask, "biz_tat_mins"].dropna()
             if len(_wa_tat_vals):
                 _wa_tat = round(float(_wa_tat_vals.median()), 1)
-        _wa_tat_tip = (f"Based on {_wa_replied} replied message{'s' if _wa_replied != 1 else ''}"
+        _wa_tat_tip = (f"Based on {_wa_replied} answered lead{'s' if _wa_replied != 1 else ''}"
                        if _wa_replied else "")
         rd = {
             "GM":                  owner,
@@ -3347,9 +3460,9 @@ def _aia_ops_refresh(state):
                                  if _wa_received_total else "")
         tot["WA Reply TAT (mins)"] = (round(float(pd.Series(_wa_tat_values).median()), 1)
                                        if _wa_tat_values else None)
-        tot["__waTip"] = (f"{_wa_received_total} WA message{'s' if _wa_received_total != 1 else ''} received"
+        tot["__waTip"] = (f"{_wa_received_total} lead{'s' if _wa_received_total != 1 else ''} asked a question"
                            if _wa_received_total else "")
-        tot["__waTatTip"] = (f"Based on {_wa_replied_total} replied message{'s' if _wa_replied_total != 1 else ''}"
+        tot["__waTatTip"] = (f"Based on {_wa_replied_total} answered lead{'s' if _wa_replied_total != 1 else ''}"
                               if _wa_replied_total else "")
         gm = pd.concat([gm, pd.DataFrame([tot])], ignore_index=True)
     # MRR KPI = Acquired MRR summed across GMs (includes refunds).
@@ -3359,8 +3472,8 @@ def _aia_ops_refresh(state):
     state.aia_gm_json = grid_payload_b64(
         gm, "GM", sort_default_col="Tot Revenue", fixed=True,
         header_tips={
-            "WA Reply Rate": "Customers who sent the pre-typed WhatsApp message ÷ how many got a GM/CSM reply. Date filter applies; campaign/channel filters don't. Data from 22 Sep 2026.",
-            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6:30pm, Mon-Fri) from the customer's WhatsApp message to the GM/CSM's first reply. Nights, Saturdays and Sundays don't count. Unreplied messages excluded.",
+            "WA Reply Rate": "Leads whose MOST RECENT real question got a genuine GM/CSM reply ÷ how many leads asked one. \"ok\"/\"thanks\"-style messages don't count as a question, and the instant auto-reply template doesn't count as a reply. Date filter applies; campaign/channel filters don't.",
+            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6:30pm, Mon-Fri) from a lead's most recent real question to the GM/CSM's first genuine reply (not the auto-template). Nights, Saturdays and Sundays don't count. Unanswered questions excluded.",
         },
         tip_cols={"WA Reply Rate": "__waTip", "WA Reply TAT (mins)": "__waTatTip"})
 
