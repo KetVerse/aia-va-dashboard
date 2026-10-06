@@ -1,0 +1,51 @@
+# Without this file, `COPY . .` in the Dockerfile sends EVERYTHING in the repo
+# to the Docker build context on every deploy -- including .venv/ (hundreds of
+# MB of installed packages) and .git/ (full history). That's what was making
+# `bash update.sh` transfer 500+ MB of build context on every single deploy.
+
+# Git
+.git/
+.gitignore
+
+# Python virtual env / caches -- the image installs its own via requirements.txt
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Secrets -- docker-compose's env_file already supplies these at runtime;
+# they don't need to be baked into the image layers too.
+.env
+.env.local
+*.env
+!.env.example
+
+# Generated/local-only data -- exports/ is bind-mounted at runtime anyway
+# (docker-compose.yml), so excluding it here only skips the BUILD-time copy,
+# the running container still reads/writes it via the mount.
+exports/
+downloads/
+data/
+*.xlsx
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code project files -- never needed inside the image
+.claude/
+
+# Docs -- not needed at runtime
+*.md
+
+# Local-only scripts / alt Dockerfiles
+run_snapshot.sh
+Dockerfile.snapshot
+export_pages.py

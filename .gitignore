@@ -42,8 +42,6 @@ desktop.ini
 *.log
 logs/
 
-# Docker
-.dockerignore
 
 # Jupyter
 .ipynb_checkpoints/
