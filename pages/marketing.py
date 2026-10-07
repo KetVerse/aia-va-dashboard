@@ -39,6 +39,12 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
+**CTA Click Trend** <|ⓘ|text|hover_text={mkt_cta_tip}|class_name=info-ico|>
+
+<|chart|figure={mkt_cta_fig}|plot_config={chart_config}|>
+|>
+
+<|part|class_name=chart-card|
 **Monthly Performance** <|ⓘ|text|hover_text={mkt_monthly_tip}|class_name=info-ico|>  *(view follows the nav-bar View dropdown)*
 
 <|part|class_name=gridholder gridholder-mkt_monthly|

@@ -1122,8 +1122,9 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
     """Raw per-period series for the funnel spine + money, over the trailing `last_n`
     periods ending at the current one. aia_df / mkt_df are ALREADY channel-filtered by
     the nav (deal_source_group / _MKT.channel); ga_df / cts_df are filtered here by
-    sig_labels. MQL/DS/DC/High PS/FT/Net Paid are cohort by lead create-period (matches
-    the legacy Weekly Funnel); Net Revenue/MRR/CAC/ARPU reuse the _mkt_breakdown basis."""
+    sig_labels. MQL/DS/FT/Net Paid are cohort by lead create-period (matches the legacy
+    Weekly Funnel); Net Revenue/MRR/CAC/ARPU reuse the _mkt_breakdown basis. (DC/High PS
+    cohorts dropped — unused since those columns were removed from the tables.)"""
     cur_p = pd.Timestamp(date.today()).to_period(freq)
     full  = pd.period_range(cur_p - (last_n - 1), cur_p, freq=freq)
     R = lambda s: s.reindex(full, fill_value=0)
@@ -1141,9 +1142,6 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
         sub = aa[mask]
         return sub.groupby("cperiod")["record_id"].nunique() if len(sub) else pd.Series(dtype=float)
     ds_by  = _coh(aa["ds_date"].notna()) if ("ds_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
-    dc_by  = _coh(aa["dc_date"].notna()) if ("dc_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
-    hps_by = (_coh(aa["dc_date"].notna() & (aa["prospect_score"] >= 60))
-              if ({"dc_date", "prospect_score"}.issubset(aa.columns) and len(aa)) else pd.Series(dtype=float))
     ft_by  = _coh(aa["ft_start_date"].notna()) if ("ft_start_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
     # Effective No-Show: leads whose CURRENT stage is "Demo No-Show" — a demo was
     # booked but not attended. Same definition the legacy Weekly Funnel used, kept
@@ -1168,7 +1166,7 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
     leads_by = _leads_by_period(cts_df, freq, sig_labels)
     return {"full": full, "ga_periods": ga_periods,
             "spend": R(spend_by), "visits": R(visits_by), "leads": R(leads_by),
-            "mql": R(mql_by), "ds": R(ds_by), "dc": R(dc_by), "highps": R(hps_by), "ft": R(ft_by),
+            "mql": R(mql_by), "ds": R(ds_by), "ft": R(ft_by),
             "noshow": R(ns_by),
             "netpaid": R(netpaid_by), "netrev": R(rev_by), "mrr": R(mrr_by)}
 
@@ -1205,14 +1203,13 @@ def _mkt_render(fs, view, kind):
         if tot:
             sp = sum(v("spend", q) for q in full); vi = sum(v("visits", q) for q in full if q in ga)
             le = sum(v("leads", q) for q in full); mq = sum(v("mql", q) for q in full)
-            ds = sum(v("ds", q) for q in full);    dc = sum(v("dc", q) for q in full)
-            hp = sum(v("highps", q) for q in full); ft = sum(v("ft", q) for q in full)
+            ds = sum(v("ds", q) for q in full);    ft = sum(v("ft", q) for q in full)
             npd = sum(v("netpaid", q) for q in full); nr = sum(v("netrev", q) for q in full)
             mr = sum(v("mrr", q) for q in full); ns = sum(v("noshow", q) for q in full)
             avail = True
         else:
             sp, vi, le, mq = v("spend", p), v("visits", p), v("leads", p), v("mql", p)
-            ds, dc, hp, ft = v("ds", p), v("dc", p), v("highps", p), v("ft", p)
+            ds, ft = v("ds", p), v("ft", p)
             npd, nr, mr = v("netpaid", p), v("netrev", p), v("mrr", p)
             ns = v("noshow", p)
             avail = p in ga
@@ -1228,9 +1225,6 @@ def _mkt_render(fs, view, kind):
             if has_visits: r["Visits"] = vis
             r["Leads"] = (cnt(le), "", "")
             r["MQL (Deals)"] = (cnt(mq), "", "")
-            r["DS"] = (cnt(ds), "", "")
-            r["DC"] = (cnt(dc), "", "")
-            r["High PS"] = (cnt(hp), fd(["highps"], i), "")
             r["FT"] = (cnt(ft), fd(["ft"], i), "")
             r["Net Paid"] = (cnt(npd), fd(["netpaid"], i), "")
             r["Net Revenue"] = (cnt(nr), fd(["netrev"], i), "")
@@ -1250,9 +1244,6 @@ def _mkt_render(fs, view, kind):
                 r["Cost/K Visits"] = ("—", "", "") if (not avail or vi <= 0) else (cnt(sp * 1000 / vi), "", "")
             r["CPL"] = costc(sp, le)
             r["Cost/MQL"] = costc(sp, mq)
-            r["Cost/DS"] = costc(sp, ds)
-            r["Cost/DC"] = costc(sp, dc)
-            r["Cost/High PS"] = costc(sp, hp, fd(["highps"], i))
             r["Cost/FT"] = costc(sp, ft, fd(["ft"], i))
             if kind == "monthly":
                 r["CAC"] = costc(sp, npd, fd(["netpaid"], i))
@@ -1262,9 +1253,6 @@ def _mkt_render(fs, view, kind):
             if has_visits:
                 r["Visit→Lead"] = ("—", "", "") if not avail else pctc(le, vi)
             r["Lead→MQL"] = pctc(mq, le)
-            r["MQL→DS"] = pctc(ds, mq)
-            r["MQL→DC"] = pctc(dc, mq)
-            r["MQL→High PS"] = pctc(hp, mq)
             r["MQL→FT"] = pctc(ft, mq)
             r["MQL→Paid"] = pctc(npd, mq)
             # measured against DS, not MQL: a no-show is only possible once a demo
@@ -1337,19 +1325,17 @@ def _mkt_utm_render(data, view):
             # order follows the funnel: Leads -> MQL (Deals) -> AIA Bot -> DS -> ...
             # "deals" is the same cohort count the Percentages view uses as its base.
             for k, col in (("leads", "Leads"), ("deals", "MQL (Deals)"),
-                           ("wa_bot", "AIA Bot"), ("ds", "DS"), ("dc", "DC"),
-                           ("hps", "High PS"), ("ft", "FT Started"), ("tot_paid", "Tot Paid"),
+                           ("wa_bot", "AIA Bot"), ("ft", "FT Started"), ("tot_paid", "Tot Paid"),
                            ("revenue", "Revenue"), ("mrr", "MRR")):
                 r[col] = (int(g(k)), "", "")
         elif view == "Cost":
             sp = g("spend"); r["Spend (₹)"] = (int(round(sp)), "", "")
-            r["CPL"] = (ncost(sp, g("leads")), "", ""); r["Cost/DS"] = (ncost(sp, g("ds")), "", "")
-            r["Cost/DC"] = (ncost(sp, g("dc")), "", ""); r["Cost/High PS"] = (ncost(sp, g("hps")), "", "")
+            r["CPL"] = (ncost(sp, g("leads")), "", "")
             r["Cost/FT"] = (ncost(sp, g("ft")), "", ""); r["CAC"] = (ncost(sp, g("tot_paid")), "", "")
         else:
             de = g("deals")
-            r["Leads→Deals"] = pctc(de, g("leads")); r["Deals→DS"] = pctc(g("ds"), de); r["Deals→DC"] = pctc(g("dc"), de)
-            r["Deals→High PS"] = pctc(g("hps"), de); r["Deals→FT"] = pctc(g("ft"), de); r["Deals→Paid"] = pctc(g("tot_paid"), de)
+            r["Leads→Deals"] = pctc(de, g("leads"))
+            r["Deals→FT"] = pctc(g("ft"), de); r["Deals→Paid"] = pctc(g("tot_paid"), de)
         return r
     all_rows = [build(d) for d in data] + [build(None, tot=True)]
     cols = list(all_rows[0].keys())
@@ -2050,6 +2036,36 @@ def _wa_reply_events(log_df):
                             "opened_ist": pending, "replied_ist": pd.NaT, "biz_tat_mins": np.nan})
     return pd.DataFrame(events, columns=cols)
 
+def _load_clicks():
+    """Marketing: website CTA clicks (public.lr_clicks) -- WhatsApp / Call /
+    Self-Integrate, one row per click, with the last-10-digit phone (for matching
+    against WA engagement) and email (for matching against onboarding signups).
+    Guarded so a failure just yields an empty frame."""
+    cols = ["day", "action", "phone", "p10", "email", "device"]
+    df = pd.DataFrame(columns=cols)
+    try:
+        df = _q(SUPABASE_URL, r"""
+            SELECT day, action, phone,
+                   right(regexp_replace(coalesce(phone,''),'\D','','g'),10) AS p10,
+                   email, device
+            FROM public.lr_clicks
+            WHERE coalesce(is_test, false) = false
+        """, statement_timeout_ms=20000)
+    except Exception as ex:
+        print(f"[WARN] lr_clicks load failed: {ex} -- using empty frame")
+    return df
+
+def _prep_clicks(df):
+    """day as a date; action/p10/email as clean strings. Drops rows with no day."""
+    df = df.copy() if df is not None else pd.DataFrame()
+    if not len(df):
+        return df
+    df["day"] = pd.to_datetime(df.get("day"), errors="coerce").dt.normalize()
+    df["action"] = df.get("action").astype(str).str.strip().str.lower()
+    df["p10"] = df.get("p10").astype(str).str.strip()
+    df["email"] = df.get("email").astype(str).str.strip().str.lower()
+    return df[df["day"].notna()]
+
 def _prep_gm_slots(df):
     """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
     same-day re-write via created_at doesn't double-count."""
@@ -2279,6 +2295,7 @@ _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
 _WA_REPLIES = _prep_wa_replies(_load_wa_replies())
 _WA_LOG = _prep_wa_logs(_load_wa_logs())  # _wa_reply_events() runs later, per-refresh -- it needs
                                            # _business_minutes(), defined further down this file
+_CLICKS = _prep_clicks(_load_clicks())
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -2621,7 +2638,7 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_REPLIES, _WA_LOG
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_REPLIES, _WA_LOG, _CLICKS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -2631,6 +2648,7 @@ def _reload_data():
     _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
     _WA_REPLIES = _prep_wa_replies(_load_wa_replies())
     _WA_LOG = _prep_wa_logs(_load_wa_logs())
+    _CLICKS = _prep_clicks(_load_clicks())
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -4209,8 +4227,6 @@ def _cs_refresh(state):
 # ═══════════════════════════════════════════════════════════════════
 
 # ── Marketing "Daily signals" panel ──────────────────────────────────────────
-_FT_TEMPLATES = {"initial_verification", "demo_details", "updated_demo_details",
-                 "initial_verification_free_trial", "updated_demo_details_free_trial_session"}
 _DS_TEMPLATES = {"demo_details", "updated_demo_details", "updated_demo_details_free_trial_session"}
 _DELIVERED_STATUS = {"delivered", "read"}
 
@@ -4472,30 +4488,50 @@ def _daily_signals_html(day=None, channel="All"):
     aia_ch = _sig_deals(aia, channel)          # channel-filtered, non-deleted deals
     cts_ch = _sig_contacts(cts, channel)       # channel-filtered contacts
 
-    # outbound messages grouped by last-10 phone (for the three messaging cards)
-    by_phone = {}
-    if len(conv):
-        cout = conv[conv["direction"] == "outbound"]
-        by_phone = {p: g for p, g in cout.groupby("p10") if p}
+    # phone -> latest inbound WhatsApp message time (for the WA Click → Message card,
+    # replacing the old _CONV/template-based "First-touch sent" -- that pipeline
+    # moved to Periskope/lr_wa_logs, which is what's actually live now).
+    # (p10, day) pairs with at least one inbound WhatsApp message that day --
+    # same match used by the Marketing page's CTA Click Trend chart.
+    wa_inbound_days = set()
+    if len(_WA_LOG):
+        _wi = _WA_LOG[~_WA_LOG["is_outbound"]].copy()
+        _wi["p10"] = _wi["chat_id"].astype(str).str.replace("@c.us", "", regex=False).str[-10:]
+        _wi["_day"] = _wi["sent_ist"].dt.normalize()
+        wa_inbound_days = set(zip(_wi["p10"], _wi["_day"]))
 
-    # Card — First-touch sent (selected day's created deals, this channel)
-    dt = _rng(aia_ch, "create_date", day, day).copy()
-    ft_den = int(dt["record_id"].nunique()) if len(dt) else 0
-    ft_num = 0
-    if len(dt):
-        dt["p10"] = dt["poc_number"].apply(_phone10) if "poc_number" in dt.columns else ""
-        for _, r in dt.iterrows():
-            p = r["p10"]; cdate = r["create_date"]
-            pf = by_phone.get(p)
-            if pf is None or pd.isna(cdate):
-                continue
-            outs  = pf[pf["msg_date"] >= cdate]     # outbound after the deal was created
-            prior = pf[pf["msg_date"] <  cdate]     # any earlier thread => repeat POC
-            is_repeat = len(prior) > 0
-            cand = outs if is_repeat else outs[outs["template_name"].isin(_FT_TEMPLATES)]
-            if len(cand):
-                ft_num += 1
+    # Card — WA Click → Message: of that day's WhatsApp CTA clicks (public.lr_clicks), how
+    # many actually sent us a message the same day? Not tied to deal creation or
+    # the page's Channel filter -- lr_clicks has no UTM/deal link, same as the CTA
+    # Click Trend chart this mirrors. Deliberately WhatsApp-only, not Call/
+    # Self-Integrate -- WA is the dominant channel (~80% of CTA clicks), and
+    # Self-Integrate/Call aren't really "did we make first contact" the way an
+    # actual message thread is.
+    dt = _CLICKS[(_CLICKS["action"] == "whatsapp") & (_CLICKS["day"] == day)] if len(_CLICKS) else _CLICKS
+    ft_den = int(len(dt))
+    ft_num = int(sum(1 for p in dt["p10"] if (p, day) in wa_inbound_days)) if ft_den else 0
     ft_rate = (100.0 * ft_num / ft_den) if ft_den else 0.0
+
+    # email -> earliest signed-up date, from the SAME onboarding funnel data that
+    # feeds the "Unmapped Deals & Signups" table on AIA Ops (public.aia_onboarding_
+    # funnel.signed_up_at). Used by the Self-Integrate -> Signed Up card below.
+    signup_by_email = {}
+    for _acct, (_su, _ig, _em) in _ONBOARD_DATES.items():
+        if _em and pd.notna(_su):
+            _e = str(_em).strip().lower()
+            if _e not in signup_by_email or _su < signup_by_email[_e]:
+                signup_by_email[_e] = _su
+
+    # Card — Self-Integrate → Signed Up: of that day's Self-Integrate CTA clicks,
+    # how many actually went on to sign up (create an account), on or after that
+    # day? Matched by email since that's what both lr_clicks and the onboarding
+    # funnel carry -- a signup from BEFORE the click doesn't count, that's an
+    # existing user clicking around, not this click leading anywhere.
+    si_dt = _CLICKS[(_CLICKS["action"] == "self_setup") & (_CLICKS["day"] == day)] if len(_CLICKS) else _CLICKS
+    si_den = int(len(si_dt))
+    si_num = (int(sum(1 for e in si_dt["email"] if e in signup_by_email and signup_by_email[e] >= day))
+              if si_den else 0)
+    si_rate = (100.0 * si_num / si_den) if si_den else 0.0
 
     # channel deals created, keyed by day — feeds the MQL numerator + Leads card
     gl = aia_ch.copy()
@@ -4518,12 +4554,6 @@ def _daily_signals_html(day=None, channel="All"):
     band_start = day - pd.Timedelta(days=_BAND_DAYS)  # day-7 .. day-1  (7 days)
     band_end   = day - pd.Timedelta(days=1)
     band_idx   = pd.date_range(band_start, band_end, freq="D")
-
-    # Card — Leads (channel deals created): the day's value vs the prior 7-day band
-    leads_val = lp_num
-    ld = gl[(gl["_d"] >= band_start) & (gl["_d"] <= band_end)]
-    ld_daily = ld.groupby("_d")["record_id"].nunique().reindex(band_idx, fill_value=0)
-    l_med, l_lo, l_hi = _mad_band(ld_daily.values)
 
     # Card — Spend (channel): the day's value vs the prior 7-day band
     gs = _sig_spend(mkt, channel).copy()
@@ -4565,24 +4595,23 @@ def _daily_signals_html(day=None, channel="All"):
                        .groupby("_d")["cost"].sum().reindex(spark_idx, fill_value=0.0))
     else:
         spend_daily = pd.Series(0.0, index=spark_idx)
-    # First-touch series — one pass over the window's deals (cheap: ~7 days)
+    # WA Click → Message series — one pass over the window's WhatsApp clicks (cheap: ~7 days)
     ftN, ftD = {}, {}
-    _dtw = _rng(aia_ch, "create_date", w0, w1).copy()
+    _dtw = _CLICKS[(_CLICKS["action"] == "whatsapp") & (_CLICKS["day"] >= w0) & (_CLICKS["day"] <= w1)] if len(_CLICKS) else _CLICKS
     if len(_dtw):
-        _dtw["p10"] = _dtw["poc_number"].apply(_phone10) if "poc_number" in _dtw.columns else ""
         for _, r in _dtw.iterrows():
-            cdate = r["create_date"]
-            if pd.isna(cdate):
-                continue
-            k = cdate.normalize(); ftD[k] = ftD.get(k, 0) + 1
-            pf = by_phone.get(r["p10"])
-            if pf is None:
-                continue
-            outs = pf[pf["msg_date"] >= cdate]
-            is_repeat = len(pf[pf["msg_date"] < cdate]) > 0
-            cand = outs if is_repeat else outs[outs["template_name"].isin(_FT_TEMPLATES)]
-            if len(cand):
+            k = r["day"]; ftD[k] = ftD.get(k, 0) + 1
+            if (r["p10"], k) in wa_inbound_days:
                 ftN[k] = ftN.get(k, 0) + 1
+
+    # Self-Integrate → Signed Up series — same window, Self-Integrate clicks only
+    siN, siD = {}, {}
+    _dts = _CLICKS[(_CLICKS["action"] == "self_setup") & (_CLICKS["day"] >= w0) & (_CLICKS["day"] <= w1)] if len(_CLICKS) else _CLICKS
+    if len(_dts):
+        for _, r in _dts.iterrows():
+            k = r["day"]; siD[k] = siD.get(k, 0) + 1
+            if r["email"] in signup_by_email and signup_by_email[r["email"]] >= k:
+                siN[k] = siN.get(k, 0) + 1
 
     def _rate_pts(numf, denf, lbl, good, ok):
         # each dot coloured by that day's rate vs the card's own thresholds
@@ -4611,14 +4640,14 @@ def _daily_signals_html(day=None, channel="All"):
     mql_spark   = _sparkline(_rate_pts(lambda d: int(deals_daily.get(d, 0)),
                              lambda d: int(contacts_daily.get(d, 0)), "contacts", 70, 40),
                              _spark_hex(_rate_color(mql_rate, 70, 40)))
-    ft_spark    = _sparkline(_rate_pts(lambda d: ftN.get(d, 0), lambda d: ftD.get(d, 0), "deals", 90, 75),
-                             _spark_hex(_rate_color(ft_rate, 90, 75)))
+    ft_spark    = _sparkline(_rate_pts(lambda d: ftN.get(d, 0), lambda d: ftD.get(d, 0), "clicks", 70, 60),
+                             _spark_hex(_rate_color(ft_rate, 70, 60)))
+    si_spark    = _sparkline(_rate_pts(lambda d: siN.get(d, 0), lambda d: siD.get(d, 0), "clicks", 25, 10),
+                             _spark_hex(_rate_color(si_rate, 25, 10)))
     # band-card sparklines: the LINE takes the card's status colour; each dot is
     # coloured by that day's value vs the band (same rule as the card).
     spend_spark = _sparkline(_val_pts(spend_daily, s_lo, s_hi, False, money=True),
                              _spark_hex(_band_status(s_lo, s_hi, spend_val, higher_good=False)))
-    leads_spark = _sparkline(_val_pts(deals_daily, l_lo, l_hi, True),
-                             _spark_hex(_band_status(l_lo, l_hi, leads_val, higher_good=True)))
 
     # ── GM Slots Available — total open demo slots across GMs, per day ─────────
     # Not channel-scoped (GM availability is global). pct = day total / average of
@@ -4681,14 +4710,15 @@ def _daily_signals_html(day=None, channel="All"):
         _sig_rate_card("Leads to MQL", f"{mql_rate:.1f}", "%",
                        f"{lp_num} Deals out of {lp2_num} contacts", mql_rate,
                        _rate_color(mql_rate, 70, 40), spark=mql_spark),
-        _sig_rate_card("First-touch sent", f"{ft_rate:.1f}", "%",
-                       f"{ft_num} of {ft_den} deals", ft_rate,
-                       _rate_color(ft_rate, 90, 75), spark=ft_spark),
+        _sig_rate_card("WA Click → Message", f"{ft_rate:.1f}", "%",
+                       f"{ft_num} of {ft_den} clicks", ft_rate,
+                       _rate_color(ft_rate, 70, 60), spark=ft_spark),
+        _sig_rate_card("Self-Integrate → Signed Up", f"{si_rate:.1f}", "%",
+                       f"{si_num} of {si_den} clicks", si_rate,
+                       _rate_color(si_rate, 25, 10), spark=si_spark),
         _gm_card,
         _sig_band_card("Spend", "₹" + _grp(spend_val), "",
                        s_lo, s_med, s_hi, spend_val, True, higher_good=False, spark=spend_spark),
-        _sig_band_card("Deals", str(leads_val), "",
-                       l_lo, l_med, l_hi, leads_val, False, higher_good=True, spark=leads_spark),
     ]
     head = (f'<div class="dsig-head">Daily signals '
             f'<span>{day.strftime("%d %b %Y")}</span></div>')
@@ -4803,6 +4833,74 @@ def _make_cost_trend(x, spend, series):
     )
     return fig
 
+def _make_cta_trend(x, wa_clicks, wa_messaged, calls, self_setup, daily_deals):
+    """Daily CTA-click trend: WhatsApp clicks as a bar, with WA Messaged / Call /
+    Self-Integrate as lines, and Daily Deals (deal create_date count -- same metric
+    as the Daily Signals "Deals" card on this page) as a muted background line
+    for scale context (it runs 70+, dwarfing click volume).
+
+    Axis-layer swap: Plotly always draws the OVERLAYING axis (yaxis2) on top of
+    the base axis, regardless of trace order -- so to put Daily Deals BEHIND the
+    bars/click-lines, Deals sits on the base `y` axis (displayed on the right)
+    and everything else sits on the overlay `y2` axis (displayed on the left).
+    Same technique as the FT Started vs Activated trend on AIA Ops.
+
+    The gap between the WhatsApp bar's value label and the WA Messaged line
+    IS the click-to-message drop-off, visually and numerically."""
+    fig = go.Figure()
+    # Daily Deals goes on the BASE axis so the overlay (everything else) paints
+    # over it -- this is what actually puts it behind the bars.
+    fig.add_scatter(x=x, y=daily_deals, name="Daily Deals", mode="lines",
+                     line={"color": "#cbd5e1", "width": 1.5, "dash": "dot"},
+                     yaxis="y",
+                     hovertemplate="<b>%{x}</b><br>Deals created: %{y}<extra></extra>")
+    fig.add_bar(x=x, y=wa_clicks, name="WhatsApp (clicks)", marker_color="#1a7fc4",
+                yaxis="y2", opacity=0.9,
+                text=[str(v) for v in wa_clicks], textposition="outside",
+                textfont={"size": 10, "color": "#0f2f52", "family": "Inter,sans-serif"},
+                hovertemplate="<b>%{x}</b><br>WhatsApp clicks: %{y}<extra></extra>")
+    fig.add_scatter(x=x, y=wa_messaged, name="WhatsApp (messaged)", mode="lines+markers",
+                     legendgroup="wa_msg",
+                     line={"color": "#0f2f52", "width": 2.5}, marker={"size": 6, "color": "#0f2f52"},
+                     yaxis="y2",
+                     hovertemplate="<b>%{x}</b><br>Actually messaged: %{y}<extra></extra>")
+    # number bubbles on top of the WA Messaged line -- same technique as the FT
+    # Started vs Activated trend's count squares, so the value stays readable
+    # against the bar/line clutter behind it instead of a bare text label.
+    # Same legendgroup as the line above (+ default groupclick="togglegroup") so
+    # hiding "WhatsApp (messaged)" in the legend hides its bubbles too, instead
+    # of leaving them stuck on screen.
+    fig.add_scatter(x=x, y=wa_messaged, showlegend=False, mode="markers+text",
+                     legendgroup="wa_msg",
+                     cliponaxis=False, hoverinfo="skip", yaxis="y2",
+                     marker={"symbol": "circle", "size": 16, "color": "#ffffff"},
+                     text=[str(v) for v in wa_messaged], textposition="middle center",
+                     textfont={"size": 8, "color": "#0f2f52", "family": "Inter,sans-serif"})
+    fig.add_scatter(x=x, y=calls, name="Call", mode="lines+markers", opacity=0.75,
+                     line={"color": "#ed7d31", "width": 1.5}, marker={"size": 5, "color": "#ed7d31"},
+                     yaxis="y2",
+                     hovertemplate="<b>%{x}</b><br>Call clicks: %{y}<extra></extra>")
+    fig.add_scatter(x=x, y=self_setup, name="Self-Integrate", mode="lines+markers", opacity=0.75,
+                     line={"color": "#7e57c2", "width": 1.5}, marker={"size": 5, "color": "#7e57c2"},
+                     yaxis="y2",
+                     hovertemplate="<b>%{x}</b><br>Self-Integrate clicks: %{y}<extra></extra>")
+    fig.update_layout(
+        margin={"l": 44, "r": 44, "t": 28, "b": 70}, height=340, barmode="overlay",
+        legend={"orientation": "h", "y": -0.28, "x": 0},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter,sans-serif", "size": 12},
+        uniformtext={"minsize": 8, "mode": "hide"},
+        xaxis={"tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#1a3a6b"}},
+        yaxis={"title": "Deals created", "side": "right", "showgrid": False,
+               "rangemode": "tozero", "range": [0, max(daily_deals or [1]) * 1.3],
+               "tickfont": {"size": 11, "family": "Inter,sans-serif", "color": "#94a3b8"}},
+        yaxis2={"title": "CTA clicks", "overlaying": "y", "side": "left", "showgrid": True,
+                "gridcolor": "#eef2f7", "rangemode": "tozero",
+                "range": [0, max(wa_clicks or [1]) * 1.25],
+                "tickfont": {"size": 11, "family": "Inter,sans-serif"}},
+    )
+    return fig
+
 
 def _mkt_refresh(state):
     _daily_signals_refresh(state)
@@ -4868,6 +4966,40 @@ def _mkt_refresh(state):
     if _ch or _cmp or _dl:
         li_full = _AIA_LI[_AIA_LI["record_id"].isin(aia_base["record_id"])]
     _heat_mkt = {"MRR": "green", "ARPU": "green", "CAC": "red"}
+
+    # CTA-click trend (public.lr_clicks): WhatsApp/Call/Self-Integrate clicks per day,
+    # plus how many of the WhatsApp clicks actually sent a message that same day
+    # (matched to lr_wa_logs by phone), and total deals created that day for scale
+    # context. Independent of the page's Channel/Campaign/Deal filters -- same as
+    # the Daily-signals row above -- since lr_clicks has no UTM fields to filter by.
+    if len(_CLICKS):
+        _c = _CLICKS.copy()
+        _wa_inbound_days = set()
+        if len(_WA_LOG):
+            _wi = _WA_LOG[~_WA_LOG["is_outbound"]].copy()
+            _wi["p10"] = _wi["chat_id"].astype(str).str.replace("@c.us", "", regex=False).str[-10:]
+            _wi["_day"] = _wi["sent_ist"].dt.normalize()
+            _wa_inbound_days = set(zip(_wi["p10"], _wi["_day"]))
+        _wa = _c[_c["action"] == "whatsapp"].copy()
+        _wa["_messaged"] = _wa.apply(lambda r: (r["p10"], r["day"]) in _wa_inbound_days, axis=1)
+        _cta_days = sorted(_c["day"].dropna().unique())
+        _wa_clicks_d   = _wa.groupby("day").size()
+        _wa_msg_d      = _wa.groupby("day")["_messaged"].sum()
+        _call_d        = _c[_c["action"] == "call"].groupby("day").size()
+        _self_d        = _c[_c["action"] == "self_setup"].groupby("day").size()
+        _deals_d       = (_AIA[_AIA["create_date"].notna()].assign(_d=lambda d: d["create_date"].dt.normalize())
+                           .groupby("_d")["record_id"].nunique())
+        _cta_x = [pd.Timestamp(d).strftime("%d %b") for d in _cta_days]
+        state.mkt_cta_fig = _make_cta_trend(
+            _cta_x,
+            [int(_wa_clicks_d.get(d, 0)) for d in _cta_days],
+            [int(_wa_msg_d.get(d, 0)) for d in _cta_days],
+            [int(_call_d.get(d, 0)) for d in _cta_days],
+            [int(_self_d.get(d, 0)) for d in _cta_days],
+            [int(_deals_d.get(pd.Timestamp(d), 0)) for d in _cta_days],
+        )
+    else:
+        state.mkt_cta_fig = go.Figure()
 
     # Monthly Performance — trailing 12 months (rolling window ending this month)
     mdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "M", "Month",
@@ -4953,13 +5085,9 @@ def _mkt_refresh(state):
         _de = c["record_id"].nunique()
         if _de == 0: continue
         pd3 = c[c["payment_date"].notna() & (c["payment_date"] >= _us) & (c["payment_date"] <= _ue)]
-        hps = (c[c["dc_date"].notna() & (c["prospect_score"] >= 60)
-                 & (c["dc_date"] >= _us) & (c["dc_date"] <= _ue)]["record_id"].nunique()
-               if {"dc_date", "prospect_score"}.issubset(c.columns) else 0)
         _udata.append({
             "src": _src, "deals": _de, "wa_bot": _ucin(c, "aia_bot_date"),
-            "leads": int(_leads_src.get(_src, 0)), "ds": _ucin(c, "ds_date"), "dc": _ucin(c, "dc_date"),
-            "hps": hps, "ft": _ucin(c, "ft_start_date"),
+            "leads": int(_leads_src.get(_src, 0)), "ft": _ucin(c, "ft_start_date"),
             "tot_paid": pd3[pd3["module_type"].isin(["AIA Paid", "GST Paid"])]["record_id"].nunique() if "module_type" in pd3.columns else 0,
             "revenue": int(pd3.groupby("record_id")["amount_paid"].max().sum()) if len(pd3) else 0,
             "mrr": int(_AIA_LI[_AIA_LI["record_id"].isin(pd3["record_id"])]["mrr"].sum()),
@@ -5793,11 +5921,19 @@ mkt_utm_tip     = ("UTM Source Cohort\n"
                    "• n<25 = too few leads to show a reliable rate.\n"
                    "• — = no data/denominator.")
 
+mkt_cta_tip = ("Daily website CTA clicks (WhatsApp/Call/Self-Integrate), from lr_clicks.\n"
+               "• WhatsApp bar = total clicks that day; WhatsApp line = of those, how many actually sent\n"
+               "  that first WhatsApp message the same day. The gap between bar and line is the drop-off.\n"
+               "• Daily Deals (deal create_date) is on the right axis, it runs 70+/day, much bigger than\n"
+               "  click volume, so it's shown for scale context rather than on the same axis.\n"
+               "• Not scoped to the page's Channel/Campaign/Deal filters (lr_clicks has no UTM fields).")
+
 mkt_signals_html=""
 mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn", "Organic"]   # Daily-signals channel filter
 mkt_sig_channel  = "All"
 mkt_view = "Total"; mkt_views = _MKT_VIEWS   # shared Total/Cost/Percentages view for both funnel tables
 mkt_monthly_json=""; mkt_weekly_json=""; mkt_utm_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
+mkt_cta_fig=go.Figure()
 mkt_hps_cac_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""
 mkt_channel_filter="All"; mkt_filter_label=""
