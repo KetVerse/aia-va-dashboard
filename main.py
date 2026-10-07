@@ -1911,14 +1911,43 @@ def _check_wa_gm_match(wa_df, aia_df):
     if unmatched:
         print(f"[WARN] lr_wa_inbound gm_full_name not found in aia_live.deal_owner: {sorted(unmatched)}")
 
-# Lead messages that are pure acknowledgment -- "ok", "thanks" and the like --
-# never need a GM reply, so they shouldn't open (or count toward) a pending
-# reply item. Built from an actual frequency check of real lr_wa_logs bodies
-# (5-6 Oct 2026), kept deliberately conservative: anything even slightly
-# ambiguous (e.g. "sure", "done", "yes") stays classified as needing a reply,
-# since wrongly excluding a real question is worse than one extra harmless
-# pending item from a genuine "ok".
-_WA_LOG_FILLER_BODIES = {"ok", "okay", "okay.", "thanks", "thanks!", "thank you", "no issues"}
+# Lead messages that are pure acknowledgment/closing -- "ok", "thanks!",
+# "Thank you! Good night!", a bare "👍" -- never need a GM reply, so they
+# shouldn't open (or count toward) a pending reply item. Word-level, not a
+# list of exact phrases: punctuation/capitalisation/combinations ("thanks!",
+# "ok thanks") are caught automatically without adding a new entry each time
+# a slightly different wording turns up. Kept deliberately conservative --
+# words that can ALSO be a real substantive answer on their own ("sure",
+# "done", "yes", "no") are intentionally left OUT of the vocabulary, since
+# wrongly excluding a real question is worse than one extra harmless pending
+# item from a genuine "ok". "no issues" is the one safe exception, kept as an
+# exact two-word phrase since "no" alone is not safe to treat as filler.
+_WA_LOG_FILLER_WORDS = {"ok", "okay", "k", "thanks", "thank", "thankyou", "you",
+                         "good", "night", "goodnight", "bye", "welcome"}
+_WA_LOG_FILLER_PHRASES = {("no", "issues")}
+
+def _is_filler_message(body):
+    """True when a lead message is pure ack/closing and shouldn't open or
+    keep open a pending reply item. Two checks:
+      1. Emoji/sticker-only (e.g. a bare "\U0001F44D") -- nothing alphanumeric
+         in the whole message, catches any reaction emoji without needing to
+         enumerate them.
+      2. Every word in the message (punctuation stripped) is itself in
+         _WA_LOG_FILLER_WORDS, or the message is exactly the
+         _WA_LOG_FILLER_PHRASES two-word idiom -- so new combinations of
+         already-safe words ("thanks!", "Thank you! Good night!") are caught
+         automatically, nothing to add by hand."""
+    b = (body or "").strip()
+    if not b:
+        return False
+    if not any(ch.isalnum() for ch in b):           # emoji/sticker-only
+        return True
+    words = tuple(re.findall(r"[a-zA-Z]+", b.lower()))
+    if not words:
+        return False
+    if words in _WA_LOG_FILLER_PHRASES:
+        return True
+    return all(w in _WA_LOG_FILLER_WORDS for w in words)
 
 def _load_wa_logs():
     """AIA Ops: full WhatsApp message log (public.lr_wa_logs) -- every inbound AND
@@ -1969,13 +1998,19 @@ def _wa_reply_events(log_df):
       biz_tat_mins (business-minute gap, or NaN if still open)
 
     Rules:
-    - A filler-only lead message (_WA_LOG_FILLER_BODIES) never opens a new
+    - A filler-only lead message (_is_filler_message) never opens a new
       pending item and never resets one already open.
-    - A real lead message while one's already pending doesn't reset the clock
-      -- the ORIGINAL pending item keeps waiting, a second message doesn't
-      start a fresh timer.
-    - An auto-sent outbound message (is_auto=True, the instant template) does
-      NOT close a pending item -- it isn't a real reply.
+    - A real lead message while one's already pending, with NO auto-message
+      sent in between, doesn't reset the clock -- the ORIGINAL pending item
+      keeps waiting, a second message doesn't start a fresh timer.
+    - An auto-sent outbound message (is_auto=True, the instant/fallback
+      template) does NOT close a pending item -- it isn't a real reply. But it
+      typically asks a question ("what time works for you?"), so if the lead
+      sends another real message AFTER it, that message becomes the new
+      anchor -- it's the lead answering the auto-prompt, not the GM's fault
+      how long the lead took to reply to a bot. Without this, TAT would wrongly
+      include the lead's own response time to the auto-message as if it were
+      the GM's delay.
     - A human-sent outbound message (is_auto=False) closes whatever's
       currently pending, if anything.
     One row per GM question, so Reply Rate / TAT can be computed as a simple
@@ -1987,20 +2022,29 @@ def _wa_reply_events(log_df):
     for (org_phone, chat_id), g in log_df.sort_values(["sent_ist", "message_id"]).groupby(["org_phone", "chat_id"]):
         gm = g["gm_full_name"].iloc[0] if len(g) else None
         pending = None
+        auto_since_pending = False   # an auto-message fired while `pending` was open
         for r in g.itertuples(index=False):
             if not r.is_outbound:
-                if r.body.strip().lower() in _WA_LOG_FILLER_BODIES:
+                if _is_filler_message(r.body):
                     continue
                 if pending is None:
                     pending = r.sent_ist
+                elif auto_since_pending:
+                    # lead is answering the auto-prompt -- re-anchor to this
+                    # message instead of the stale original
+                    pending = r.sent_ist
+                    auto_since_pending = False
             else:
                 if r.is_auto:
+                    if pending is not None:
+                        auto_since_pending = True
                     continue
                 if pending is not None:
                     events.append({"gm_full_name": gm, "chat_id": chat_id,
                                     "opened_ist": pending, "replied_ist": r.sent_ist,
                                     "biz_tat_mins": _business_minutes(pending, r.sent_ist)})
                     pending = None
+                    auto_since_pending = False
         if pending is not None:
             events.append({"gm_full_name": gm, "chat_id": chat_id,
                             "opened_ist": pending, "replied_ist": pd.NaT, "biz_tat_mins": np.nan})
