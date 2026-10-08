@@ -1608,6 +1608,9 @@ def _distinct_payers_by_month(li, refund_map, cols):
 
 NEON_URL     = os.getenv("NEON_DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
+# one-off perf diagnostics: set PROFILE_QUERIES=1 to log each _q() call's
+# duration + row count to stdout. No effect on behavior when unset.
+_PROFILE_QUERIES = os.getenv("PROFILE_QUERIES", "") == "1"
 
 # ═══════════════════════════════════════════════════════════════════
 # DATA FETCHING
@@ -1626,6 +1629,7 @@ def _q(url, sql, _tries=5, statement_timeout_ms=None):
     fast instead of loading the DB, given this Supabase project's prior
     Disk IO Budget incident."""
     last = None
+    _t0 = _time.perf_counter() if _PROFILE_QUERIES else None
     for i in range(_tries):
         conn = None
         try:
@@ -1634,7 +1638,11 @@ def _q(url, sql, _tries=5, statement_timeout_ms=None):
             if statement_timeout_ms:
                 kwargs["options"] = f"-c statement_timeout={int(statement_timeout_ms)}"
             conn = psycopg2.connect(url, **kwargs)
-            return pd.read_sql_query(sql, conn)
+            out = pd.read_sql_query(sql, conn)
+            if _PROFILE_QUERIES:
+                _m = re.search(r"FROM\s+(\S+)", sql, re.IGNORECASE)
+                print(f"[PROFILE] {_time.perf_counter() - _t0:6.2f}s  {len(out):>7} rows  {_m.group(1) if _m else sql[:40]!r}")
+            return out
         except Exception as ex:
             last = ex
             print(f"[retry {i+1}/{_tries}] DB query failed: {ex}")
@@ -1846,56 +1854,6 @@ def _load_gm_slots():
     except Exception as ex:
         print(f"[WARN] gm_slots_inventory load failed: {ex} -- using empty frame")
     return df
-
-def _load_wa_replies():
-    """AIA Ops: GM/CSM WhatsApp reply-rate & TAT (public.lr_wa_inbound), joined to
-    lr_gms for the deal_owner-matching full_name and left-joined to lr_submissions
-    to drop test submissions. sent_at/first_reply_at are shifted to IST (naive) so
-    they line up with the page's date filter via _rng. Data starts 22 Sep 2026.
-    Guarded so a failure just yields an empty frame."""
-    cols = ["message_id", "gm_id", "gm_full_name", "lead10", "sent_ist", "reply_ist", "reply_tat_mins"]
-    df = pd.DataFrame(columns=cols)
-    try:
-        df = _q(SUPABASE_URL, r"""
-            SELECT i.message_id, i.gm_id, g.full_name AS gm_full_name,
-                   right(regexp_replace(i.sender_phone,'\D','','g'),10) AS lead10,
-                   (i.sent_at AT TIME ZONE 'Asia/Kolkata')        AS sent_ist,
-                   (i.first_reply_at AT TIME ZONE 'Asia/Kolkata') AS reply_ist,
-                   i.reply_tat_mins
-            FROM public.lr_wa_inbound i
-            JOIN public.lr_gms g ON g.id = i.gm_id
-            LEFT JOIN public.lr_submissions s ON s.id = i.submission_id
-            WHERE coalesce(s.is_test, false) = false
-              AND i.sent_at >= '2026-09-22 00:00:00+00'
-        """, statement_timeout_ms=20000)
-    except Exception as ex:
-        print(f"[WARN] lr_wa_inbound load failed: {ex} -- using empty frame")
-    return df
-
-def _prep_wa_replies(df):
-    """gm_full_name/lead10 as clean strings; sent_ist/reply_ist as naive IST
-    datetimes; reply_tat_mins numeric. Drops rows with no sent_ist."""
-    df = df.copy() if df is not None else pd.DataFrame()
-    if not len(df):
-        return df
-    df["gm_full_name"] = df.get("gm_full_name").astype(str).str.strip()
-    df["lead10"] = df.get("lead10").astype(str).str.strip()
-    df["sent_ist"] = pd.to_datetime(df.get("sent_ist"), errors="coerce")
-    df["reply_ist"] = pd.to_datetime(df.get("reply_ist"), errors="coerce")
-    df["reply_tat_mins"] = pd.to_numeric(df.get("reply_tat_mins"), errors="coerce")
-    return df[df["sent_ist"].notna()]
-
-def _check_wa_gm_match(wa_df, aia_df):
-    """Warn (once per load) about any lr_gms.full_name in the WA data that doesn't
-    match an aia_live.deal_owner -- a silent mismatch would drop that GM/CSM's
-    WhatsApp numbers from the GM Performance table."""
-    if wa_df is None or not len(wa_df) or "deal_owner" not in aia_df.columns:
-        return
-    wa_gms = set(wa_df["gm_full_name"].dropna().unique())
-    deal_owners = set(aia_df["deal_owner"].dropna().unique())
-    unmatched = wa_gms - deal_owners
-    if unmatched:
-        print(f"[WARN] lr_wa_inbound gm_full_name not found in aia_live.deal_owner: {sorted(unmatched)}")
 
 # Lead messages that are pure acknowledgment/closing -- "ok", "thanks!",
 # "Thank you! Good night!", a bare "👍" -- never need a GM reply, so they
@@ -2292,7 +2250,6 @@ def _prep_signals(ga, conv, contacts=None):
 _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
 _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
 _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
-_WA_REPLIES = _prep_wa_replies(_load_wa_replies())
 _WA_LOG = _prep_wa_logs(_load_wa_logs())  # _wa_reply_events() runs later, per-refresh -- it needs
                                            # _business_minutes(), defined further down this file
 _CLICKS = _prep_clicks(_load_clicks())
@@ -2300,7 +2257,6 @@ _CLICKS = _prep_clicks(_load_clicks())
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
 _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
-_check_wa_gm_match(_WA_REPLIES, _AIA)
 _INCENTIVE_TARGETS = _RAW_INC.copy()
 if "month" in _INCENTIVE_TARGETS.columns:
     _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
@@ -2638,7 +2594,7 @@ def _reload_data():
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
-    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_REPLIES, _WA_LOG, _CLICKS
+    global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -2646,13 +2602,11 @@ def _reload_data():
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
     _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
-    _WA_REPLIES = _prep_wa_replies(_load_wa_replies())
     _WA_LOG = _prep_wa_logs(_load_wa_logs())
     _CLICKS = _prep_clicks(_load_clicks())
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
-    _check_wa_gm_match(_WA_REPLIES, _AIA)
     _INCENTIVE_TARGETS = _RAW_INC.copy()
     if "month" in _INCENTIVE_TARGETS.columns:
         _INCENTIVE_TARGETS["month"] = pd.to_datetime(_INCENTIVE_TARGETS["month"]).dt.normalize()
