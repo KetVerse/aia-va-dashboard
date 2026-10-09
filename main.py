@@ -3344,7 +3344,7 @@ def _aia_ops_refresh(state):
                   marker_line_width=0, legendrank=1, yaxis="y2", cliponaxis=False,
                   text=[f"<b>{v}</b>" if v else "" for v in ftt["FT"]], textposition="outside",
                   textfont={"size": 10, "color": "#0f5c4a", "family": _INTER})
-    figFT.add_scatter(x=_xb, y=ftt["Activated"].tolist(), name="Activated (Score>50)",
+    figFT.add_scatter(x=_xb, y=ftt["Activated"].tolist(), name="Activated (2+ Usage Days)",
                       yaxis="y2", legendgroup="act", legendrank=3, mode="lines+markers",
                       line={"color": "#1f4e79", "width": 1.5, "shape": "spline"},
                       marker={"size": 5, "color": "#1f4e79"})
