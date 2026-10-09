@@ -9,6 +9,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# taipy-core pins openpyxl==3.1.2 exactly, which corrupts rich-text xlsx
+# saves (used by churned_parked_tracker.py's colored Usage Streak dots).
+# Installed as a SEPARATE step (not in requirements.txt) so it upgrades
+# in place after taipy's own resolution, instead of conflicting with it.
+RUN pip install --no-cache-dir --upgrade "openpyxl>=3.1.5"
 
 COPY . .
 
