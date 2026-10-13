@@ -2479,6 +2479,49 @@ def _load_onboarding_dates():
 _ONBOARD_DATES = _load_onboarding_dates()
 
 
+def _load_acct_phones():
+    """account_id -> phone (product-side, from aia_user_profiles -- the same table
+    the PLG HS Contact + Deal Sync workflow reads its signup queue from). Most
+    recent non-null phone per account. Feeds the Unmapped Deals & Signups table's
+    Phone Number column so it's the PRODUCT number, not whatever's on the HubSpot
+    deal (which may not exist, or may be a different contact's number entirely --
+    see the Swastik Fasteners case). Empty dict on any failure."""
+    try:
+        d = _q(SUPABASE_URL,
+               "SELECT account_id::text AS acct, phone, creation_date "
+               "FROM public.aia_user_profiles WHERE account_id IS NOT NULL AND phone IS NOT NULL")
+    except Exception as ex:
+        print(f"[WARN] aia_user_profiles phone load failed: {ex}")
+        return {}
+    if d is None or len(d) == 0:
+        return {}
+    d = d.sort_values("creation_date", ascending=False).drop_duplicates("acct", keep="first")
+    return dict(zip(d["acct"], d["phone"]))
+
+
+_ACCT_PHONE = _load_acct_phones()
+
+
+def _load_contact_ids():
+    """email (lowercased) -> HubSpot contact_id, from contacts_hs. Feeds the
+    Unmapped Deals & Signups table: a row with no matching deal shows the
+    signup email in place of a deal name, and that email should link to the
+    HubSpot CONTACT (object 0-1), not a deal (0-3) -- there is no deal.
+    Empty dict on any failure."""
+    try:
+        d = _q(SUPABASE_URL, "SELECT email, contact_id FROM public.contacts_hs WHERE email IS NOT NULL")
+    except Exception as ex:
+        print(f"[WARN] contacts_hs contact_id load failed: {ex}")
+        return {}
+    if d is None or len(d) == 0:
+        return {}
+    d = d.dropna(subset=["contact_id"])
+    return {str(e).strip().lower(): str(c) for e, c in zip(d["email"], d["contact_id"])}
+
+
+_CONTACT_ID = _load_contact_ids()
+
+
 def _load_internal_accts():
     """account_ids flagged internal in aia_accounts (is_internal_override = true) —
     test / employee / suppressed-orphan accounts. Kept OUT of the poc_email gap table.
@@ -2593,7 +2636,7 @@ def _reload_data():
     data without a restart."""
     global _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
-    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
+    global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _ACCT_PHONE, _CONTACT_ID, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
@@ -2637,6 +2680,8 @@ def _reload_data():
     _REAL_DATES = _build_real_dates()
     _INTEG_FUNNEL = _load_integ_funnel()
     _ONBOARD_DATES = _load_onboarding_dates()
+    _ACCT_PHONE = _load_acct_phones()
+    _CONTACT_ID = _load_contact_ids()
     _INTERNAL_ACCTS = _load_internal_accts()
     _CBILL = _build_company_bill()
     _DB_EVENTS = _build_db_bookings()
@@ -3050,9 +3095,11 @@ def _build_pocgap_df():
         active_days, streak, bot_q, bot_u = _usage_28(poc, _ev_lu)
         _su, _ig, _ = _ONBOARD_DATES.get(pa, (pd.NaT, pd.NaT, ""))
         _fmt = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
+        _rid = row.get("record_id", "")
         rows.append({
             "Deal / Signup Email": row.get("deal_name", ""),
-            "record_id": row.get("record_id", ""),
+            "__link_url": (f"https://app-na2.hubspot.com/contacts/39668252/record/0-3/{_rid}" if _rid else ""),
+            "Phone Number": _ACCT_PHONE.get(pa, ""),
             "GM": row.get("deal_owner", ""),
             "Stage": row.get("deal_stage", ""),
             "Sign Up Date": _fmt(_su),
@@ -3095,9 +3142,11 @@ def _build_pocgap_df():
         active_days, streak, bot_q, bot_u = _usage_28(email or _a2e.get(canon, ""), _ev_lu)
         if active_days <= 0:
             continue                        # untracked signups only when they show real 28d usage
+        _cid = _CONTACT_ID.get((email or "").strip().lower(), "")
         urows.append({
             "Deal / Signup Email": email or "",
-            "record_id": "",
+            "__link_url": (f"https://app-na2.hubspot.com/contacts/39668252/record/0-1/{_cid}" if _cid else ""),
+            "Phone Number": _ACCT_PHONE.get(canon, ""),
             "GM": "—",
             "Stage": "Untracked",
             "Sign Up Date": _ufmt(su),
@@ -3173,13 +3222,16 @@ def _apply_pocgap_filter(state):
     d.insert(0, "Sl no", range(1, len(d) + 1))
     state.aia_pocgap_json = grid_payload_b64(
         d, no_sort=True, rownum_col="Sl no",
-        col_w={"Deal / Signup Email": 300},
+        col_w={"Deal / Signup Email": 300, "Phone Number": 130},
         streak_cols=["Usage Streak Last 28D (desc)"],
         center_cols=["Sign Up Date", "Integration Date"],
         date_cols=["Sign Up Date", "Integration Date"],
         heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
         tip_cols={"Usage Active Days (28d)": "__botTip"},
-        link_cols={"Deal / Signup Email": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
+        # __link_url is a FULL precomputed URL per row (deal 0-3 link for matched
+        # rows, contact 0-1 link for untracked signup-email rows) -- base_url=""
+        # so grid_server just emits it verbatim instead of prefixing anything.
+        link_cols={"Deal / Signup Email": ("__link_url", "")})
 
 
 def _aia_ops_refresh(state):
@@ -6138,7 +6190,10 @@ def _sync_ms(state):
     state.mkt_channel_ms    = _ms_json(mkt_channel_list,  state.mkt_selected_channel)
     state.mkt_campaign_ms   = _ms_json(mkt_camp_lov,      state.mkt_selected_campaign)
     state.mkt_deal_ms       = _ms_json(mkt_deal_lov,      state.mkt_selected_deal)
-    state.cs_owner_ms       = _ms_json(cs_owner_list,     state.cs_selected_owner)
+    # Recomputed live (not the module-level cs_owner_list snapshot from startup)
+    # so a CSM added after the app started isn't permanently missing from the
+    # dropdown -- same stale-snapshot bug class as cs_deal_list below.
+    state.cs_owner_ms       = _ms_json(sorted(_AIA["cs_owner"].dropna().unique().tolist()), state.cs_selected_owner)
     state.cs_rectype_ms     = _ms_json(cs_rectype_list,   state.cs_selected_rectype)
     # Customer Activity Cohort: Deal Name / Deal Stage / CSM cross-filter each
     # other (Event Name is independent of deals, so it keeps the full list).
@@ -6166,13 +6221,19 @@ def _sync_ms(state):
     state.cs_activity_stage_ms = _ms_json(_alov("deal_stage"), state.cs_activity_stage)
     state.cs_activity_csm_ms   = _ms_json(_alov("cs_owner"),   state.cs_activity_csm)
 
-    # CS Deal Name options depend on the selected CS Owner(s)
+    # CS Deal Name options depend on the selected CS Owner(s). Recomputed live
+    # from _AIA_LI in BOTH branches -- the "All owners" branch used to fall
+    # back to the module-level cs_deal_list, a one-time startup snapshot that
+    # never saw a deal whose first line item was created after the app last
+    # started (e.g. a brand-new payment), so it silently never appeared in
+    # this dropdown even though the Customer Usage & Health table's own
+    # filter -- built fresh each refresh -- had it.
     _co = _sel(state.cs_selected_owner)
     if _co:
         _rids = _AIA[_AIA["cs_owner"].isin(_co)]["record_id"]
         cs_deal_lov = sorted(_AIA_LI[_AIA_LI["record_id"].isin(_rids)]["deal_name"].dropna().unique().tolist())
     else:
-        cs_deal_lov = cs_deal_list
+        cs_deal_lov = sorted(_AIA_LI["deal_name"].dropna().unique().tolist())
     state.cs_deal_ms        = _ms_json(cs_deal_lov, state.cs_selected_deal)
 
     # Customer Usage & Health: Deal Name / CSM / Stage / Deal Owner / Status cross-filter
