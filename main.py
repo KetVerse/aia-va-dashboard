@@ -1919,10 +1919,21 @@ def _load_wa_logs():
         print(f"[WARN] lr_wa_logs load failed: {ex} -- using empty frame")
     return df
 
+# Not real leads -- excluded from WA reply-rate/TAT tracking entirely (last 10
+# digits of the chat_id, i.e. the OTHER party's number, not org_phone):
+#   1800227575: SEBI's official compliance/broadcast bot. Auto-replies in a loop
+#     regardless of what's sent back (STOP, ok, ...), which kept generating fresh
+#     "unanswered" entries across 5 different GMs' org numbers.
+#   6366575567: a system/upload-confirmation message ("... uploaded successfully.
+#     Check the processing status...") logged as inbound, not a real lead message.
+#   7057887169: Shyam, the GTM engineer -- his own test messages, not a lead.
+_WA_LOG_EXCLUDE_PHONES = {"1800227575", "6366575567", "7057887169"}
+
 def _prep_wa_logs(df):
     """gm_full_name as a clean string; sent_ist as naive IST; is_outbound/is_auto
     as booleans; body as a string (never NaN, so filler-matching is safe).
-    Drops rows with no sent_ist."""
+    Drops rows with no sent_ist, and rows for a known non-lead chat_id (see
+    _WA_LOG_EXCLUDE_PHONES)."""
     df = df.copy() if df is not None else pd.DataFrame()
     if not len(df):
         return df
@@ -1931,7 +1942,9 @@ def _prep_wa_logs(df):
     df["is_outbound"] = df.get("is_outbound").fillna(False).astype(bool)
     df["is_auto"] = df.get("is_auto").fillna(False).astype(bool)
     df["body"] = df.get("body").fillna("")
-    return df[df["sent_ist"].notna()]
+    df = df[df["sent_ist"].notna()]
+    _chat_p10 = df["chat_id"].astype(str).str.replace("@c.us", "", regex=False).str[-10:]
+    return df[~_chat_p10.isin(_WA_LOG_EXCLUDE_PHONES)]
 
 def _wa_reply_events(log_df):
     """Walk every (org_phone, chat_id) conversation in sent_ist order (stable,
@@ -1989,7 +2002,11 @@ def _wa_reply_events(log_df):
                                     "biz_tat_mins": _business_minutes(pending, r.sent_ist)})
                     pending = None
                     auto_since_pending = False
-        if pending is not None:
+        # Still-open at the end of this conversation -- but if an auto-message
+        # already fired since `pending` opened and the lead never followed up,
+        # there's nothing for a GM to answer (the bot already handled first
+        # contact): don't count it as unanswered at all, not even open.
+        if pending is not None and not auto_since_pending:
             events.append({"gm_full_name": gm, "chat_id": chat_id,
                             "opened_ist": pending, "replied_ist": pd.NaT, "biz_tat_mins": np.nan})
     return pd.DataFrame(events, columns=cols)
