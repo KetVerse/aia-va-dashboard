@@ -32,6 +32,12 @@ downloads/
 data/
 *.xlsx
 
+# Generated PDF snapshots (run_snapshot.sh/Dockerfile.snapshot, already
+# excluded above) -- a separate, independently-run setup with its own mount,
+# not needed in the main app's image. Found accumulated to 1.8GB on the VPS,
+# which is what was making every `bash update.sh` transfer 1.7GB+ of context.
+snapshots/
+
 # Editor / OS
 .vscode/
 .idea/
