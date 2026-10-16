@@ -53,12 +53,12 @@ Leads
 <|part|class_name=kpi-card kpi-blue|
 FT Started
 
-<|{aia_kpi_ft_started}|text|class_name=kpi-value|hover_text=Deals with an FT start date in the selected period.|>
+<|{aia_kpi_ft_started}|text|class_name=kpi-value|hover_text=Accounts with a first-ever successful product integration in the selected period (not the HubSpot FT-start-date field).|>
 |>
 <|part|class_name=kpi-card kpi-blue|
 FT Activated
 
-<|{aia_kpi_ft_activated}|text|class_name=kpi-value|hover_text=FT-started deals whose account has 2+ real-usage days (green/amber) in the last 28.|>
+<|{aia_kpi_ft_activated}|text|class_name=kpi-value|hover_text=Of those FT Started accounts, the ones with 2+ real-usage days (green/amber) in the last 28.|>
 |>
 <|part|class_name=kpi-card kpi-red|
 Refunds

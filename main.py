@@ -3294,11 +3294,21 @@ def _aia_ops_refresh(state):
     state.aia_kpi_leads       = _rng(df,"create_date",s,e)["record_id"].nunique()
     state.aia_kpi_ds          = _rng(df,"ds_date",s,e)["record_id"].nunique()
     state.aia_kpi_dc          = _rng(df,"dc_date",s,e)["record_id"].nunique()
-    _ft_started_k = _rng(df,"ft_start_date",s,e)
-    state.aia_kpi_ft_started  = _ft_started_k["record_id"].nunique()
-    # FT Activated = FT-started deals whose account has >=2 real-usage days in 28d.
-    state.aia_kpi_ft_activated = (_ft_started_k[_ft_started_k["login_email_id"].map(_ft_activated_email)]
-        ["record_id"].nunique() if len(_ft_started_k) else 0)
+    # FT Started / FT Activated KPI cards = PRODUCT-verified numbers: first-ever
+    # successful integration per account (aia_onboarding_funnel), not the HubSpot
+    # ft_start_date deal field -- matches the trend chart below exactly (same _fn,
+    # reused there instead of recomputed). Account/email-level funnel, so -- like
+    # the chart -- this intentionally ignores the Deal Owner/UTM Campaign/Channel
+    # filters above (those only narrow deal-level `df`).
+    e_cap = min(e, pd.Timestamp(date.today()))
+    _fn = _INTEG_FUNNEL
+    if _fn is not None and len(_fn):
+        _fn = _fn[(_fn["day"] >= s) & (_fn["day"] <= e_cap)].copy()
+        _fn["_act"] = _fn["acct"].map(_ft_activated_acct)
+    else:
+        _fn = pd.DataFrame(columns=["day", "acct", "_act"])
+    state.aia_kpi_ft_started   = len(_fn)
+    state.aia_kpi_ft_activated = int(_fn["_act"].sum()) if len(_fn) else 0
     pd_                       = _rng(df,"payment_date",s,e)
     _aia_paid_n               = pd_[pd_["module_type"]=="AIA Paid"]["record_id"].nunique()
     _gst_paid_n               = pd_[pd_["module_type"]=="GST Paid"]["record_id"].nunique()
@@ -3344,7 +3354,7 @@ def _aia_ops_refresh(state):
 
     # Date axis for the trend below (capped at today) + Total Leads per day (deals
     # created, by create_date). The Demos Booked/Conducted/Qualified trend was removed.
-    e_cap = min(e, pd.Timestamp(date.today()))
+    # (e_cap and _fn were already computed above, for the FT Started/Activated KPI cards.)
     trend = pd.DataFrame({"date": pd.date_range(s, e_cap, freq="D")})
     trend["date_label"] = trend["date"].dt.strftime("%b %d")
     _lc = coh.copy()
@@ -3357,10 +3367,7 @@ def _aia_ops_refresh(state):
     # account/email count, so it isn't dropped for accounts without a matching AiA deal.
     # Activated = those with >=2 real-usage days in the last 28. Same axis/filtering as demos.
     # NOTE: the GM table below keeps its "FT Started" column on ft_start_date (unchanged).
-    _fn = _INTEG_FUNNEL
-    if _fn is not None and len(_fn):
-        _fn = _fn[(_fn["day"] >= s) & (_fn["day"] <= e_cap)].copy()
-        _fn["_act"] = _fn["acct"].map(_ft_activated_acct)
+    if len(_fn):
         _ft_d = _fn.groupby("day").size().reset_index(name="FT").rename(columns={"day": "date"})
         # Boolean-masking an EMPTY frame with an EMPTY boolean Series (e.g. a
         # narrow date range with zero funnel rows) drops ALL columns, not just
