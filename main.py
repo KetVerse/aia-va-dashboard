@@ -1864,11 +1864,12 @@ def _load_gm_slots():
 # words that can ALSO be a real substantive answer on their own ("sure",
 # "done", "yes", "no") are intentionally left OUT of the vocabulary, since
 # wrongly excluding a real question is worse than one extra harmless pending
-# item from a genuine "ok". "no issues" is the one safe exception, kept as an
-# exact two-word phrase since "no" alone is not safe to treat as filler.
+# item from a genuine "ok". "no issues" and "no thanks" are the safe
+# exceptions, kept as exact two-word phrases since "no" alone is not safe to
+# treat as filler.
 _WA_LOG_FILLER_WORDS = {"ok", "okay", "k", "thanks", "thank", "thankyou", "you",
-                         "good", "night", "goodnight", "bye", "welcome"}
-_WA_LOG_FILLER_PHRASES = {("no", "issues")}
+                         "good", "night", "goodnight", "bye", "welcome", "noted"}
+_WA_LOG_FILLER_PHRASES = {("no", "issues"), ("no", "thanks")}
 
 def _is_filler_message(body):
     """True when a lead message is pure ack/closing and shouldn't open or
@@ -3564,8 +3565,8 @@ def _aia_ops_refresh(state):
     state.aia_gm_json = grid_payload_b64(
         gm, "GM", sort_default_col="Tot Revenue", fixed=True,
         header_tips={
-            "WA Reply Rate": "Leads whose MOST RECENT real question got a genuine GM/CSM reply ÷ how many leads asked one. \"ok\"/\"thanks\"-style messages don't count as a question, and the instant auto-reply template doesn't count as a reply. Date filter applies; campaign/channel filters don't.",
-            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6:30pm, Mon-Fri) from a lead's most recent real question to the GM/CSM's first genuine reply (not the auto-template). Nights, Saturdays and Sundays don't count. Unanswered questions excluded.",
+            "WA Reply Rate": "Leads whose MOST RECENT real question got a genuine GM/CSM reply ÷ how many leads asked one. \"ok\"/\"thanks\"-style messages don't count as a question, and the automated first message (asking the lead to pick a pain point) doesn't count as a reply. Date filter applies; campaign/channel filters don't.",
+            "WA Reply TAT (mins)": "Median BUSINESS minutes (10am-6:30pm, Mon-Fri) from a lead's most recent real question to the GM/CSM's first genuine reply (not the automated first message). Nights, Saturdays and Sundays don't count. Unanswered questions excluded.",
         },
         tip_cols={"WA Reply Rate": "__waTip", "WA Reply TAT (mins)": "__waTatTip"})
 
