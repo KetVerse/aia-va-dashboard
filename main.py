@@ -1894,6 +1894,40 @@ def _is_filler_message(body):
         return True
     return all(w in _WA_LOG_FILLER_WORDS for w in words)
 
+# Messages logged as inbound that aren't the lead typing at all -- the lead's
+# OWN business WhatsApp auto-responder ("Thanks for reaching out to X...", "I've
+# connected you with our team...", "I'm an AI assistant for X"), or a one-time
+# code/notification forwarded to their phone (OTP, confirmation code, CRM
+# workspace key). These never need a GM reply and shouldn't open or extend a
+# pending item -- confirmed examples pulled from Mehak Sultana's Oct-2026
+# unanswered list (27-Oct). Deliberately pattern-based rather than an exact-text
+# list, since every business's auto-responder wording differs.
+_WA_LOG_AUTOREPLY_PATTERNS = [
+    re.compile(p, re.IGNORECASE) for p in [
+        r"thanks? (you )?for (reaching out|contacting|connecting)",
+        r"we.?re here to (help|support|assist)",
+        r"i.?ve connected you with our team",
+        r"i.?m an ai assistant for",
+        r"someone( from our team)? will (reach out|get back|connect|revert)",
+        r"(has been|was) (received|noted|passed)( on)? to our team",
+        r"noted your (update|message|query)",
+        r"passed (it|this|that) (on )?to our team",
+        r"\b(confirmation|verification|security) code\b",
+        r"\botp\b",
+        r"\bworkspace key\b",
+        r"is your .*(confirmation|verification) code\b",
+    ]
+]
+
+def _is_lead_autoreply(body):
+    """True when an inbound WA message is an automated message from the lead's
+    side (their own business auto-responder, or an OTP/notification text) --
+    not the lead actually writing. See _WA_LOG_AUTOREPLY_PATTERNS."""
+    b = (body or "").strip()
+    if not b:
+        return False
+    return any(p.search(b) for p in _WA_LOG_AUTOREPLY_PATTERNS)
+
 def _load_wa_logs():
     """AIA Ops: full WhatsApp message log (public.lr_wa_logs) -- every inbound AND
     outbound message (not a one-row-per-lead summary like lr_wa_inbound), built
@@ -1928,7 +1962,8 @@ def _load_wa_logs():
 #   6366575567: a system/upload-confirmation message ("... uploaded successfully.
 #     Check the processing status...") logged as inbound, not a real lead message.
 #   7057887169: Shyam, the GTM engineer -- his own test messages, not a lead.
-_WA_LOG_EXCLUDE_PHONES = {"1800227575", "6366575567", "7057887169"}
+#   7676193782: not a real lead (flagged by ops, 27-Oct).
+_WA_LOG_EXCLUDE_PHONES = {"1800227575", "6366575567", "7057887169", "7676193782"}
 
 def _prep_wa_logs(df):
     """gm_full_name as a clean string; sent_ist as naive IST; is_outbound/is_auto
@@ -1958,6 +1993,10 @@ def _wa_reply_events(log_df):
     Rules:
     - A filler-only lead message (_is_filler_message) never opens a new
       pending item and never resets one already open.
+    - A lead-side automated message (_is_lead_autoreply -- the lead's OWN
+      business auto-responder bot, or an OTP/notification text landing on
+      their phone) is treated the same way: never opens or resets a pending
+      item, since no GM reply was ever actually needed for it.
     - A real lead message while one's already pending, with NO auto-message
       sent in between, doesn't reset the clock -- the ORIGINAL pending item
       keeps waiting, a second message doesn't start a fresh timer.
@@ -1983,7 +2022,7 @@ def _wa_reply_events(log_df):
         auto_since_pending = False   # an auto-message fired while `pending` was open
         for r in g.itertuples(index=False):
             if not r.is_outbound:
-                if _is_filler_message(r.body):
+                if _is_filler_message(r.body) or _is_lead_autoreply(r.body):
                     continue
                 if pending is None:
                     pending = r.sent_ist
