@@ -39,6 +39,18 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
+<|part|class_name=mkt-tablehead|
+**Self Onboarding Tracker** <|ⓘ|text|hover_text={self_ob_tip}|class_name=info-ico|>
+<|{self_ob_view}|selector|lov={self_ob_views}|dropdown|on_change=on_self_ob_view|>
+|>
+
+<|part|class_name=gridholder gridholder-self_ob|
+<|{self_ob_json}|text|mode=raw|>
+|>
+<iframe src="/grid/self_ob" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
 **CTA Click Trend** <|ⓘ|text|hover_text={mkt_cta_tip}|class_name=info-ico|>
 
 <|chart|figure={mkt_cta_fig}|plot_config={chart_config}|>
