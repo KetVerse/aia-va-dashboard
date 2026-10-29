@@ -1610,13 +1610,11 @@ def _distinct_payers_by_month(li, refund_map, cols):
 NEON_URL     = os.getenv("NEON_DATABASE_URL", "")
 SUPABASE_URL = os.getenv("SUPABASE_DATABASE_URL", "")
 # Self Onboarding Tracker (Marketing page, "Self Onboarding Tracker" grid):
-#   PROD_DATABASE_URL -- korefi prod RDS (app_schema/atis_schema/mds_schema).
-#     Private-VPC host -- only reachable once this app is deployed on a box
-#     inside that network, not from a local dev machine. Tally-connected
-#     counts degrade to empty (not an error) when this is unset/unreachable.
 #   WA_BOT_DATABASE_URL -- the "AIA WA Bot" Supabase project (pzowophoqxyxvxuuhcps),
-#     direct Postgres connection -- see _load_wa_onboarding_events().
-PROD_DATABASE_URL  = os.getenv("PROD_DATABASE_URL", "")
+#     direct Postgres connection -- see _load_self_ob_sessions(). (The korefi
+#     prod RDS behind the private VPC, PROD_DATABASE_URL, was tried first but
+#     turned out unnecessary -- every column this tracker needs is reachable
+#     through WA_BOT_DATABASE_URL and the already-configured SUPABASE_URL.)
 WA_BOT_DATABASE_URL = os.getenv("WA_BOT_DATABASE_URL", "")
 # one-off perf diagnostics: set PROFILE_QUERIES=1 to log each _q() call's
 # duration + row count to stdout. No effect on behavior when unset.
@@ -1964,8 +1962,9 @@ def _load_wa_logs():
         print(f"[WARN] lr_wa_logs load failed: {ex} -- using empty frame")
     return df
 
-# Not real leads -- excluded from WA reply-rate/TAT tracking entirely (last 10
-# digits of the chat_id, i.e. the OTHER party's number, not org_phone):
+# Excluded from WA reply-rate/TAT tracking entirely (last 10 digits of the
+# chat_id, i.e. the OTHER party's number, not org_phone) -- not always because
+# it isn't a real lead; sometimes the log just can't be trusted for that number:
 #   1800227575: SEBI's official compliance/broadcast bot. Auto-replies in a loop
 #     regardless of what's sent back (STOP, ok, ...), which kept generating fresh
 #     "unanswered" entries across 5 different GMs' org numbers.
@@ -1973,7 +1972,11 @@ def _load_wa_logs():
 #     Check the processing status...") logged as inbound, not a real lead message.
 #   7057887169: Shyam, the GTM engineer -- his own test messages, not a lead.
 #   7676193782: not a real lead (flagged by ops, 27-Oct).
-_WA_LOG_EXCLUDE_PHONES = {"1800227575", "6366575567", "7057887169", "7676193782"}
+#   8780441949: a real lead, but has disappearing messages turned on -- any reply
+#     may have been auto-deleted before Periskope logged it, so the log can't
+#     prove it was unanswered. Mehak was also on leave when this came in
+#     (flagged by ops, 29-Oct).
+_WA_LOG_EXCLUDE_PHONES = {"1800227575", "6366575567", "7057887169", "7676193782", "8780441949"}
 
 def _prep_wa_logs(df):
     """gm_full_name as a clean string; sent_ist as naive IST; is_outbound/is_auto
@@ -2092,45 +2095,33 @@ def _prep_clicks(df):
     return df[df["day"].notna()]
 
 # ── Self Onboarding Tracker (Marketing page) ──────────────────────────────
-# Daily WhatsApp-based self-onboarding funnel + Tally-connected count, for the
-# "Self Onboarding Tracker" grid above CTA Click Trend. Three independent
-# sources, NONE of them the private-VPC korefi prod RDS (PROD_DATABASE_URL,
-# unreachable from outside that network) -- everything below runs over
-# connections this dashboard already has:
+# TRUE cohort funnel for WhatsApp-based self-onboarding, matching the format
+# Akshay shared manually: each row groups by the day a lead first messaged
+# the bot (cohort date), then tracks that SAME group forward however many
+# days it takes them to create an account, pick a path (self-setup vs
+# accountant-assisted), and get Tally-connected -- not bucketed by whichever
+# day each later step itself happened (that was the first version of this
+# tracker; this replaces it after confirming by hand that later funnel
+# stages genuinely do lag days behind signup, unlike Form Sent -> Signup
+# Completed, which converts same-day 100% of the time in our data so far).
+# Two independent sources, NONE of them the private-VPC korefi prod RDS
+# (PROD_DATABASE_URL, unreachable from outside that network):
 #   - AIA WA Bot (public."PROD_wa_onboarding_messages"), direct Postgres
-#     connection (WA_BOT_DATABASE_URL). One row per bot event; entry_result
-#     (JSON) carries `kind` (+ outcome/to_step), which classifies which
-#     onboarding step this is -- confirmed by hand against real rows, see
-#     _WA_ONBOARD_STAGES. Covers Form Sent / Accountant Form Sent /
-#     Accountant Invite Sent -- steps that happen before an account exists,
-#     or for which no better source was found (see below).
-#   - aia_user_profiles (public.aia_user_profiles via SUPABASE_URL -- the ops
-#     Supabase this dashboard already connects to everywhere else). The
-#     authoritative record of actual account creation (created_by =
-#     'whatsapp-signup' / 'whatsapp-invite-accept'), more trustworthy than
-#     inferring Signup Completed/Invite Accepted from the WA Bot's
-#     conversation log -- confirmed against Dhanush's reference numbers
-#     (aia_user_profiles agreed closely; the bot log overcounted Invite
-#     Accepted). Covers Signup Completed / Invite Accepted.
-#   - aia_onboarding_events (public.aia_onboarding_events via SUPABASE_URL).
+#     connection (WA_BOT_DATABASE_URL). One row per onboarding session (not
+#     per raw event -- see _load_self_ob_sessions()), carrying whether that
+#     session ever created an account, chose self-setup, or chose
+#     accountant-assisted, regardless of which day each happened.
+#   - aia_onboarding_events (public.aia_onboarding_events via SUPABASE_URL --
+#     the ops Supabase this dashboard already connects to everywhere else).
 #     event_name='Integration status', type='Tally', status='Success' fires
 #     the moment a company's Tally connection succeeds -- verified exact (to
 #     the second) against atis_schema.tool_integration_status_v2's
 #     last_update_date for two real companies, so this reliably replaces
-#     that private-VPC-only table. Scoped to company_uuids seen in the WA Bot
-#     events above, so this tracks Tally connections for companies that came
-#     through self-onboarding, not every company on the platform. Covers
-#     Tally Connected.
-# Each column counts events of that type ON that calendar day (independent
-# daily counts, not a cross-day signup-cohort join -- a company whose form
-# was sent one day and who completed signup the next shows up in both days'
-# totals under their own column) -- matches how this is already reported
-# manually and the UTM Source Cohort grid's style.
+#     that private-VPC-only table.
 _SELF_OB_START = pd.Timestamp("2026-10-21")   # First day with real (non-test) WhatsApp
                                                # self-onboarding activity -- 19-20 Oct were
                                                # dead/test-only once internal identities are
-                                               # excluded, so the tracker's fixed window
-                                               # anchors here instead of showing empty rows.
+                                               # excluded.
 _SELF_OB_INTERNAL_DOMAINS_SQL = (
     r"@(karboncard\.com|korefi\.ai)$"
     r"|^(sippudhanush2001|kakolludhanush2001)@gmail\.com$"   # Dhanush's own test signup +
@@ -2139,39 +2130,31 @@ _SELF_OB_INTERNAL_DOMAINS_SQL = (
                                                # own test/QA identities -- excluded everywhere
                                                # in this tracker.
 
-_WA_ONBOARD_STAGES = [
-    ("Form Sent",              lambda e: e.get("kind") == "signup_intent_flow_sent"),
-    ("Accountant Form Sent",   lambda e: e.get("kind") == "button_routed" and e.get("to_step") == "accountant_form_sent"),
-    ("Accountant Invite Sent", lambda e: e.get("kind") == "accountant_invite_sent"),
-    ("Owner Setup Email Sent", lambda e: e.get("kind") == "owner_setup_email_sent"),
-]
-# Self Onboarding Tracker's "Path" filter -- which columns show for each view
-# (same dropdown-swaps-columns pattern as mkt_view on the UTM Source Cohort
-# table). "Owner Setup Email Sent"/"Accountant Form Sent" came from only 1
-# overlapping session out of 32 that picked a path (17 self, 15 accountant,
-# 1 tried both) -- clean enough to split on, confirmed by hand.
-_SELF_OB_VIEWS = ["All", "Self-Setup", "Accountant-Assisted"]
-_SELF_OB_VIEW_COLS = {
-    "All":                 ["Form Sent", "Signup Completed", "Owner Setup Email Sent", "Accountant Form Sent",
-                             "Accountant Invite Sent", "Invite Accepted", "Tally Connected"],
-    "Self-Setup":          ["Form Sent", "Signup Completed", "Owner Setup Email Sent", "Tally Connected"],
-    "Accountant-Assisted": ["Form Sent", "Signup Completed", "Accountant Form Sent",
-                             "Accountant Invite Sent", "Invite Accepted", "Tally Connected"],
-}
+def _load_self_ob_sessions():
+    """One row per onboarding session (a 'lead' -- someone who got the
+    signup form sent) from _SELF_OB_START through today, with flags for
+    whatever that SAME session eventually did, no matter how many days
+    later. `cohort_date` (IST) is the day of that session's first
+    signup_intent_flow_sent event -- the funnel's anchor date, per the Self
+    Onboarding Tracker block comment above. Rows belonging to a session that
+    ever touched an internal team identity (karboncard.com / korefi.ai --
+    test/QA signups, see _SELF_OB_INTERNAL_DOMAINS_SQL) are dropped
+    entirely -- confirmed against a real reference report (Dhanush's 19-23
+    Oct WA onboarding numbers) that explicitly excludes karboncard.com.
 
-def _load_wa_onboarding_events():
-    """See the Self Onboarding Tracker block comment above. `day` is bucketed
-    in IST (this dashboard's convention everywhere else -- sent_ist,
-    opened_ist, ...) server-side. Rows belonging to a session that ever
-    touched an internal team identity (karboncard.com / korefi.ai -- test/QA
-    signups, see _SELF_OB_INTERNAL_DOMAINS_SQL) are dropped entirely --
-    confirmed against a real reference report (Dhanush's 19-23 Oct WA
-    onboarding numbers) that explicitly excludes karboncard.com; session_id
-    ties a whole onboarding conversation together, so this catches the
-    earlier Form Sent/Accountant Form Sent steps too even though those
-    specific events carry no email of their own yet. Guarded so a failure
-    just yields an empty frame."""
-    cols = ["day", "kind", "outcome", "to_step", "company_uuid", "session_id"]
+    invite_accepted is matched by PHONE, not session_id: the bot logs
+    accept_invite_submitted as a standalone event with no session_id or
+    company_uuid at all (confirmed by inspecting the raw rows -- it's a
+    message from the ACCOUNTANT's own WhatsApp number, a conversation the
+    bot never ties back to the lead's session). It does carry owner_phone,
+    the ORIGINAL lead's number, which is matched against that lead
+    session's own phone_e164 instead. Without this, invite_accepted would
+    read 0 on every row even when an accountant plainly had accepted and
+    gone on to integrate.
+
+    Guarded so a failure just yields an empty frame."""
+    cols = ["session_id", "cohort_date", "created_account", "chose_self", "chose_accountant",
+            "accountant_invite_sent", "invite_accepted", "company_uuid"]
     out = pd.DataFrame(columns=cols)
     if not WA_BOT_DATABASE_URL:
         return out
@@ -2184,75 +2167,86 @@ def _load_wa_onboarding_events():
                   AND LOWER(COALESCE(entry_result->'form'->>'email',
                                       entry_result->>'accountant_email', ''))
                       ~ '{_SELF_OB_INTERNAL_DOMAINS_SQL}'
+            ),
+            events AS (
+                SELECT entry_result->>'session_id' AS session_id,
+                       entry_result->>'kind' AS kind,
+                       entry_result->>'outcome' AS outcome,
+                       entry_result->>'to_step' AS to_step,
+                       entry_result->>'company_uuid' AS company_uuid,
+                       phone_e164,
+                       received_at
+                FROM public."PROD_wa_onboarding_messages"
+                WHERE received_at >= '{_SELF_OB_START.strftime("%Y-%m-%d")}'
+                  AND COALESCE(entry_result->>'session_id', '') NOT IN (
+                      SELECT session_id FROM test_sessions WHERE session_id IS NOT NULL
+                  )
+            ),
+            -- accept_invite_submitted carries no session_id/company_uuid (it's a
+            -- message from the accountant's own WhatsApp number) -- only
+            -- owner_phone, the ORIGINAL lead's number. Matched below by phone.
+            accepts AS (
+                SELECT entry_result->>'owner_phone' AS owner_phone,
+                       MIN(received_at) AS accepted_at
+                FROM public."PROD_wa_onboarding_messages"
+                WHERE entry_result->>'kind' = 'accept_invite_submitted'
+                  AND entry_result->>'outcome' = 'joined'
+                  AND entry_result->>'owner_phone' IS NOT NULL
+                GROUP BY entry_result->>'owner_phone'
+            ),
+            sessions_base AS (
+                SELECT
+                    session_id,
+                    MIN(received_at) FILTER (WHERE kind = 'signup_intent_flow_sent') AS lead_at,
+                    (MAX(CASE WHEN kind = 'flow_submitted' AND outcome = 'created' THEN 1 ELSE 0 END) = 1) AS created_account,
+                    (MAX(CASE WHEN kind = 'owner_setup_email_sent' THEN 1 ELSE 0 END) = 1) AS chose_self,
+                    (MAX(CASE WHEN kind = 'button_routed' AND to_step = 'accountant_form_sent' THEN 1 ELSE 0 END) = 1) AS chose_accountant,
+                    (MAX(CASE WHEN kind = 'accountant_invite_sent' THEN 1 ELSE 0 END) = 1) AS accountant_invite_sent,
+                    MAX(company_uuid) AS company_uuid,
+                    MAX(phone_e164) AS phone_e164
+                FROM events
+                GROUP BY session_id
+                HAVING MIN(received_at) FILTER (WHERE kind = 'signup_intent_flow_sent') IS NOT NULL
             )
             SELECT
-                (received_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date AS day,
-                entry_result->>'kind' AS kind,
-                entry_result->>'outcome' AS outcome,
-                entry_result->>'to_step' AS to_step,
-                entry_result->>'company_uuid' AS company_uuid,
-                entry_result->>'session_id' AS session_id
-            FROM public."PROD_wa_onboarding_messages"
-            WHERE received_at >= '{_SELF_OB_START.strftime("%Y-%m-%d")}'
-              AND COALESCE(entry_result->>'session_id', '') NOT IN (
-                  SELECT session_id FROM test_sessions WHERE session_id IS NOT NULL
-              )
-            ORDER BY received_at
+                sb.session_id, sb.lead_at, sb.created_account, sb.chose_self, sb.chose_accountant,
+                sb.accountant_invite_sent,
+                (a.owner_phone IS NOT NULL AND a.accepted_at >= sb.lead_at) AS invite_accepted,
+                sb.company_uuid
+            FROM sessions_base sb
+            LEFT JOIN accepts a ON a.owner_phone = sb.phone_e164
+            ORDER BY sb.lead_at
         """, statement_timeout_ms=20000)
     except Exception as ex:
-        print(f"[WARN] AIA WA Bot onboarding events load failed: {ex} -- using empty frame")
+        print(f"[WARN] AIA WA Bot session load failed: {ex} -- using empty frame")
         return out
     if len(df):
-        df["day"] = pd.to_datetime(df["day"], errors="coerce").dt.normalize()
-    return df[cols] if len(df) else out
-
-def _load_wa_signup_profiles():
-    """aia_user_profiles (public.aia_user_profiles via SUPABASE_URL) -- see
-    the Self Onboarding Tracker block comment above for why this replaces
-    inferring Signup Completed/Invite Accepted from the WA Bot log.
-    `created_by` is the real account-creation path; 'whatsapp-signup' and
-    'whatsapp-invite-accept' are the two WhatsApp-sourced values. `day`
-    bucketed in IST, internal team identities excluded (see
-    _SELF_OB_INTERNAL_DOMAINS_SQL), same conventions as
-    _load_wa_onboarding_events(). Guarded so a failure just yields an empty
-    frame."""
-    cols = ["day", "created_by"]
-    out = pd.DataFrame(columns=cols)
-    try:
-        df = _q(SUPABASE_URL, f"""
-            SELECT (creation_date AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date AS day,
-                   created_by
-            FROM public.aia_user_profiles
-            WHERE creation_date >= '{_SELF_OB_START.strftime("%Y-%m-%d")}'
-              AND created_by IN ('whatsapp-signup', 'whatsapp-invite-accept')
-              AND LOWER(COALESCE(email, '')) !~ '{_SELF_OB_INTERNAL_DOMAINS_SQL}'
-        """, statement_timeout_ms=20000)
-    except Exception as ex:
-        print(f"[WARN] aia_user_profiles load failed: {ex} -- using empty frame")
-        return out
-    if len(df):
-        df["day"] = pd.to_datetime(df["day"], errors="coerce").dt.normalize()
+        ist = pd.to_datetime(df["lead_at"], errors="coerce", utc=True) + pd.Timedelta(hours=5, minutes=30)
+        df["cohort_date"] = ist.dt.tz_localize(None).dt.normalize()
     return df[cols] if len(df) else out
 
 def _load_tally_connected(company_uuids):
     """aia_onboarding_events (public.aia_onboarding_events via SUPABASE_URL --
     the ops Supabase this dashboard already connects to everywhere else, not
     a new connection) -- scoped to company_uuids seen in the WA Bot
-    onboarding events, so this is "Tally connections among companies that
+    onboarding sessions, so this is "Tally connections among companies that
     came through self-onboarding", not a platform-wide count. A row with
     event_name='Integration status', type='Tally', status='Success' fires
     the moment a company's Tally connection succeeds -- confirmed exact
     (to the second) against atis_schema.tool_integration_status_v2's
     last_update_date for two real companies, so this is a reliable
     replacement for that private-VPC-only table, reachable from anywhere
-    this dashboard runs. `day` bucketed in IST, same convention as
-    _load_wa_onboarding_events(). Each company_uuid is validated as a real
-    UUID before being inlined into the query (defense in depth -- these
-    values come from our own already-parsed JSON, not raw user input, but
-    _q() has no params support to parameterize through, so this keeps the
-    IN-list provably safe without widening that shared helper's signature).
-    Guarded so a failure just yields an empty frame."""
-    cols = ["day", "company_uuid", "company_name"]
+    this dashboard runs. Not day-scoped -- the cohort render attributes a
+    connection back to its company's signup day, not the day it connected.
+    Each company_uuid is validated as a real UUID before being inlined into
+    the query (defense in depth -- these values come from our own
+    already-parsed JSON, not raw user input, but _q() has no params support
+    to parameterize through, so this keeps the IN-list provably safe
+    without widening that shared helper's signature). Guarded so a failure
+    just yields an empty frame. email/phone (for the Total Integrated hover
+    tooltip) come via aia_companies.created_by_user_id -> aia_user_profiles
+    .user_id -- confirmed a real join against two known companies."""
+    cols = ["company_uuid", "company_name", "email", "phone"]
     out = pd.DataFrame(columns=cols)
     uuids = set()
     for u in (company_uuids if company_uuids is not None else []):
@@ -2265,10 +2259,11 @@ def _load_tally_connected(company_uuids):
     try:
         placeholders = ",".join(f"'{u}'" for u in sorted(uuids))
         df = _q(SUPABASE_URL, f"""
-            SELECT (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date AS day,
-                   e.company_id AS company_uuid, c.company_name
+            SELECT DISTINCT e.company_id AS company_uuid, c.company_name,
+                   COALESCE(c.created_by_email, p.email) AS email, p.phone
             FROM public.aia_onboarding_events e
             LEFT JOIN public.aia_companies c ON c.company_id = e.company_id
+            LEFT JOIN public.aia_user_profiles p ON p.user_id = c.created_by_user_id
             WHERE e.event_name = 'Integration status' AND e.type = 'Tally' AND e.status = 'Success'
               AND e.event_time >= '{_SELF_OB_START.strftime("%Y-%m-%d")}'
               AND e.company_id IN ({placeholders})
@@ -2276,105 +2271,124 @@ def _load_tally_connected(company_uuids):
     except Exception as ex:
         print(f"[WARN] aia_onboarding_events (Tally) load failed: {ex} -- using empty frame")
         return out
-    if len(df):
-        df["day"] = pd.to_datetime(df["day"], errors="coerce").dt.normalize()
     return df[cols] if len(df) else out
 
-def _self_ob_render(wa_events, profiles, tally_df, view="All"):
-    """Self Onboarding Tracker grid: one row per day (most recent first) from
-    _SELF_OB_START through today. `view` (see _SELF_OB_VIEWS/_SELF_OB_VIEW_COLS)
-    picks which columns show -- same dropdown-swaps-columns pattern as the
-    UTM Source Cohort table's Total/Cost/Percentages view -- so "Self-Setup"
-    and "Accountant-Assisted" each only show the stages that apply to that
-    path, instead of the "All" view's dashes/blanks for the other path's
-    stages. Every column is an independent same-day count (see block comment
-    above):
-      Form Sent / Accountant Form Sent / Accountant Invite Sent /
-        Owner Setup Email Sent -- from wa_events (_WA_ONBOARD_STAGES), the WA
-        Bot conversation log.
-      Signup Completed / Invite Accepted -- from profiles (aia_user_profiles),
-        the real account-creation record.
-      Tally Connected -- from tally_df (aia_onboarding_events), filtered to
-        the companies whose session took the matching path in "Self-Setup"/
-        "Accountant-Assisted" views (traced via session_id -> company_uuid
-        from flow_submitted/accountant_invite_sent, the two kinds that carry
-        both). "All" always shows the true unfiltered total -- a company
-        that never answered the self-vs-accountant question at all (seen in
-        practice) still connected Tally, so it won't appear in either path
-        view, and the two path totals don't have to add up to "All"'s.
-    Total row: sums. Blank grid (not an error) when all sources came back
-    empty."""
+def _self_ob_cohort_render(sessions_df, tally_df, view="Total"):
+    """Self Onboarding Tracker grid, true cohort format (see block comment
+    above): one row per day (most recent first) from _SELF_OB_START through
+    today, every column a TRUE lagging indicator -- attributed back to the
+    day the lead first messaged, no matter how many days later each later
+    step actually happened. Columns: Form Sent, Signup Completed, Chose
+    Self, Self Integrated, Chose Accountant, Accountant Invite Sent,
+    Invite Accepted, Accountant Integrated, Total Integrated.
+
+    `view` is the shared page-level Total/Cost/Percentages dropdown (same
+    one the UTM Source Cohort table follows). view == "Percentages" shows
+    every column EXCEPT Form Sent as a percentage of its real parent stage
+    (not just "the column to its left" -- Chose Self and Chose Accountant
+    are parallel branches off Signup Completed, not sequential to each
+    other, so both divide by Signup Completed; Total Integrated divides by
+    Form Sent, the funnel's true start). Any other view shows plain counts,
+    no percentages. A cell whose raw count is 0 is greyed/italic
+    (cell-zero) either way, so real numbers stand out -- this takes
+    priority over the group color below.
+
+    The two path groups' HEADERS are banded in a shared colour (hdr-self
+    blue, hdr-acct orange) so the two funnels are visually distinguishable
+    at a glance: Chose Self/Self Integrated vs Chose Accountant/Accountant
+    Invite Sent/Invite Accepted/Accountant Integrated. Uses
+    grid_payload_b64's hdr_class_cols, which bands the header <th> itself
+    (shared grid_server.py mechanism, not a one-off hack for this table).
+
+    Total row: sums. Hovering Total Integrated shows one "phone – email"
+    line per connected company. Blank grid (not an error) when both
+    sources came back empty."""
     today = pd.Timestamp.today().normalize()
+    sdf = sessions_df if (sessions_df is not None and len(sessions_df)) else pd.DataFrame(
+        columns=["session_id", "cohort_date", "created_account", "chose_self", "chose_accountant",
+                 "accountant_invite_sent", "invite_accepted", "company_uuid"])
+    tdf = tally_df if (tally_df is not None and len(tally_df)) else pd.DataFrame(
+        columns=["company_uuid", "company_name", "email", "phone"])
+    integrated_uuids = set(tdf["company_uuid"].dropna()) if len(tdf) else set()
+    contact_by_uuid = {}
+    if len(tdf):
+        for _, r in tdf.iterrows():
+            contact_by_uuid[r["company_uuid"]] = f"{r['phone'] or '—'} – {r['email'] or '—'}"
+    sdf = sdf.copy()
+    sdf["integrated"] = sdf["company_uuid"].isin(integrated_uuids) if len(sdf) else False
+
+    def _agg(g):
+        self_integ = g.loc[g["chose_self"] & g["integrated"], "company_uuid"]
+        acct_integ = g.loc[g["chose_accountant"] & g["integrated"], "company_uuid"]
+        tot_integ = g.loc[g["integrated"], "company_uuid"]
+        contacts = tot_integ.map(lambda u: contact_by_uuid.get(u, u)).unique().tolist()
+        return {
+            "leads": len(g), "accounts": int(g["created_account"].sum()),
+            "chose_self": int(g["chose_self"].sum()), "chose_acct": int(g["chose_accountant"].sum()),
+            "invite_sent": int(g["accountant_invite_sent"].sum()),
+            "invite_accepted": int(g["invite_accepted"].sum()),
+            "self_integrated": self_integ.nunique(), "acct_integrated": acct_integ.nunique(),
+            "total_integrated": tot_integ.nunique(), "contacts": "\n".join(contacts),
+        }
+
+    _EMPTY_AGG = {"leads": 0, "accounts": 0, "chose_self": 0, "chose_acct": 0, "invite_sent": 0,
+                  "invite_accepted": 0, "self_integrated": 0, "acct_integrated": 0,
+                  "total_integrated": 0, "contacts": ""}
+    by_day = {day: _agg(g) for day, g in sdf.groupby("cohort_date")} if len(sdf) else {}
+    pct_view = (view == "Percentages")
+
+    def _pct(n, d):
+        return round(n / d * 100) if d else 0
+
+    def _cell(n, base):
+        val = f"{_pct(n, base)}%" if pct_view else n
+        cls = "cell-zero" if n == 0 else ""
+        return (val, cls, "")
+
+    def _row(label, agg):
+        r = {"Day": (label, "", ""), "Form Sent": (agg["leads"], "cell-zero" if agg["leads"] == 0 else "", "")}
+        r["Signup Completed"]       = _cell(agg["accounts"], agg["leads"])
+        r["Chose Self"]             = _cell(agg["chose_self"], agg["accounts"])
+        r["Self Integrated"]        = _cell(agg["self_integrated"], agg["chose_self"])
+        r["Chose Accountant"]       = _cell(agg["chose_acct"], agg["accounts"])
+        r["Accountant Invite Sent"] = _cell(agg["invite_sent"], agg["chose_acct"])
+        r["Invite Accepted"]        = _cell(agg["invite_accepted"], agg["invite_sent"])
+        r["Accountant Integrated"]  = _cell(agg["acct_integrated"], agg["invite_accepted"])
+        tot_val, tot_cls, _ = _cell(agg["total_integrated"], agg["leads"])
+        r["Total Integrated"] = (tot_val, tot_cls, agg["contacts"])
+        return r
+
     n_days = (today - _SELF_OB_START).days + 1
-    day_list = [today - pd.Timedelta(days=i) for i in range(max(n_days, 1))]
-    wa = wa_events if (wa_events is not None and len(wa_events)) else pd.DataFrame(columns=["day", "kind", "outcome", "to_step", "company_uuid", "session_id"])
-    pr = profiles if (profiles is not None and len(profiles)) else pd.DataFrame(columns=["day", "created_by"])
-    ta = tally_df if (tally_df is not None and len(tally_df)) else pd.DataFrame(columns=["day", "company_uuid", "company_name"])
-    events = wa.to_dict("records") if len(wa) else []
-    stages = dict(_WA_ONBOARD_STAGES)
-    all_cols = ["Form Sent", "Signup Completed", "Owner Setup Email Sent", "Accountant Form Sent",
-                "Accountant Invite Sent", "Invite Accepted", "Tally Connected"]
+    rows, day_aggs = [], []
+    for i in range(max(n_days, 1)):
+        d = today - pd.Timedelta(days=i)
+        agg = by_day.get(d, _EMPTY_AGG)
+        rows.append(_row(d.strftime("%d %b"), agg))
+        day_aggs.append(agg)
 
-    # company_uuid -> "self"/"accountant", traced via session_id. flow_submitted
-    # and accountant_invite_sent are the only kinds that carry company_uuid; a
-    # session's path is whichever of owner_setup_email_sent / accountant_form_sent
-    # it touched (at most one of _WA_ONBOARD_STAGES' definitions, per the
-    # 1-session-overlap check done by hand before building this).
-    self_sessions = {e["session_id"] for e in events if stages["Owner Setup Email Sent"](e) and e.get("session_id")}
-    acct_sessions = {e["session_id"] for e in events if stages["Accountant Form Sent"](e) and e.get("session_id")}
-    session_to_company = {e["session_id"]: e["company_uuid"] for e in events
-                           if e.get("session_id") and e.get("company_uuid")}
-    company_path = {}
-    for sid, cu in session_to_company.items():
-        if sid in self_sessions:
-            company_path[cu] = "self"
-        elif sid in acct_sessions:
-            company_path[cu] = "accountant"
-    _TA_VIEW_PATH = {"Self-Setup": "self", "Accountant-Assisted": "accountant"}
-    wanted_path = _TA_VIEW_PATH.get(view)
-    if wanted_path and len(ta):
-        ta = ta[ta["company_uuid"].map(company_path.get) == wanted_path]
+    tot_agg = {k: sum(a[k] for a in day_aggs) for k in _EMPTY_AGG if k != "contacts"}
+    tot_agg["contacts"] = "\n".join(a["contacts"] for a in day_aggs if a["contacts"])
+    rows.append(_row("Total", tot_agg))
 
-    def _tally_names(day_ta):
-        """Comma-joined company names (falling back to the raw uuid when a
-        name wasn't found via aia_companies) for this day's Tally Connected
-        tooltip."""
-        if not len(day_ta):
-            return ""
-        names = day_ta["company_name"].fillna(day_ta["company_uuid"])
-        return ", ".join(names.tolist())
-
-    rows = []
-    for d in day_list:
-        day_events = [e for e in events if e.get("day") == d]
-        day_profiles = pr[pr["day"] == d]["created_by"] if len(pr) else pd.Series(dtype=object)
-        day_ta = ta[ta["day"] == d] if len(ta) else ta
-        r = {"Day": (d.strftime("%d %b"), "", "")}
-        r["Form Sent"] = (sum(1 for e in day_events if stages["Form Sent"](e)), "", "")
-        r["Signup Completed"] = (int((day_profiles == "whatsapp-signup").sum()), "", "")
-        r["Owner Setup Email Sent"] = (sum(1 for e in day_events if stages["Owner Setup Email Sent"](e)), "", "")
-        r["Accountant Form Sent"] = (sum(1 for e in day_events if stages["Accountant Form Sent"](e)), "", "")
-        r["Accountant Invite Sent"] = (sum(1 for e in day_events if stages["Accountant Invite Sent"](e)), "", "")
-        r["Invite Accepted"] = (int((day_profiles == "whatsapp-invite-accept").sum()), "", "")
-        r["Tally Connected"] = (day_ta["company_uuid"].nunique(), "", _tally_names(day_ta))
-        rows.append(r)
-    tot = {"Day": ("Total", "", "")}
-    for label in all_cols:
-        tot[label] = (sum(r[label][0] for r in rows), "", "")
-    tot["Tally Connected"] = (tot["Tally Connected"][0], "", _tally_names(ta))
-    rows.append(tot)
-    view_cols = ["Day"] + _SELF_OB_VIEW_COLS.get(view, _SELF_OB_VIEW_COLS["All"])
-    disp = {}
-    tip_cols = {}
-    for c in view_cols:
+    cols = list(rows[0].keys())
+    disp, class_cols, tip_cols = {}, {}, {}
+    for c in cols:
         disp[c] = [r[c][0] for r in rows]
-        tips = [r[c][2] for r in rows]
-        if any(tips):
-            disp[c + "__tip"] = tips
+        clv = [r[c][1] for r in rows]
+        tpv = [r[c][2] for r in rows]
+        if any(clv):
+            disp[c + "__cls"] = clv
+            class_cols[c] = c + "__cls"
+        if any(tpv):
+            disp[c + "__tip"] = tpv
             tip_cols[c] = c + "__tip"
     df = pd.DataFrame(disp)
+    hdr_groups = {"Chose Self": "hdr-self", "Self Integrated": "hdr-self",
+                  "Chose Accountant": "hdr-acct", "Accountant Invite Sent": "hdr-acct",
+                  "Invite Accepted": "hdr-acct", "Accountant Integrated": "hdr-acct"}
     return grid_payload_b64(df, "Day", autosize=True, center_all=True, no_sort=True, sortable=False,
-                            heat_cols={"Tally Connected": "green"}, tip_cols=tip_cols or None)
+                            class_cols=class_cols or None, tip_cols=tip_cols or None,
+                            heat_cols={"Total Integrated": "green"}, hdr_class_cols=hdr_groups)
 
 def _prep_gm_slots(df):
     """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
@@ -2605,10 +2619,9 @@ _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
 _WA_LOG = _prep_wa_logs(_load_wa_logs())  # _wa_reply_events() runs later, per-refresh -- it needs
                                            # _business_minutes(), defined further down this file
 _CLICKS = _prep_clicks(_load_clicks())
-_WA_ONBOARD_EVENTS = _load_wa_onboarding_events()
-_WA_SIGNUP_PROFILES = _load_wa_signup_profiles()
+_SELF_OB_SESSIONS = _load_self_ob_sessions()
 _TALLY_CONNECTED = _load_tally_connected(
-    _WA_ONBOARD_EVENTS["company_uuid"].dropna().unique() if len(_WA_ONBOARD_EVENTS) else [])
+    _SELF_OB_SESSIONS["company_uuid"].dropna().unique() if len(_SELF_OB_SESSIONS) else [])
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -2994,7 +3007,7 @@ def _reload_data():
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _ACCT_PHONE, _CONTACT_ID, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
-    global _WA_ONBOARD_EVENTS, _WA_SIGNUP_PROFILES, _TALLY_CONNECTED
+    global _SELF_OB_SESSIONS, _TALLY_CONNECTED
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -3004,10 +3017,9 @@ def _reload_data():
     _GM_SLOTS = _prep_gm_slots(_load_gm_slots())
     _WA_LOG = _prep_wa_logs(_load_wa_logs())
     _CLICKS = _prep_clicks(_load_clicks())
-    _WA_ONBOARD_EVENTS = _load_wa_onboarding_events()
-    _WA_SIGNUP_PROFILES = _load_wa_signup_profiles()
+    _SELF_OB_SESSIONS = _load_self_ob_sessions()
     _TALLY_CONNECTED = _load_tally_connected(
-        _WA_ONBOARD_EVENTS["company_uuid"].dropna().unique() if len(_WA_ONBOARD_EVENTS) else [])
+        _SELF_OB_SESSIONS["company_uuid"].dropna().unique() if len(_SELF_OB_SESSIONS) else [])
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -5126,11 +5138,6 @@ def on_mkt_view(state):
     (Monthly 12M + Weekly 8W) in the selected view."""
     _mkt_refresh(state)
 
-def on_self_ob_view(state):
-    """Self Onboarding Tracker's Path dropdown (All/Self-Setup/Accountant-Assisted)
-    changed — rebuild the whole Marketing page, same pattern as on_mkt_view."""
-    _mkt_refresh(state)
-
 def on_mkt_utm_date(state):
     """UTM-table Start/End picker changed. It's bound to the SHARED ops range
     (aia_date_range), so mirror to AIA/VA Ops and refresh all three."""
@@ -5474,10 +5481,11 @@ def _mkt_refresh(state):
         })
     state.mkt_utm_json = _mkt_utm_render(_udata, _view)
 
-    # Self Onboarding Tracker -- fixed window from _SELF_OB_START (go-live)
-    # through today, independent of this page's own date range/channel
-    # filters (same pattern as Weekly Funnel (8W)).
-    state.self_ob_json = _self_ob_render(_WA_ONBOARD_EVENTS, _WA_SIGNUP_PROFILES, _TALLY_CONNECTED, state.self_ob_view)
+    # Self Onboarding Tracker -- true cohort funnel, independent of this
+    # page's own date range/channel filters (same pattern as Weekly Funnel
+    # (8W)), but DOES follow the shared Total/Percentages view (_view) like
+    # the UTM Source Cohort table.
+    state.self_ob_json = _self_ob_cohort_render(_SELF_OB_SESSIONS, _TALLY_CONNECTED, _view)
 
     _daily_signals_refresh(state)   # Daily-signals cards follow the nav channel filter too
 
@@ -6317,10 +6325,13 @@ mkt_sig_channels = ["All", "Google", "Meta", "LinkedIn", "Organic"]   # Daily-si
 mkt_sig_channel  = "All"
 mkt_view = "Total"; mkt_views = _MKT_VIEWS   # shared Total/Cost/Percentages view for both funnel tables
 mkt_monthly_json=""; mkt_weekly_json=""; mkt_utm_json=""; mkt_spend_df=pd.DataFrame(); mkt_cpl_fig=go.Figure()
-self_ob_json=""; self_ob_tip=("Daily WhatsApp self-onboarding funnel since 21 Oct (first day with real activity), from the AIA WA Bot "
-    "and the product's own account/integration records. Each column counts same-day events, not a "
-    "cross-day signup cohort. Tally Connected is scoped to companies seen in this funnel, not platform-wide.")
-self_ob_view = "All"; self_ob_views = _SELF_OB_VIEWS
+self_ob_json=""
+self_ob_tip = ("Self Onboarding Tracker\n"
+               "• Each row = the day a lead first messaged the WhatsApp bot.\n"
+               "• Each column counts what that same group of leads did later, even if it took many days.\n"
+               "• Numbers are lagging indicators tied to the signup day, not the day each step happened.\n"
+               "• Greyed-out 0 = nothing happened yet, not an error.\n"
+               "• Hover Total Integrated for each company's phone and email.")
 mkt_cta_fig=go.Figure()
 mkt_hps_cac_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""

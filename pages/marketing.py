@@ -39,15 +39,12 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
-<|part|class_name=mkt-tablehead|
-**Self Onboarding Tracker** <|ⓘ|text|hover_text={self_ob_tip}|class_name=info-ico|>
-<|{self_ob_view}|selector|lov={self_ob_views}|dropdown|on_change=on_self_ob_view|>
-|>
+**Self Onboarding Tracker** <|ⓘ|text|hover_text={self_ob_tip}|class_name=info-ico|>  *(view follows the nav-bar View dropdown)*
 
 <|part|class_name=gridholder gridholder-self_ob|
 <|{self_ob_json}|text|mode=raw|>
 |>
-<iframe src="/grid/self_ob" class="grid-frame" style="width:100%;height:520px;border:none;"></iframe>
+<iframe src="/grid/self_ob" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|

@@ -32,7 +32,7 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                      max_height=None, tip_cols=None, total_inline=False,
                      heat_from=None, heat_max=None, class_cols=None,
                      rownum_col=None, col_w=None, hdr_center=False,
-                     fixed_layout=False):
+                     fixed_layout=False, hdr_class_cols=None):
     """Build the grid payload for a DataFrame and return it base64-encoded.
     The Total row (matched in `total_id_col`) is split out so the front-end can
     pin it in the footer. `center_cols` lists string columns that should be
@@ -168,7 +168,12 @@ def grid_payload_b64(df, total_id_col=None, sort_default_col="Revenue",
                # col_w: {column: px} — preferred width for specific columns. The
                # table is auto-layout, so the slack goes to the columns left auto
                # instead of being soaked up by the widest text column.
-               "colW": [(col_w or {}).get(cols[i]) for i in range(len(cols))]}
+               "colW": [(col_w or {}).get(cols[i]) for i in range(len(cols))],
+               # hdr_class_cols: {display_col: css_class} -- a CSS class applied to the
+               # HEADER <th> itself (not the body cells), e.g. to band a group of
+               # related columns in a shared colour (see Self Onboarding Tracker).
+               "hdrClass": {cols[i]: (hdr_class_cols or {}).get(cols[i], "")
+                            for i in range(len(cols))}}
     return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
@@ -443,6 +448,13 @@ _GRID_HTML = r"""<!DOCTYPE html>
   /* Marketing funnel: immature-cohort fade, low-denominator "n<25", partial-period badge */
   .cell-faded{ opacity:.42; }
   .cell-muted{ color:#9aa4b2; font-style:italic; }
+  .cell-zero{ color:#cdd2d9; font-style:italic; }   /* cell-muted, ~50% lighter -- for a 0 value standing out less */
+  /* hdr_class_cols: bands a HEADER cell in a group colour (e.g. Self Onboarding
+     Tracker's two funnel paths), overriding the default navy via class specificity. */
+  thead th.hdr-self{ background:#15803d; }
+  thead th.hdr-self:hover{ background:#0f5c2c; }
+  thead th.hdr-acct{ background:#c2410c; }
+  thead th.hdr-acct:hover{ background:#9a3409; }
   td.cell-partial::after{ content:"Partial"; display:inline-block; margin-left:6px;
     font-size:9px; font-weight:700; line-height:1; padding:2px 5px; border-radius:8px;
     background:#fde68a; color:#92400e; vertical-align:middle; }
@@ -491,6 +503,7 @@ function header(){
   const sortable=DATA.sortable!==false;
   const hidden=DATA.hidden||[];
   let tr="<tr>";
+  const hdrClass=DATA.hdrClass||{};
   cols.forEach((c,i)=>{
     if(hidden[i]) return;
     const s=sortable?SORT.find(s=>s.col===i):null;
@@ -499,6 +512,7 @@ function header(){
            if(SORT.length>1) pri='<span class="pri">'+(SORT.indexOf(s)+1)+'</span>'; }
     let c2 = (DATA.hdr_center || DATA.center[i]) ? "" : "left";
     if(!sortable) c2 += " nosort";
+    if(hdrClass[c]) c2 += " "+hdrClass[c];
     const tips=DATA.headerTips||[];
     const tip = tips[i] ? ' title="'+String(tips[i]).replace(/"/g,"&quot;")+'"' : '';
     const cw=(DATA.colW||[])[i];
