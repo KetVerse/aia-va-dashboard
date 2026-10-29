@@ -883,6 +883,20 @@ def _real_usage_days_from_streak(streak):
             n += 1
     return n
 
+def _ft_activated(acct, ev_lu, cache):
+    """FT Activated rule, shared by AIA Ops (_aia_ops_refresh) and Marketing's
+    weekly cost trends (_mkt_refresh): an account currently has >=2 real-usage
+    days (green/amber Usage Streak dots) in the last 28 days -- a POINT-IN-TIME
+    status check as of now, not "within N days of FT start". `cache` is a
+    per-refresh dict the caller owns, so repeated lookups for the same account
+    across a KPI card / trend / table only call _usage_28 once."""
+    if not acct:
+        return False
+    if acct not in cache:
+        _, streak, _, _ = _usage_28(None, ev_lu, acct=acct)
+        cache[acct] = _real_usage_days_from_streak(streak) >= 2
+    return cache[acct]
+
 
 def _va_mrr(record_ids):
     """₹ MRR_VA (DAX): for the given paid VA records, sum unit_price/term over
@@ -947,74 +961,6 @@ def _va_incentive(s, e):
         tot["AM"] = "Total"
         t = pd.concat([t, pd.DataFrame([tot])], ignore_index=True)
     return t
-
-
-def _mkt_breakdown(mkt_df, aia_df, li_df, freq, label_name, label_fn, last_n=None,
-                   drop_zero_spend=False):
-    """Cohort marketing performance by lead create-period, net of refunds: Spend,
-    Leads, CPL, Net Paid, Net Revenue, MRR, CAC, ARPU, Payback — with a pinned
-    Total row. Money is attributed to the month/week the LEAD was created (not
-    when it paid), matching the Marketing Tracker 'Cohort Realized' sheet.
-    Net Paid = leads created in the period that paid (amount_paid>0, not refunded);
-    Net Revenue / MRR = those leads' line items' total_price / mrr (all line items,
-    New + Renewal = the LTV/lifetime basis)."""
-    spend_by = (mkt_df.dropna(subset=["day"]).groupby(mkt_df.dropna(subset=["day"])["day"].dt.to_period(freq))["cost"].sum()
-                if "day" in mkt_df.columns and len(mkt_df) else pd.Series(dtype=float))
-    aa = aia_df
-    if "create_date" not in aa.columns:
-        return pd.DataFrame()
-    # Leads are GROSS (every lead acquired in the period, incl. later-refunded) —
-    # CPL is spend per lead. Only Paid/Revenue/MRR go net of refunds below.
-    aa_all = aa.dropna(subset=["create_date"]).copy()
-    aa_all["cperiod"] = aa_all["create_date"].dt.to_period(freq)
-    leads_by = aa_all.groupby("cperiod")["record_id"].nunique()
-    # net-of-refunds subset, keyed to the lead's create-period
-    aa_ok = aa_all[aa_all["asked_refund"] != "Yes"] if "asked_refund" in aa_all.columns else aa_all
-    amt = aa_ok["amount_paid"] if "amount_paid" in aa_ok.columns else 0
-    pmask = aa_ok["payment_date"].notna() & (amt > 0)
-    netpaid_by = aa_ok[pmask].groupby("cperiod")["record_id"].nunique()
-    # line items → the lead's create-period (revenue/MRR realised by cohort)
-    cmap = aa_ok[["record_id", "cperiod"]].drop_duplicates("record_id")
-    lim = li_df.dropna(subset=["date_paid"]) if "date_paid" in li_df.columns else li_df.iloc[0:0]
-    if len(lim) and "record_id" in lim.columns:
-        lim = lim.merge(cmap, on="record_id", how="inner")
-        rev_by = lim.groupby("cperiod")["total_price"].sum() if "total_price" in lim.columns else pd.Series(dtype=float)
-        mrr_by = lim.groupby("cperiod")["mrr"].sum() if "mrr" in lim.columns else pd.Series(dtype=float)
-    else:
-        rev_by = pd.Series(dtype=float); mrr_by = pd.Series(dtype=float)
-
-    idxs = [s.index for s in [spend_by, leads_by, netpaid_by, rev_by, mrr_by] if len(s)]
-    if not idxs:
-        return pd.DataFrame()
-    lo = min(i.min() for i in idxs); hi = max(i.max() for i in idxs)
-    full = pd.period_range(lo, hi, freq=freq)
-    if drop_zero_spend:
-        # Trim only genuinely empty months (no spend AND no leads). A channel like
-        # Organic has real leads with ₹0 spend — keep those rows; dropping on spend
-        # alone would blank the whole table for any no-spend channel.
-        sp_full = spend_by.reindex(full, fill_value=0)
-        ld_full = leads_by.reindex(full, fill_value=0)
-        full = full[[(float(sp_full[p]) > 0 or float(ld_full[p]) > 0) for p in full]]
-    if last_n:
-        full = full[-last_n:]
-    if len(full) == 0:
-        return pd.DataFrame()
-    g = lambda s: s.reindex(full, fill_value=0)
-    spend, leads, netpaid, rev, mrr = g(spend_by), g(leads_by), g(netpaid_by), g(rev_by), g(mrr_by)
-
-    def _row(lbl, sp, ld, npd, rv, mr):
-        cac  = round(sp / npd) if npd else 0
-        arpu = round(mr / npd) if npd else 0
-        return {label_name: lbl, "Spend (₹)": sp, "Leads": ld,
-                "CPL": round(sp / ld) if ld else 0,
-                "Net Paid": npd, "Net Revenue": rv, "MRR": mr,
-                "CAC": cac, "ARPU": arpu,
-                "Payback (mo)": round(cac / arpu) if arpu else 0}
-    rows = [_row(label_fn(p), int(spend[p]), int(leads[p]), int(netpaid[p]),
-                 int(rev[p]), int(mrr[p])) for p in full]
-    rows.append(_row("Total", int(spend.sum()), int(leads.sum()), int(netpaid.sum()),
-                     int(rev.sum()), int(mrr.sum())))
-    return pd.DataFrame(rows)
 
 
 def _mkt_funnel_8w(mkt_df, aia_df, last_n=8):
@@ -1124,8 +1070,9 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
     periods ending at the current one. aia_df / mkt_df are ALREADY channel-filtered by
     the nav (deal_source_group / _MKT.channel); ga_df / cts_df are filtered here by
     sig_labels. MQL/DS/FT/Net Paid are cohort by lead create-period (matches the legacy
-    Weekly Funnel); Net Revenue/MRR/CAC/ARPU reuse the _mkt_breakdown basis. (DC/High PS
-    cohorts dropped — unused since those columns were removed from the tables.)"""
+    Weekly Funnel); Net Revenue/MRR/CAC/ARPU use the same net-of-refunds cohort
+    basis. (DC/High PS cohorts dropped — unused since those columns were removed
+    from the tables.)"""
     cur_p = pd.Timestamp(date.today()).to_period(freq)
     full  = pd.period_range(cur_p - (last_n - 1), cur_p, freq=freq)
     R = lambda s: s.reindex(full, fill_value=0)
@@ -1144,11 +1091,6 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
         return sub.groupby("cperiod")["record_id"].nunique() if len(sub) else pd.Series(dtype=float)
     ds_by  = _coh(aa["ds_date"].notna()) if ("ds_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
     ft_by  = _coh(aa["ft_start_date"].notna()) if ("ft_start_date" in aa.columns and len(aa)) else pd.Series(dtype=float)
-    # Effective No-Show: leads whose CURRENT stage is "Demo No-Show" — a demo was
-    # booked but not attended. Same definition the legacy Weekly Funnel used, kept
-    # as-is so the restored column reconciles with the old table.
-    ns_by  = (_coh(aa["deal_stage"] == "Demo No-Show")
-              if ("deal_stage" in aa.columns and len(aa)) else pd.Series(dtype=float))
     # net paid / revenue / MRR (net of refunds), cohort by create-period
     aa_ok = aa[aa["asked_refund"] != "Yes"] if ("asked_refund" in aa.columns and len(aa)) else aa
     netpaid_by = rev_by = mrr_by = pd.Series(dtype=float)
@@ -1168,7 +1110,6 @@ def _funnel_series(freq, last_n, aia_df, mkt_df, li_df, ga_df, cts_df, sig_label
     return {"full": full, "ga_periods": ga_periods,
             "spend": R(spend_by), "visits": R(visits_by), "leads": R(leads_by),
             "mql": R(mql_by), "ds": R(ds_by), "ft": R(ft_by),
-            "noshow": R(ns_by),
             "netpaid": R(netpaid_by), "netrev": R(rev_by), "mrr": R(mrr_by)}
 
 _MKT_VIEWS = ["Total", "Cost", "Percentages"]
@@ -1187,7 +1128,6 @@ def _mkt_render(fs, view, kind):
     v    = lambda k, p: float(fs[k].get(p, 0) or 0)
     lab  = "Month" if kind == "monthly" else "Week"
     has_visits = kind == "weekly"   # Monthly drops Visits (GA history only ~2 months)
-    has_noshow = kind == "weekly"   # Effective No-Show is a Weekly-Funnel column
     imm = {}   # immature-cohort fade removed per request — no greyed cells
     fd  = lambda stages, i: "cell-faded" if any(i in imm.get(s, ()) for s in stages) else ""
     cnt = lambda x: _grp(int(round(x)))
@@ -1204,15 +1144,14 @@ def _mkt_render(fs, view, kind):
         if tot:
             sp = sum(v("spend", q) for q in full); vi = sum(v("visits", q) for q in full if q in ga)
             le = sum(v("leads", q) for q in full); mq = sum(v("mql", q) for q in full)
-            ds = sum(v("ds", q) for q in full);    ft = sum(v("ft", q) for q in full)
+            ft = sum(v("ft", q) for q in full)
             npd = sum(v("netpaid", q) for q in full); nr = sum(v("netrev", q) for q in full)
-            mr = sum(v("mrr", q) for q in full); ns = sum(v("noshow", q) for q in full)
+            mr = sum(v("mrr", q) for q in full)
             avail = True
         else:
             sp, vi, le, mq = v("spend", p), v("visits", p), v("leads", p), v("mql", p)
-            ds, ft = v("ds", p), v("ft", p)
+            ft = v("ft", p)
             npd, nr, mr = v("netpaid", p), v("netrev", p), v("mrr", p)
-            ns = v("noshow", p)
             avail = p in ga
         r = {}
         if tot:
@@ -1229,7 +1168,6 @@ def _mkt_render(fs, view, kind):
             r["FT"] = (cnt(ft), fd(["ft"], i), "")
             r["Net Paid"] = (cnt(npd), fd(["netpaid"], i), "")
             r["Net Revenue"] = (cnt(nr), fd(["netrev"], i), "")
-            if has_noshow: r["Effective No-Show"] = (cnt(ns), "", "")
             if kind == "monthly":
                 r["MRR"] = (cnt(mr), "", "")
                 cac = round(sp / npd) if npd else None
@@ -1248,18 +1186,12 @@ def _mkt_render(fs, view, kind):
             r["Cost/FT"] = costc(sp, ft, fd(["ft"], i))
             if kind == "monthly":
                 r["CAC"] = costc(sp, npd, fd(["netpaid"], i))
-            # spend burnt on demos that were booked and then not attended
-            if has_noshow: r["Cost/No-Show"] = costc(sp, ns)
         else:  # Percentages — post-MQL stages measured against the MQL (deals) base
             if has_visits:
                 r["Visit→Lead"] = ("—", "", "") if not avail else pctc(le, vi)
             r["Lead→MQL"] = pctc(mq, le)
             r["MQL→FT"] = pctc(ft, mq)
             r["MQL→Paid"] = pctc(npd, mq)
-            # measured against DS, not MQL: a no-show is only possible once a demo
-            # was actually booked, so DS is the denominator that makes it a rate
-            # (against MQL it would just be diluted by leads that never booked)
-            if has_noshow: r["DS→No-Show"] = pctc(ns, ds)
         return r
 
     all_rows = [build(i, p) for i, p in enumerate(full)] + [build(None, None, tot=True)]
@@ -2152,9 +2084,44 @@ def _load_self_ob_sessions():
     read 0 on every row even when an accountant plainly had accepted and
     gone on to integrate.
 
+    chose_self / chose_accountant are NOT the first-question button tap
+    (n8n:tally_owner:self / n8n:tally_owner:accountant) -- a lead can tap
+    BOTH in one session (confirmed on a real 29-Oct session: tapped
+    "accountant", got the accountant form, then also tapped "self" and got
+    the owner setup email), which double-counted that session into both
+    paths and pushed the two percentages past 100% combined. They're also
+    not "who physically connects Tally" -- the Tally connection is always
+    logged against the company's own record regardless of who clicks
+    through, so an accountant-connected company looks identical to a
+    self-connected one there (confirmed: both real integrated companies show
+    the SAME email on the connection as on the original signup, accountant
+    path included). The reliable signal is accountant_invite_sent -- a much
+    LATER event that only fires once the owner has actually filled out and
+    submitted the accountant's contact details, a real invite going out, not
+    just an early tap.
+
+    Three mutually exclusive RAW flags this query returns (a created-account
+    session lands in at most one -- a session with none of the three
+    taps/sends just isn't counted in any, same as before):
+      - chose_accountant (raw): accountant_invite_sent fired (completed the
+        invite). This column alone is NOT what the tracker displays as
+        "Chose Accountant" -- see _self_ob_cohort_render, which widens it to
+        chose_accountant OR accountant_dropped so the displayed column is the
+        funnel's actual ENTRY point into the accountant path (whether or not
+        the invite ever got finished), not a duplicate of "Accountant Invite
+        Sent" one step downstream.
+      - chose_self: tapped the "self" button (owner_setup_email_sent) and
+        never completed an accountant invite. Takes priority over an earlier
+        abandoned accountant tap -- confirmed on the one real session that
+        tapped BOTH buttons, "self" was the later, final action.
+      - accountant_dropped: tapped "accountant" (button_routed ->
+        accountant_form_sent), never tapped "self", never completed the
+        invite -- expressed interest in the accountant path and abandoned it
+        before sending a real invite.
+
     Guarded so a failure just yields an empty frame."""
     cols = ["session_id", "cohort_date", "created_account", "chose_self", "chose_accountant",
-            "accountant_invite_sent", "invite_accepted", "company_uuid"]
+            "accountant_dropped", "accountant_invite_sent", "invite_accepted", "company_uuid"]
     out = pd.DataFrame(columns=cols)
     if not WA_BOT_DATABASE_URL:
         return out
@@ -2199,8 +2166,8 @@ def _load_self_ob_sessions():
                     session_id,
                     MIN(received_at) FILTER (WHERE kind = 'signup_intent_flow_sent') AS lead_at,
                     (MAX(CASE WHEN kind = 'flow_submitted' AND outcome = 'created' THEN 1 ELSE 0 END) = 1) AS created_account,
-                    (MAX(CASE WHEN kind = 'owner_setup_email_sent' THEN 1 ELSE 0 END) = 1) AS chose_self,
-                    (MAX(CASE WHEN kind = 'button_routed' AND to_step = 'accountant_form_sent' THEN 1 ELSE 0 END) = 1) AS chose_accountant,
+                    (MAX(CASE WHEN kind = 'owner_setup_email_sent' THEN 1 ELSE 0 END) = 1) AS tapped_self,
+                    (MAX(CASE WHEN kind = 'button_routed' AND to_step = 'accountant_form_sent' THEN 1 ELSE 0 END) = 1) AS tapped_accountant,
                     (MAX(CASE WHEN kind = 'accountant_invite_sent' THEN 1 ELSE 0 END) = 1) AS accountant_invite_sent,
                     MAX(company_uuid) AS company_uuid,
                     MAX(phone_e164) AS phone_e164
@@ -2209,7 +2176,11 @@ def _load_self_ob_sessions():
                 HAVING MIN(received_at) FILTER (WHERE kind = 'signup_intent_flow_sent') IS NOT NULL
             )
             SELECT
-                sb.session_id, sb.lead_at, sb.created_account, sb.chose_self, sb.chose_accountant,
+                sb.session_id, sb.lead_at, sb.created_account,
+                (sb.created_account AND NOT sb.accountant_invite_sent AND sb.tapped_self) AS chose_self,
+                sb.accountant_invite_sent AS chose_accountant,
+                (sb.created_account AND NOT sb.accountant_invite_sent AND NOT sb.tapped_self
+                 AND sb.tapped_accountant) AS accountant_dropped,
                 sb.accountant_invite_sent,
                 (a.owner_phone IS NOT NULL AND a.accepted_at >= sb.lead_at) AS invite_accepted,
                 sb.company_uuid
@@ -2279,19 +2250,34 @@ def _self_ob_cohort_render(sessions_df, tally_df, view="Total"):
     today, every column a TRUE lagging indicator -- attributed back to the
     day the lead first messaged, no matter how many days later each later
     step actually happened. Columns: Form Sent, Signup Completed, Chose
-    Self, Self Integrated, Chose Accountant, Accountant Invite Sent,
-    Invite Accepted, Accountant Integrated, Total Integrated.
+    Self, Self Integrated, Chose Accountant, Accountant Dropped,
+    Accountant Invite Sent, Invite Accepted, Accountant Integrated,
+    Total Integrated.
 
     `view` is the shared page-level Total/Cost/Percentages dropdown (same
     one the UTM Source Cohort table follows). view == "Percentages" shows
     every column EXCEPT Form Sent as a percentage of its real parent stage
-    (not just "the column to its left" -- Chose Self and Chose Accountant
-    are parallel branches off Signup Completed, not sequential to each
-    other, so both divide by Signup Completed; Total Integrated divides by
-    Form Sent, the funnel's true start). Any other view shows plain counts,
-    no percentages. A cell whose raw count is 0 is greyed/italic
-    (cell-zero) either way, so real numbers stand out -- this takes
-    priority over the group color below.
+    (not just "the column to its left"):
+      - Chose Self and Chose Accountant are parallel branches off Signup
+        Completed, so both divide by Signup Completed; Total Integrated
+        divides by Signup Completed too, not Form Sent.
+      - Chose Accountant here is the WIDENED entry signal into that path
+        (chose_accountant OR accountant_dropped from _load_self_ob_sessions)
+        -- everyone who showed accountant intent, whether or not they ever
+        finished sending the invite. Accountant Dropped and
+        Accountant Invite Sent are BOTH measured against that same Chose Accountant
+        base (not Signup Completed), so they're the two ways that intent can
+        resolve and read as real conversion rates (sending the invite is no
+        longer trivially 100% of itself).
+    Any other view shows plain counts, no percentages. A cell whose raw
+    count is 0 is greyed/italic (cell-zero) either way, so real numbers
+    stand out -- this takes priority over the group color below.
+
+    Percentages view also RENAMES each ratio column to an arrow label (e.g.
+    "Signup→Self") naming its actual numerator/denominator, same convention
+    as Monthly Performance's Percentages view -- Total/Cost view keeps the
+    plain funnel-step names. hdr_groups below lists both name sets so the
+    header-band colours still apply whichever is showing.
 
     The two path groups' HEADERS are banded in a shared colour (hdr-self
     blue, hdr-acct orange) so the two funnels are visually distinguishable
@@ -2306,7 +2292,7 @@ def _self_ob_cohort_render(sessions_df, tally_df, view="Total"):
     today = pd.Timestamp.today().normalize()
     sdf = sessions_df if (sessions_df is not None and len(sessions_df)) else pd.DataFrame(
         columns=["session_id", "cohort_date", "created_account", "chose_self", "chose_accountant",
-                 "accountant_invite_sent", "invite_accepted", "company_uuid"])
+                 "accountant_dropped", "accountant_invite_sent", "invite_accepted", "company_uuid"])
     tdf = tally_df if (tally_df is not None and len(tally_df)) else pd.DataFrame(
         columns=["company_uuid", "company_name", "email", "phone"])
     integrated_uuids = set(tdf["company_uuid"].dropna()) if len(tdf) else set()
@@ -2322,17 +2308,24 @@ def _self_ob_cohort_render(sessions_df, tally_df, view="Total"):
         acct_integ = g.loc[g["chose_accountant"] & g["integrated"], "company_uuid"]
         tot_integ = g.loc[g["integrated"], "company_uuid"]
         contacts = tot_integ.map(lambda u: contact_by_uuid.get(u, u)).unique().tolist()
+        # "Chose Accountant" is the BROAD entry signal into that path -- anyone
+        # who either completed the invite OR tapped accountant and dropped off
+        # before finishing it. accountant_invite_sent alone would make this
+        # column identical to "Accountant Invite Sent" (always 100% of it),
+        # which is what accountant_dropped folds back in here to fix.
+        chose_acct_wide = int((g["chose_accountant"] | g["accountant_dropped"]).sum())
         return {
             "leads": len(g), "accounts": int(g["created_account"].sum()),
-            "chose_self": int(g["chose_self"].sum()), "chose_acct": int(g["chose_accountant"].sum()),
+            "chose_self": int(g["chose_self"].sum()), "chose_acct": chose_acct_wide,
+            "acct_dropped": int(g["accountant_dropped"].sum()),
             "invite_sent": int(g["accountant_invite_sent"].sum()),
             "invite_accepted": int(g["invite_accepted"].sum()),
             "self_integrated": self_integ.nunique(), "acct_integrated": acct_integ.nunique(),
             "total_integrated": tot_integ.nunique(), "contacts": "\n".join(contacts),
         }
 
-    _EMPTY_AGG = {"leads": 0, "accounts": 0, "chose_self": 0, "chose_acct": 0, "invite_sent": 0,
-                  "invite_accepted": 0, "self_integrated": 0, "acct_integrated": 0,
+    _EMPTY_AGG = {"leads": 0, "accounts": 0, "chose_self": 0, "chose_acct": 0, "acct_dropped": 0,
+                  "invite_sent": 0, "invite_accepted": 0, "self_integrated": 0, "acct_integrated": 0,
                   "total_integrated": 0, "contacts": ""}
     by_day = {day: _agg(g) for day, g in sdf.groupby("cohort_date")} if len(sdf) else {}
     pct_view = (view == "Percentages")
@@ -2347,15 +2340,27 @@ def _self_ob_cohort_render(sessions_df, tally_df, view="Total"):
 
     def _row(label, agg):
         r = {"Day": (label, "", ""), "Form Sent": (agg["leads"], "cell-zero" if agg["leads"] == 0 else "", "")}
-        r["Signup Completed"]       = _cell(agg["accounts"], agg["leads"])
-        r["Chose Self"]             = _cell(agg["chose_self"], agg["accounts"])
-        r["Self Integrated"]        = _cell(agg["self_integrated"], agg["chose_self"])
-        r["Chose Accountant"]       = _cell(agg["chose_acct"], agg["accounts"])
-        r["Accountant Invite Sent"] = _cell(agg["invite_sent"], agg["chose_acct"])
-        r["Invite Accepted"]        = _cell(agg["invite_accepted"], agg["invite_sent"])
-        r["Accountant Integrated"]  = _cell(agg["acct_integrated"], agg["invite_accepted"])
-        tot_val, tot_cls, _ = _cell(agg["total_integrated"], agg["leads"])
-        r["Total Integrated"] = (tot_val, tot_cls, agg["contacts"])
+        tot_val, tot_cls, _ = _cell(agg["total_integrated"], agg["accounts"])
+        if pct_view:
+            r["Form→Signup"]         = _cell(agg["accounts"], agg["leads"])
+            r["Signup→Self"]         = _cell(agg["chose_self"], agg["accounts"])
+            r["Self→Integrated"]     = _cell(agg["self_integrated"], agg["chose_self"])
+            r["Signup→Accountant"]   = _cell(agg["chose_acct"], agg["accounts"])
+            r["Accountant→Dropped"]  = _cell(agg["acct_dropped"], agg["chose_acct"])
+            r["Accountant→Invite"]   = _cell(agg["invite_sent"], agg["chose_acct"])
+            r["Invite→Accepted"]     = _cell(agg["invite_accepted"], agg["invite_sent"])
+            r["Accepted→Integrated"] = _cell(agg["acct_integrated"], agg["invite_accepted"])
+            r["Signup→Integrated"]   = (tot_val, tot_cls, agg["contacts"])
+        else:
+            r["Signup Completed"]       = _cell(agg["accounts"], agg["leads"])
+            r["Chose Self"]             = _cell(agg["chose_self"], agg["accounts"])
+            r["Self Integrated"]        = _cell(agg["self_integrated"], agg["chose_self"])
+            r["Chose Accountant"]       = _cell(agg["chose_acct"], agg["accounts"])
+            r["Accountant Dropped"]     = _cell(agg["acct_dropped"], agg["chose_acct"])
+            r["Accountant Invite Sent"] = _cell(agg["invite_sent"], agg["chose_acct"])
+            r["Invite Accepted"]        = _cell(agg["invite_accepted"], agg["invite_sent"])
+            r["Accountant Integrated"]  = _cell(agg["acct_integrated"], agg["invite_accepted"])
+            r["Total Integrated"] = (tot_val, tot_cls, agg["contacts"])
         return r
 
     n_days = (today - _SELF_OB_START).days + 1
@@ -2384,11 +2389,216 @@ def _self_ob_cohort_render(sessions_df, tally_df, view="Total"):
             tip_cols[c] = c + "__tip"
     df = pd.DataFrame(disp)
     hdr_groups = {"Chose Self": "hdr-self", "Self Integrated": "hdr-self",
-                  "Chose Accountant": "hdr-acct", "Accountant Invite Sent": "hdr-acct",
-                  "Invite Accepted": "hdr-acct", "Accountant Integrated": "hdr-acct"}
+                  "Chose Accountant": "hdr-acct", "Accountant Dropped": "hdr-acct",
+                  "Accountant Invite Sent": "hdr-acct",
+                  "Invite Accepted": "hdr-acct", "Accountant Integrated": "hdr-acct",
+                  "Signup→Self": "hdr-self", "Self→Integrated": "hdr-self",
+                  "Signup→Accountant": "hdr-acct", "Accountant→Dropped": "hdr-acct",
+                  "Accountant→Invite": "hdr-acct",
+                  "Invite→Accepted": "hdr-acct", "Accepted→Integrated": "hdr-acct"}
     return grid_payload_b64(df, "Day", autosize=True, center_all=True, no_sort=True, sortable=False,
                             class_cols=class_cols or None, tip_cols=tip_cols or None,
-                            heat_cols={"Total Integrated": "green"}, hdr_class_cols=hdr_groups)
+                            heat_cols={"Total Integrated": "green", "Signup→Integrated": "green"},
+                            hdr_class_cols=hdr_groups)
+
+# ── WA Agent Reply Tracker (Marketing page) ───────────────────────────────
+# Per exports/GM WhatsApp Agent Data Dictionary for Dashboards.pdf. The GM
+# WhatsApp Agent went live 27 Oct 2026, 6:40pm IST (2026-10-27 13:10:00+00) --
+# the dictionary's own hard floor for every query against these tables, so
+# this tracker only covers leads from that point on; it does not reconstruct
+# the pre-agent (GM-only) era, which isn't described anywhere in that
+# document.
+_WA_AGENT_LIVE_AT    = "2026-10-27 13:10:00+00"
+_WA_AGENT_START      = pd.Timestamp("2026-10-27")   # IST calendar day of go-live
+_WA_AGENT_TEST_PHONE = "917057887169"
+_WA_AGENT_ENGAGED_STAGES = (
+    "Demo Scheduled", "Free Trial Scheduled", "Demo Conducted", "Demo No-Show",
+    "Free Trial Started", "Free Trial Blocked", "Integration Done",
+    "Integration Failed", "High Intent", "Acquired", "Payment Done")
+_WA_AGENT_ENGAGED_STAGES_SQL = ",".join(
+    "'" + s.replace("'", "''") + "'" for s in _WA_AGENT_ENGAGED_STAGES)
+
+def _load_wa_agent_reply():
+    """One row per lead enrolled in the GM WhatsApp Agent ("AI SDR - Ultimate
+    Master", bucket='FreeTrialNew'), from go-live onward. Mirrors the data
+    dictionary's own "Funnel by signup day" query (same exclusions, same
+    `engaged` definition) but only pulls what _wa_agent_reply_render needs --
+    Replied / Median reply time / Never answered are computed against
+    lr_wa_logs in pandas instead (see _wa_agent_reply_events), not here.
+
+    ft_at (first_touch_gm send time) is the funnel's anchor. A lead with no
+    ft_at was never messaged (PLG / instant-demo / GM-messaged-first signups
+    all skip first touch -- "expected", per the dictionary's own gotchas) --
+    it's KEPT here and still counts toward Leads, same as the dictionary's
+    leads_in, but contributes nothing to Replied/reply-time since there's no
+    first message to measure from (_wa_agent_reply_render skips it there via
+    the ft_at NaT check). It can still show engaged=True independently (e.g.
+    a GM who messaged the lead directly, flagged via agent_flags.engaged_by).
+
+    engaged follows the dictionary's definition exactly: agent_flags.
+    engaged_by is agent/gm, OR a lr_meetings booking after ft_at, OR a
+    hubspot_deal_logs stage move into _WA_AGENT_ENGAGED_STAGES after ft_at
+    (minus a 1-hour grace window, same as the dictionary -- a stage move can
+    log slightly before the triggering message due to webhook lag).
+
+    Guarded so a failure just yields an empty frame."""
+    cols = ["id", "cohort_date", "chat", "org", "ft_at", "engaged"]
+    out = pd.DataFrame(columns=cols)
+    if not SUPABASE_URL:
+        return out
+    try:
+        df = _q(SUPABASE_URL, rf"""
+            WITH leads AS (
+                SELECT um.id, um.created_at, um.agent_chat_id AS chat,
+                       um.agent_org_phone AS org, um.lead_phone, um.hubspot_deal_id,
+                       um.agent_flags,
+                       (SELECT MIN(c."timestamp") FROM "AI SDR - Conversations" c
+                        WHERE c.deal_id = um.id AND c.campaign_name = 'first_touch_gm'
+                          AND c.delivery_status = 'sent') AS ft_at
+                FROM "AI SDR - Ultimate Master" um
+                WHERE um.bucket = 'FreeTrialNew'
+                  AND um.created_at >= timestamptz '{_WA_AGENT_LIVE_AT}'
+                  AND um.lead_phone <> '{_WA_AGENT_TEST_PHONE}'
+                  AND coalesce(um.agent_close_reason, '') <> 'duplicate_row'
+            )
+            SELECT l.id,
+                   (l.created_at AT TIME ZONE 'Asia/Kolkata')::date AS cohort_date,
+                   l.chat, l.org,
+                   (l.ft_at AT TIME ZONE 'Asia/Kolkata') AS ft_at,
+                   (coalesce(l.agent_flags->>'engaged_by','') IN ('agent','gm')
+                    OR EXISTS (SELECT 1 FROM public.lr_meetings m
+                               WHERE m.lead_phone10 = right(regexp_replace(coalesce(l.lead_phone,''),'\D','','g'),10)
+                                 AND m.created_at > l.ft_at)
+                    OR EXISTS (SELECT 1 FROM public.hubspot_deal_logs h
+                               WHERE h.record_id = l.hubspot_deal_id::text
+                                 AND h.updated_at > l.ft_at - interval '1 hour'
+                                 AND h.deal_stage IN ({_WA_AGENT_ENGAGED_STAGES_SQL}))
+                   ) AS engaged
+            FROM leads l
+        """, statement_timeout_ms=25000)
+        if len(df):
+            df["cohort_date"] = pd.to_datetime(df["cohort_date"]).dt.normalize()
+            df["ft_at"] = pd.to_datetime(df["ft_at"], errors="coerce")
+            df["engaged"] = df["engaged"].astype(bool)
+        out = df
+    except Exception as ex:
+        print(f"[WARN] WA Agent Reply Tracker (AI SDR - Ultimate Master) load failed: {ex} -- using empty frame")
+    return out
+
+_WA_AGENT_PREFILL_RE = re.compile(r"just signed up for the ai accountant free trial", re.IGNORECASE)
+
+def _wa_agent_reply_events(g):
+    """Within one lead's lr_wa_logs slice `g` (sent_ist-ordered, already bounded
+    to (ft_at, cutoff]), walk messages and emit one (opened_ist, replied_ist)
+    pair per genuine lead message that needed answering -- replied_ist is NaT
+    if still open when the slice ends (i.e. unanswered by the cutoff).
+    The pre-filled "just signed up..." text (sent by the website popup, not
+    typed by the lead) never opens an item -- same exclusion as the data
+    dictionary's own `replied` definition. Unlike _wa_reply_events (GM-only
+    TAT), ANY outbound message closes a pending item here: an automated agent
+    reply is a real answer for this tracker, not a non-event."""
+    events = []
+    pending = None
+    for r in g.itertuples(index=False):
+        if not r.is_outbound:
+            if _WA_AGENT_PREFILL_RE.search(r.body or ""):
+                continue
+            if pending is None:
+                pending = r.sent_ist
+        elif pending is not None:
+            events.append((pending, r.sent_ist))
+            pending = None
+    if pending is not None:
+        events.append((pending, pd.NaT))
+    return events
+
+def _wa_agent_reply_render(leads_df, wa_log, view="Total"):
+    """WA Agent Reply Tracker (Marketing page): one row per signup day (IST)
+    since the GM WhatsApp Agent's go-live (27 Oct 2026, 6:40pm IST), per
+    exports/GM WhatsApp Agent Data Dictionary for Dashboards.pdf. Leads and
+    Engaged come straight from _load_wa_agent_reply (SQL); Delivered / Replied
+    are computed here -- Delivered = leads with a non-null ft_at (the first
+    message sent successfully, delivery_status='sent' -- we don't have a true
+    WhatsApp delivery-receipt tick separate from "sent", so this is "message
+    went out OK", not "confirmed read on the device"); Replied walks each
+    lead's lr_wa_logs messages from its first-touch send onward.
+
+    `view` is the shared page-level Total/Cost/Percentages dropdown (same one
+    Self Onboarding Tracker follows): Total shows plain counts; Percentages
+    shows Delivered as a % of Leads, and Replied/Engaged as a % of Delivered
+    (not Leads) -- so the rate reflects people who were actually reachable,
+    not diluted by signups who were never messaged at all (PLG / instant-demo
+    / GM-messaged-first).
+
+    A LAGGING indicator, same pattern as Self Onboarding Tracker: no fixed
+    cutoff -- a day's numbers keep updating for as long as that day's leads
+    keep getting replies, however many days it takes, rather than freezing at
+    a fixed point next-day morning. Blank grid (not an error) when there's no
+    data yet."""
+    pct_view = (view == "Percentages")
+    ldf = leads_df if (leads_df is not None and len(leads_df)) else pd.DataFrame(
+        columns=["id", "cohort_date", "chat", "org", "ft_at", "engaged"])
+    log = wa_log if (wa_log is not None and len(wa_log)) else pd.DataFrame(
+        columns=["chat_id", "org_phone", "is_outbound", "sent_ist", "body"])
+    log_by_pair = ({k: g.sort_values("sent_ist") for k, g in log.groupby(["chat_id", "org_phone"])}
+                   if len(log) else {})
+
+    def _agg_lead(row):
+        replied = False
+        g = log_by_pair.get((row["chat"], row["org"]))
+        if g is not None and pd.notna(row["ft_at"]):
+            gg = g[g["sent_ist"] > row["ft_at"]]
+            for _opened, _answered in _wa_agent_reply_events(gg):
+                replied = True
+        return pd.Series({"replied": replied})
+
+    if len(ldf):
+        extra = ldf.apply(_agg_lead, axis=1)
+        ldf = pd.concat([ldf.reset_index(drop=True), extra.reset_index(drop=True)], axis=1)
+    else:
+        ldf = ldf.copy()
+        ldf["replied"] = []
+    ldf["delivered"] = ldf["ft_at"].notna() if len(ldf) else []
+
+    def _cell(n, base):
+        if pct_view:
+            val = f"{round(n / base * 100, 1)}%" if base else "0.0%"
+        else:
+            val = n
+        return (val, "cell-zero" if n == 0 else "", "")
+
+    def _row(label, g):
+        leads = len(g)
+        delivered = int(g["delivered"].sum()) if leads else 0
+        replied = int(g["replied"].sum()) if leads else 0
+        engaged = int(g["engaged"].sum()) if leads else 0
+        r = {"Day": (label, "", "")}
+        r["Leads"] = (leads, "cell-zero" if leads == 0 else "", "")
+        r["Delivered"] = _cell(delivered, leads)
+        r["Replied"] = _cell(replied, delivered)
+        r["Engaged"] = _cell(engaged, delivered)
+        return r
+
+    today = pd.Timestamp.today().normalize()
+    n_days = (today - _WA_AGENT_START).days + 1
+    rows = []
+    for i in range(max(n_days, 1)):
+        d = today - pd.Timedelta(days=i)
+        g = ldf[ldf["cohort_date"] == d] if len(ldf) else ldf
+        rows.append(_row(d.strftime("%d %b"), g))
+    rows.append(_row("Total", ldf))
+
+    cols = list(rows[0].keys())
+    disp, class_cols = {}, {}
+    for c in cols:
+        disp[c] = [r[c][0] for r in rows]
+        clv = [r[c][1] for r in rows]
+        if any(clv):
+            disp[c + "__cls"] = clv
+            class_cols[c] = c + "__cls"
+    df = pd.DataFrame(disp)
+    return grid_payload_b64(df, "Day", autosize=True, center_all=True, no_sort=True, sortable=False,
+                            class_cols=class_cols or None)
 
 def _prep_gm_slots(df):
     """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
@@ -2622,6 +2832,7 @@ _CLICKS = _prep_clicks(_load_clicks())
 _SELF_OB_SESSIONS = _load_self_ob_sessions()
 _TALLY_CONNECTED = _load_tally_connected(
     _SELF_OB_SESSIONS["company_uuid"].dropna().unique() if len(_SELF_OB_SESSIONS) else [])
+_WA_AGENT_REPLY_LEADS = _load_wa_agent_reply()
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -3007,7 +3218,7 @@ def _reload_data():
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _ACCT_PHONE, _CONTACT_ID, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
-    global _SELF_OB_SESSIONS, _TALLY_CONNECTED
+    global _SELF_OB_SESSIONS, _TALLY_CONNECTED, _WA_AGENT_REPLY_LEADS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -3020,6 +3231,7 @@ def _reload_data():
     _SELF_OB_SESSIONS = _load_self_ob_sessions()
     _TALLY_CONNECTED = _load_tally_connected(
         _SELF_OB_SESSIONS["company_uuid"].dropna().unique() if len(_SELF_OB_SESSIONS) else [])
+    _WA_AGENT_REPLY_LEADS = _load_wa_agent_reply()
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -3619,12 +3831,7 @@ def _aia_ops_refresh(state):
     _ev_lu_ft = _recent_event_lookup()
     _ft_act_cache = {}
     def _ft_activated_acct(acct):
-        if not acct:
-            return False
-        if acct not in _ft_act_cache:
-            _, _streak, _, _ = _usage_28(None, _ev_lu_ft, acct=acct)
-            _ft_act_cache[acct] = _real_usage_days_from_streak(_streak) >= 2
-        return _ft_act_cache[acct]
+        return _ft_activated(acct, _ev_lu_ft, _ft_act_cache)
     def _ft_activated_email(em):
         if pd.isna(em):
             return False
@@ -5163,13 +5370,14 @@ def on_mkt_sig_date(state):
     _daily_signals_refresh(state)
 
 def _make_cost_trend(x, spend, series):
-    """Two-line monthly ₹-cost trend. `series` = [(name, denominators, word, colour)];
-    each line is spend ÷ denominator for that month.
+    """Two-line ₹-cost trend over whatever periods `x` names (currently weekly,
+    Mon-Sun, trailing 12 weeks). `series` = [(name, denominators, word, colour)];
+    each line is spend ÷ denominator for that period.
 
-    Every denominator is a COHORT count — of the leads created that month, how many
-    later reached the stage — so all lines lag, matching Monthly Performance rather
-    than the period-in basis this chart used before. A month with no denominator
-    plots as a gap, not ₹0, so an empty stage doesn't read as free.
+    Every denominator is a COHORT count — of the leads created that period, how
+    many later reached the stage — so all lines lag, matching the funnel tables
+    rather than a period-in basis. A period with no denominator plots as a gap,
+    not ₹0, so an empty stage doesn't read as free.
     Each point carries a rounded-₹ label; hover shows ₹spend ÷ count = ₹value."""
     vals_all = [[round(s / d) if d else None for s, d in zip(spend, den)]
                 for _n, den, _w, _c in series]
@@ -5387,46 +5595,6 @@ def _mkt_refresh(state):
     else:
         state.mkt_cta_fig = go.Figure()
 
-    # Monthly Performance — trailing 12 months (rolling window ending this month)
-    mdf = _mkt_breakdown(_mkt_full, aia_base, li_full, "M", "Month",
-                         lambda p: p.strftime("%b %y"), last_n=12)
-
-    # Trend charts — all four lines are lagging/cohort: the denominators count the
-    # leads CREATED that month which later reached the stage, so they line up with
-    # Monthly Performance. (Cost/DC used to divide by DCs that HAPPENED that month,
-    # which quietly disagreed with the table above it — e.g. Jul-26 read 5,664 on
-    # the chart vs 6,456 in the table.) Built from mdf before the table renames
-    # Leads/CPL; mdf already carries the cohort Leads and Net Paid we need.
-    if len(mdf):
-        chart = mdf[mdf["Month"] != "Total"].rename(columns={"Spend (₹)": "Spend"}).copy()
-        _ac = aia_base.dropna(subset=["create_date"]).copy() if "create_date" in aia_base.columns else aia_base.iloc[0:0].copy()
-        if len(_ac):
-            _ac["_cp"] = _ac["create_date"].dt.to_period("M")
-        _coh_n = lambda mask: (_ac[mask].groupby("_cp")["record_id"].nunique()
-                               if len(_ac) else pd.Series(dtype=float))
-        _dc_by = _coh_n(_ac["dc_date"].notna()) if len(_ac) else pd.Series(dtype=float)
-        _hp_by = (_coh_n(_ac["dc_date"].notna() & (_ac["prospect_score"] >= 60))
-                  if len(_ac) else pd.Series(dtype=float))
-        _per = [pd.Period(pd.to_datetime(mth, format="%b %y"), freq="M") for mth in chart["Month"]]
-        x     = chart["Month"].tolist()
-        spend = [int(v) for v in chart["Spend"].tolist()]
-        mqln  = [int(v) for v in chart["Leads"].tolist()]        # cohort: created that month
-        npd   = [int(v) for v in chart["Net Paid"].tolist()]     # cohort: of those, paid
-        dcn   = [int(_dc_by.get(p, 0)) for p in _per]
-        hpn   = [int(_hp_by.get(p, 0)) for p in _per]
-        state.mkt_cpl_fig = _make_cost_trend(x, spend, [
-            ("Cost/MQL", mqln, "MQL", "#1a7fc4"),
-            ("Cost/DC",  dcn,  "DC",  "#ed7d31")])
-        # Green/purple rather than anything red: red is reserved for the tables'
-        # CAC heat scale (magnitude), and red-vs-green is the classic colourblind
-        # collision — this pair separates at ΔE 20.0 under deuteranopia.
-        state.mkt_hps_cac_fig = _make_cost_trend(x, spend, [
-            ("Cost/High PS", hpn, "High PS", "#2e9e6b"),
-            ("CAC",          npd, "paid",    "#7e57c2")])
-    else:
-        state.mkt_cpl_fig = go.Figure()
-        state.mkt_hps_cac_fig = go.Figure()
-
     # Redesigned funnel tables (Monthly 12M + Weekly 8W) sharing the Total/Cost/% view.
     # Channel: map the nav deal_source_group picks onto the sig session/contact buckets
     # (Google Ads->Google, …); unmapped picks (Referral/Others) contribute no sessions/
@@ -5438,6 +5606,48 @@ def _mkt_refresh(state):
     _fs_w = _funnel_series("W", 8,  aia_base, _mkt_full, li_full, _GA, _CONTACTS, _sig_labels)
     state.mkt_monthly_json = _mkt_render(_fs_m, _view, "monthly")
     state.mkt_weekly_json  = _mkt_render(_fs_w, _view, "weekly")
+
+    # Cost trend charts (Cost/MQL vs Cost/FT Started, Cost/Activated vs CAC) --
+    # weekly (Mon-Sun), trailing 12 weeks. Spend/MQL/Net Paid are cohort-by-week
+    # from _funnel_series, same basis as the Weekly Funnel (8W) table above, just
+    # a longer trailing window. FT Started/Activated use the SAME account-level
+    # definition as AIA Ops's New Integrations vs Activated trend (_INTEG_FUNNEL
+    # + _ft_activated: first-ever successful integration per account, Activated =
+    # currently has >=2 real-usage days in the last 28) -- not a deal-level CRM
+    # field -- so these numbers always reconcile with AIA Ops. Like that trend,
+    # this is account/email-level and intentionally ignores the page's Channel/
+    # UTM Campaign/Deal Name filters.
+    _fs_cw   = _funnel_series("W", 12, aia_base, _mkt_full, li_full, _GA, _CONTACTS, _sig_labels)
+    _wk_full = _fs_cw["full"]
+    x     = [p.start_time.strftime("%d-%b") for p in _wk_full]
+    spend = [int(v) for v in _fs_cw["spend"].tolist()]
+    mqln  = [int(v) for v in _fs_cw["mql"].tolist()]        # cohort: created that week
+    npd   = [int(v) for v in _fs_cw["netpaid"].tolist()]    # cohort: of those, paid
+
+    _fn_cw = _INTEG_FUNNEL
+    if _fn_cw is not None and len(_fn_cw):
+        _fn_cw = _fn_cw.copy()
+        _fn_cw["_wp"] = pd.to_datetime(_fn_cw["day"]).dt.to_period("W")
+        _ev_lu_cw = _recent_event_lookup()
+        _ft_act_cache_cw = {}
+        _fn_cw["_act"] = _fn_cw["acct"].map(lambda a: _ft_activated(a, _ev_lu_cw, _ft_act_cache_cw))
+        _ft_by_wk  = _fn_cw.groupby("_wp").size()
+        _act_by_wk = (_fn_cw[_fn_cw["_act"]].groupby("_wp").size()
+                      if _fn_cw["_act"].any() else pd.Series(dtype=float))
+    else:
+        _ft_by_wk = pd.Series(dtype=float); _act_by_wk = pd.Series(dtype=float)
+    ftn  = [int(_ft_by_wk.get(p, 0)) for p in _wk_full]
+    actn = [int(_act_by_wk.get(p, 0)) for p in _wk_full]
+
+    state.mkt_cpl_fig = _make_cost_trend(x, spend, [
+        ("Cost/MQL", mqln, "MQL", "#1a7fc4"),
+        ("Cost/FT Started", ftn, "FT Started", "#ed7d31")])
+    # Green/purple rather than anything red: red is reserved for the tables'
+    # CAC heat scale (magnitude), and red-vs-green is the classic colourblind
+    # collision — this pair separates at ΔE 20.0 under deuteranopia.
+    state.mkt_hps_cac_fig = _make_cost_trend(x, spend, [
+        ("Cost/Activated", actn, "Activated", "#2e9e6b"),
+        ("CAC",            npd,  "paid",      "#7e57c2")])
 
     # UTM Source Cohort (moved from AIA Ops) — same period-in cohort logic, over the
     # SHARED ops date range (aia_start/end), sourced from the marketing-filtered
@@ -5486,6 +5696,12 @@ def _mkt_refresh(state):
     # (8W)), but DOES follow the shared Total/Percentages view (_view) like
     # the UTM Source Cohort table.
     state.self_ob_json = _self_ob_cohort_render(_SELF_OB_SESSIONS, _TALLY_CONNECTED, _view)
+
+    # WA Agent Reply Tracker -- also independent of this page's own date
+    # range/channel filters, but DOES follow the shared Total/Percentages
+    # view (_view) like Self Onboarding Tracker and the UTM Source Cohort
+    # table.
+    state.wa_agent_reply_json = _wa_agent_reply_render(_WA_AGENT_REPLY_LEADS, _WA_LOG, _view)
 
     _daily_signals_refresh(state)   # Daily-signals cards follow the nav channel filter too
 
@@ -6330,8 +6546,25 @@ self_ob_tip = ("Self Onboarding Tracker\n"
                "• Each row = the day a lead first messaged the WhatsApp bot.\n"
                "• Each column counts what that same group of leads did later, even if it took many days.\n"
                "• Numbers are lagging indicators tied to the signup day, not the day each step happened.\n"
+               "• Accountant Dropped = chose accountant but didn't fill in their details.\n"
                "• Greyed-out 0 = nothing happened yet, not an error.\n"
                "• Hover Total Integrated for each company's phone and email.")
+wa_agent_reply_json=""
+wa_agent_reply_tip = ("WA Agent Reply Tracker\n"
+               "• Each row = the day a lead signed up.\n"
+               "• Numbers are lagging indicators tied to the signup day, not the day\n"
+               "  each reply/engagement happened -- they keep updating as more comes in.\n"
+               "• Delivered = the first WhatsApp message went out OK (not that it was\n"
+               "  confirmed read -- we don't track that separately from 'sent').\n"
+               "• Replied / Engaged are measured against Delivered, not Leads, in\n"
+               "  Percentages view -- some leads never get messaged at all (PLG signups,\n"
+               "  instant-demo requests), so judging reply rate against everyone who\n"
+               "  signed up would understate it.\n"
+               "• Replied = the lead sent a real message back (not the auto-filled\n"
+               "  signup text the website sends on their behalf).\n"
+               "• Engaged = the lead agreed a specific call/demo time, with the GM or\n"
+               "  the agent.\n"
+               "• Covers signups from the agent's go-live, 27 Oct 2026 6:40pm IST, onward.")
 mkt_cta_fig=go.Figure()
 mkt_hps_cac_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""

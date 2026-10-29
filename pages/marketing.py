@@ -48,6 +48,15 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
+**WA Agent Reply Tracker** <|ⓘ|text|hover_text={wa_agent_reply_tip}|class_name=info-ico|>
+
+<|part|class_name=gridholder gridholder-wa_agent_reply|
+<|{wa_agent_reply_json}|text|mode=raw|>
+|>
+<iframe src="/grid/wa_agent_reply" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
 **CTA Click Trend** <|ⓘ|text|hover_text={mkt_cta_tip}|class_name=info-ico|>
 
 <|chart|figure={mkt_cta_fig}|plot_config={chart_config}|>
@@ -85,12 +94,12 @@ MARKETING_PAGE = """
 
 <|layout|columns=1 1|gap=16px|
 <|part|class_name=chart-card|
-**Cost Per MQL vs Cost Per DC Trend**
+**Cost Per MQL vs Cost Per FT Started Trend**  *(weekly, Mon-Sun, last 12 weeks)*
 
 <|chart|figure={mkt_cpl_fig}|plot_config={chart_config}|>
 |>
 <|part|class_name=chart-card|
-**Cost Per High PS vs CAC Trend**
+**Cost Per Activated vs CAC Trend**  *(weekly, Mon-Sun, last 12 weeks)*
 
 <|chart|figure={mkt_hps_cac_fig}|plot_config={chart_config}|>
 |>
