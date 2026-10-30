@@ -2600,6 +2600,257 @@ def _wa_agent_reply_render(leads_df, wa_log, view="Total"):
     return grid_payload_b64(df, "Day", autosize=True, center_all=True, no_sort=True, sortable=False,
                             class_cols=class_cols or None)
 
+# ── Instant Demo Funnel Tracker (Marketing page) ──────────────────────────
+# Per exports/Instant Demo and Round Robin Data Reference.pdf. Built against
+# the Supabase project the doc describes (qmaphtslnvvifkzmbrvh), same
+# connection as SUPABASE_URL. One row per day, built with Shyam/Rohan/Akshay
+# in the #instant-demo channel -- matches the manual EOD counts they've been
+# posting (verified: exact match on Clicked/Meetings Created for 29 Oct; a
+# couple of counts land within 1-3 of their manual tally elsewhere, expected
+# since theirs is hand-counted and Rohan himself flagged some days as having
+# gaps/"possible glitch").
+_INSTANT_DEMO_START = pd.Timestamp("2026-10-23")   # meta-B's own go-live; other
+                                                    # pages followed 27 Oct, per the doc.
+
+def _load_instant_demo_funnel():
+    """One row per lead who saw the "Start Instant Demo" card (the real funnel
+    start -- Kethan: don't start from total leads, start from who saw the
+    card), with every downstream flag needed to bucket them. Test leads
+    excluded per the doc's own rule (is_test + name not like 'test%').
+
+    device route (`via`) comes from the instant_demo_ready event's meta->>'via'
+    ('page' = phone, through our own join page; 'teams' = desktop, straight
+    into Teams -- skips our page entirely, so reached_lobby/connected are
+    structurally always false for desktop; the only proof a desktop demo
+    happened is a call transcript).
+
+    joined = connected on our page OR a transcript exists (covers desktop).
+    Bucketing beyond that (did the lead actually connect, or not, or do we
+    just not know) happens in _instant_demo_funnel_render, not here -- this
+    loader only pulls the raw signals.
+
+    wa_booked_at: the first time lr_meeting_checks (the WhatsApp auto-booking
+    decision log) recorded a decision='create' for this lead's phone -- i.e.
+    a follow-up time actually got booked over WhatsApp, not just that they
+    replied. Matched by the last 10 digits of the phone number, same
+    normalisation used everywhere else in this file. Feeds "Non-Joiners
+    Re-engaged via WhatsApp" in the render function.
+
+    Guarded so a failure just yields an empty frame."""
+    cols = ["submission_id", "phone", "day", "clicked", "meeting_created", "via",
+            "reached_lobby", "connected", "lobby_secs", "call_secs", "fail_reason",
+            "transcript_min", "wa_booked_at"]
+    out = pd.DataFrame(columns=cols)
+    if not SUPABASE_URL:
+        return out
+    try:
+        df = _q(SUPABASE_URL, rf"""
+            WITH leads AS (
+                SELECT ce.submission_id,
+                       MIN(ce.clicked_at) FILTER (WHERE ce.action = 'instant_demo_shown') AS shown_at,
+                       MIN(ce.clicked_at) FILTER (WHERE ce.action = 'instant_demo_click') AS clicked_at
+                FROM public.lr_click_events ce
+                JOIN public.lr_submissions s ON s.id = ce.submission_id
+                WHERE ce.action IN ('instant_demo_shown', 'instant_demo_click')
+                  AND NOT coalesce(s.is_test, false) AND s.name NOT ILIKE 'test%'
+                  AND ce.clicked_at >= timestamp '{_INSTANT_DEMO_START.strftime("%Y-%m-%d")}'
+                GROUP BY ce.submission_id
+                HAVING MIN(ce.clicked_at) FILTER (WHERE ce.action = 'instant_demo_shown') IS NOT NULL
+            ),
+            meetings AS (
+                SELECT m.submission_id, m.id AS meeting_id, m.event_link
+                FROM public.lr_meetings m WHERE m.mode = 'instant'
+            ),
+            ready AS (
+                SELECT ce.submission_id, MAX(ce.meta->>'via') AS via
+                FROM public.lr_click_events ce WHERE ce.action = 'instant_demo_ready'
+                GROUP BY ce.submission_id
+            ),
+            page_ev AS (
+                SELECT ce.submission_id,
+                       bool_or(ce.meta->>'event' = 'screen_lobby') AS reached_lobby,
+                       bool_or(ce.meta->>'event' = 'call_connected') AS connected,
+                       MAX((ce.meta->'extra'->>'lobby_secs')::int) AS lobby_secs,
+                       MAX((ce.meta->'extra'->>'secs')::int)
+                           FILTER (WHERE ce.meta->>'event' = 'call_ended') AS call_secs,
+                       MAX(ce.meta->'extra'->>'reason') FILTER (WHERE ce.meta->>'event' = 'failed') AS fail_reason
+                FROM public.lr_click_events ce WHERE ce.action = 'instant_demo_page'
+                GROUP BY ce.submission_id
+            ),
+            transcripts AS (
+                SELECT DISTINCT ON (teams_url) teams_url, demo_duration_minutes
+                FROM public.ft_calls ORDER BY teams_url, created_at DESC
+            ),
+            checks AS (
+                -- lr_meeting_checks: the WhatsApp auto-booking decision log.
+                -- decision='create' means a follow-up time actually got booked,
+                -- not just that the lead replied -- this is the "set up a time"
+                -- bar for Later Engaged via WhatsApp, not a generic reply.
+                SELECT lead_phone10, MIN(checked_at) AS booked_at
+                FROM public.lr_meeting_checks WHERE decision = 'create'
+                GROUP BY lead_phone10
+            )
+            SELECT l.submission_id, s.phone,
+                   (l.shown_at AT TIME ZONE 'Asia/Kolkata')::date AS day,
+                   (l.clicked_at IS NOT NULL) AS clicked,
+                   (mt.meeting_id IS NOT NULL) AS meeting_created,
+                   r.via,
+                   coalesce(pe.reached_lobby, false) AS reached_lobby,
+                   coalesce(pe.connected, false) AS connected,
+                   pe.lobby_secs, pe.call_secs, pe.fail_reason,
+                   tr.demo_duration_minutes AS transcript_min,
+                   (ck.booked_at AT TIME ZONE 'Asia/Kolkata') AS wa_booked_at
+            FROM leads l
+            JOIN public.lr_submissions s ON s.id = l.submission_id
+            LEFT JOIN meetings mt ON mt.submission_id = l.submission_id
+            LEFT JOIN ready r ON r.submission_id = l.submission_id
+            LEFT JOIN page_ev pe ON pe.submission_id = l.submission_id
+            LEFT JOIN transcripts tr ON tr.teams_url = mt.event_link
+            LEFT JOIN checks ck ON ck.lead_phone10 = right(regexp_replace(coalesce(s.phone,''),'\D','','g'),10)
+        """, statement_timeout_ms=25000)
+        if len(df):
+            df["day"] = pd.to_datetime(df["day"]).dt.normalize()
+            for b in ["clicked", "meeting_created", "reached_lobby", "connected"]:
+                df[b] = df[b].astype(bool)
+            df["wa_booked_at"] = pd.to_datetime(df["wa_booked_at"], errors="coerce")
+        out = df
+    except Exception as ex:
+        print(f"[WARN] Instant Demo Funnel load failed: {ex} -- using empty frame")
+    return out
+
+def _instant_demo_funnel_render(ddf, view="Total"):
+    """Instant Demo Funnel Tracker (Marketing page): one row per day. Buckets
+    every lead who saw the card into exactly one of Joined / Did Not Join /
+    Unknown, so Clicked always equals the three added together (funnel
+    hygiene, per Akshay):
+      - Joined: connected on our page, or a transcript exists (desktop).
+      - Did Not Join: a definite negative signal -- an explicit failure
+        (mic/network/not-admitted/denied), reached the lobby but never
+        connected (GM too slow / never showed), or no GM was free at all
+        (no meeting ever got created).
+      - Unknown: none of the above fired -- most often a desktop lead with
+        no transcript (the data genuinely can't prove either way), or a
+        phone lead who opened the join page but never pressed Join.
+    5+ Min Demo is a SUBSET of Joined (call length >=5 min, phone from
+    call_secs / desktop from the transcript), not a separate bucket.
+
+    "Later Engaged via WhatsApp": of the leads who landed in Did Not
+    Join SPECIFICALLY (not Unknown -- we're not confident those even needed
+    re-engaging), how many went on to actually BOOK a follow-up time over
+    WhatsApp (lr_meeting_checks decision='create'), matched by the last 10
+    digits of their phone number. A real reply alone doesn't count -- this is
+    "set up a time", not "said something back".
+
+    `view` is the shared page-level Total/Cost/Percentages dropdown (same one
+    Self Onboarding Tracker and WA Agent Reply Tracker follow). Percentages
+    shows every column as a % of Saw Card -- Saw Card is the funnel's real
+    start (Kethan: don't start from total leads), so it stays the one fixed
+    denominator -- EXCEPT the WhatsApp-engaged column, which is a % of Did
+    Not Join specifically, since that's the actual pool it's drawn from.
+
+    Blank grid (not an error) when there's no data yet."""
+    pct_view = (view == "Percentages")
+    ddf = ddf if (ddf is not None and len(ddf)) else pd.DataFrame(
+        columns=["submission_id", "phone", "day", "clicked", "meeting_created", "via",
+                 "reached_lobby", "connected", "lobby_secs", "call_secs", "fail_reason",
+                 "transcript_min", "wa_booked_at"])
+
+    def _bucket(r):
+        joined = bool(r["connected"]) or pd.notna(r["transcript_min"])
+        if joined:
+            return "joined"
+        if not r["clicked"]:
+            return None   # saw the card, never clicked -- not part of Clicked's funnel hygiene
+        explicit_fail = pd.notna(r["fail_reason"])
+        gm_never_found = not r["meeting_created"]
+        lobby_no_connect = (r["via"] == "page") and r["reached_lobby"] and not r["connected"]
+        if explicit_fail or gm_never_found or lobby_no_connect:
+            return "did_not_join"
+        return "unknown"
+
+    def _five_min(r):
+        if r["via"] == "teams":
+            return pd.notna(r["transcript_min"]) and r["transcript_min"] >= 5
+        return pd.notna(r["call_secs"]) and r["call_secs"] >= 300
+
+    if len(ddf):
+        ddf = ddf.copy()
+        ddf["bucket"] = ddf.apply(_bucket, axis=1)
+        ddf["five_min"] = ddf.apply(_five_min, axis=1)
+    else:
+        ddf["bucket"] = []; ddf["five_min"] = []
+
+    # Later Engaged via WhatsApp: Did Not Join leads ONLY (not
+    # Unknown -- we're not confident enough those even needed re-engaging)
+    # who went on to actually book a follow-up time over WhatsApp
+    # (wa_booked_at, from lr_meeting_checks decision='create'). A real reply
+    # alone doesn't count -- this is "set up a time", not "said something back".
+    def _engaged_wa(r):
+        if r["bucket"] != "did_not_join":
+            return False
+        return pd.notna(r["wa_booked_at"]) and pd.notna(r["day"]) and r["wa_booked_at"] >= r["day"]
+
+    if len(ddf):
+        ddf["engaged_wa"] = ddf.apply(_engaged_wa, axis=1)
+    else:
+        ddf["engaged_wa"] = []
+
+    def _row(label, g):
+        saw_card = len(g)
+        clicked_g = g[g["clicked"]] if saw_card else g
+        clicked_n = len(clicked_g)
+        joined_n = int((clicked_g["bucket"] == "joined").sum()) if clicked_n else 0
+        five_min_n = int(((clicked_g["bucket"] == "joined") & clicked_g["five_min"]).sum()) if clicked_n else 0
+        dnj_n = int((clicked_g["bucket"] == "did_not_join").sum()) if clicked_n else 0
+        unk_n = int((clicked_g["bucket"] == "unknown").sum()) if clicked_n else 0
+        engaged_n = int(clicked_g["engaged_wa"].sum()) if clicked_n else 0
+        lobby_n = int(clicked_g["reached_lobby"].sum()) if clicked_n else 0
+
+        def _v(n):
+            if not pct_view:
+                return n
+            return f"{round(n / saw_card * 100, 1)}%" if saw_card else "0.0%"
+
+        # Engaged's own % is of Did Not Join ONLY (not Unknown) -- the pool
+        # it's actually drawn from -- not of Saw Card like every other column.
+        engaged_pct = (f"{round(engaged_n / dnj_n * 100, 1)}%" if dnj_n
+                       else "0.0%") if pct_view else engaged_n
+
+        r = {"Day": (label, "", "")}
+        r["Saw Card"] = (saw_card, "cell-zero" if saw_card == 0 else "", "")
+        r["Clicked"] = (_v(clicked_n), "cell-zero" if clicked_n == 0 else "", "")
+        r["Reached Lobby"] = (_v(lobby_n), "", "")
+        r["Joined Demo"] = (_v(joined_n), "cell-zero" if joined_n == 0 else "", "")
+        r["5+ Min Demo"] = (_v(five_min_n), "cell-zero" if five_min_n == 0 else "", "")
+        r["Did Not Join"] = (_v(dnj_n), "cell-zero" if dnj_n == 0 else "", "")
+        r["Later Engaged via WhatsApp"] = (
+            engaged_pct, "cell-zero" if engaged_n == 0 else "", "")
+        r["Unknown"] = (_v(unk_n), "cell-zero" if unk_n == 0 else "", "")
+        return r
+
+    today = pd.Timestamp.today().normalize()
+    n_days = (today - _INSTANT_DEMO_START).days + 1
+    rows = []
+    for i in range(max(n_days, 1)):
+        d = today - pd.Timedelta(days=i)
+        g = ddf[ddf["day"] == d] if len(ddf) else ddf
+        rows.append(_row(d.strftime("%d %b"), g))
+    rows.append(_row("Total", ddf))
+
+    cols = list(rows[0].keys())
+    disp, class_cols = {}, {}
+    for c in cols:
+        disp[c] = [r[c][0] for r in rows]
+        clv = [r[c][1] for r in rows]
+        if any(clv):
+            disp[c + "__cls"] = clv
+            class_cols[c] = c + "__cls"
+    df = pd.DataFrame(disp)
+    hdr_groups = {"Joined Demo": "hdr-joined", "5+ Min Demo": "hdr-joined-light",
+                  "Did Not Join": "hdr-acct", "Later Engaged via WhatsApp": "hdr-acct-light"}
+    return grid_payload_b64(df, "Day", autosize=True, center_all=True, no_sort=True, sortable=False,
+                            class_cols=class_cols or None, hdr_class_cols=hdr_groups)
+
 def _prep_gm_slots(df):
     """date -> midnight; slots numeric; keep the LATEST snapshot per (date, gm) so a
     same-day re-write via created_at doesn't double-count."""
@@ -2833,6 +3084,7 @@ _SELF_OB_SESSIONS = _load_self_ob_sessions()
 _TALLY_CONNECTED = _load_tally_connected(
     _SELF_OB_SESSIONS["company_uuid"].dropna().unique() if len(_SELF_OB_SESSIONS) else [])
 _WA_AGENT_REPLY_LEADS = _load_wa_agent_reply()
+_INSTANT_DEMO_LEADS = _load_instant_demo_funnel()
 
 _AIA    = _prep_aia(_RAW_AIA)
 _VA     = _prep_va(_RAW_VA)
@@ -3218,7 +3470,7 @@ def _reload_data():
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _ACCT_PHONE, _CONTACT_ID, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
-    global _SELF_OB_SESSIONS, _TALLY_CONNECTED, _WA_AGENT_REPLY_LEADS
+    global _SELF_OB_SESSIONS, _TALLY_CONNECTED, _WA_AGENT_REPLY_LEADS, _INSTANT_DEMO_LEADS
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -3232,6 +3484,7 @@ def _reload_data():
     _TALLY_CONNECTED = _load_tally_connected(
         _SELF_OB_SESSIONS["company_uuid"].dropna().unique() if len(_SELF_OB_SESSIONS) else [])
     _WA_AGENT_REPLY_LEADS = _load_wa_agent_reply()
+    _INSTANT_DEMO_LEADS = _load_instant_demo_funnel()
     _AIA = _prep_aia(_RAW_AIA)
     _VA  = _prep_va(_RAW_VA)
     _AIA_LI, _VA_LI = _prep_li(_RAW_LI)
@@ -5703,6 +5956,11 @@ def _mkt_refresh(state):
     # table.
     state.wa_agent_reply_json = _wa_agent_reply_render(_WA_AGENT_REPLY_LEADS, _WA_LOG, _view)
 
+    # Instant Demo Funnel Tracker -- also independent of this page's own date
+    # range/channel filters, but DOES follow the shared Total/Percentages
+    # view (_view) like Self Onboarding Tracker and WA Agent Reply Tracker.
+    state.instant_demo_json = _instant_demo_funnel_render(_INSTANT_DEMO_LEADS, _view)
+
     _daily_signals_refresh(state)   # Daily-signals cards follow the nav channel filter too
 
     # Channel pies — always show ALL channels (from the channel-unfiltered data)
@@ -6565,6 +6823,24 @@ wa_agent_reply_tip = ("WA Agent Reply Tracker\n"
                "• Engaged = the lead agreed a specific call/demo time, with the GM or\n"
                "  the agent.\n"
                "• Covers signups from the agent's go-live, 27 Oct 2026 6:40pm IST, onward.")
+instant_demo_json=""
+instant_demo_tip = ("Instant Demo Funnel Tracker\n"
+               "• Each row = the day a lead saw the \"Start Instant Demo\" card\n"
+               "  (only shown when a GM was actually free right then).\n"
+               "• Clicked = Joined Demo + Did Not Join + Unknown.\n"
+               "• Joined Demo = got on a live call. For PC this only counts when we have\n"
+               "  a call transcript -- PC skips our tracking page entirely, so that's\n"
+               "  the only proof we have either way.\n"
+               "• 5+ Min Demo is a subset of Joined Demo, not a separate group.\n"
+               "• Did Not Join = a clear reason: call failed, GM never let them in, or\n"
+               "  no GM was free at all.\n"
+               "• Unknown = we genuinely can't tell what happened (mostly PC leads with\n"
+               "  no transcript, or someone who opened the page but never pressed Join).\n"
+               "• Later Engaged via WhatsApp = of the Did Not Join leads\n"
+               "  specifically (not Unknown), how many went on to actually BOOK a\n"
+               "  follow-up time over WhatsApp -- a reply alone doesn't count.\n"
+               "• Percentages view: everything is a % of Saw Card, except the WhatsApp column,\n"
+               "  which is a % of Did Not Join -- the pool it's actually drawn from.")
 mkt_cta_fig=go.Figure()
 mkt_hps_cac_fig=go.Figure()
 mkt_channel_spend_json=""; mkt_channel_leads_json=""

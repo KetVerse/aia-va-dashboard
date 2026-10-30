@@ -455,6 +455,18 @@ _GRID_HTML = r"""<!DOCTYPE html>
   thead th.hdr-self:hover{ background:#0f5c2c; }
   thead th.hdr-acct{ background:#c2410c; }
   thead th.hdr-acct:hover{ background:#9a3409; }
+  /* hdr-acct-light: a muted tint of hdr-acct for a downstream subset of a
+     concern/drop-off column (e.g. Instant Demo Funnel Tracker's Did Not Join
+     -> Later Engaged via WhatsApp -- the partial recovery from it). */
+  thead th.hdr-acct-light{ background:#b5651d; }
+  thead th.hdr-acct-light:hover{ background:#954f16; }
+  /* hdr-joined / hdr-joined-light: Instant Demo Funnel Tracker's Joined Demo
+     and its 5+ Min Demo subset -- same hue, dark for the full group, light
+     for the subset, so the relationship reads at a glance. */
+  thead th.hdr-joined{ background:#15803d; }
+  thead th.hdr-joined:hover{ background:#0f5c2c; }
+  thead th.hdr-joined-light{ background:#6b9b7a; }
+  thead th.hdr-joined-light:hover{ background:#5a8568; }
   td.cell-partial::after{ content:"Partial"; display:inline-block; margin-left:6px;
     font-size:9px; font-weight:700; line-height:1; padding:2px 5px; border-radius:8px;
     background:#fde68a; color:#92400e; vertical-align:middle; }

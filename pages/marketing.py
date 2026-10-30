@@ -48,6 +48,15 @@ MARKETING_PAGE = """
 |>
 
 <|part|class_name=chart-card|
+**Instant Demo Funnel Tracker** <|ⓘ|text|hover_text={instant_demo_tip}|class_name=info-ico|>  *(view follows the nav-bar View dropdown)*
+
+<|part|class_name=gridholder gridholder-instant_demo|
+<|{instant_demo_json}|text|mode=raw|>
+|>
+<iframe src="/grid/instant_demo" class="grid-frame" style="width:100%;height:420px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
 **WA Agent Reply Tracker** <|ⓘ|text|hover_text={wa_agent_reply_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-wa_agent_reply|
