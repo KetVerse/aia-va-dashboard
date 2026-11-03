@@ -2904,7 +2904,7 @@ def _load_all():
         cols_mkt = ["day","ad_campaign","campaign_type","cost","conversions","impressions","channel"]
         cols_upl = ["id","date","email","account_id","total_uploads","bill_uploads","statement_uploads"]
         cols_syn = ["email","items_count","event_date","account_id","sync_type"]
-        cols_inc = ["gm_combined","month","monthly_mrr_target","is_gap_carry_forwarded","incentive_type"]
+        cols_inc = ["gm_combined","month","monthly_mrr_target","is_gap_carry_forwarded","incentive_type","led_by"]
         return (pd.DataFrame(columns=cols_aia), pd.DataFrame(columns=cols_va),
                 pd.DataFrame(columns=cols_li),  pd.DataFrame(columns=cols_inc),
                 pd.DataFrame(columns=cols_mkt), pd.DataFrame(columns=cols_upl),
@@ -3098,6 +3098,19 @@ if "incentive_type" in _INCENTIVE_TARGETS.columns:
     _INCENTIVE_TARGETS["incentive_type"] = _INCENTIVE_TARGETS["incentive_type"].fillna("Revenue")
 else:
     _INCENTIVE_TARGETS["incentive_type"] = "Revenue"
+
+# SGM pods (per Rohan Sinha, Nov 2026) -- GMs are grouped into pods, each led by
+# an SGM, for a team-level ranking table on the AIA OPS page. Membership lives
+# in incentive_targets.led_by (one GM -> one SGM name, PER MONTH, alongside
+# their target row) rather than a hardcoded roster here, so a GM moving pods
+# mid-year is picked up automatically instead of needing a code change.
+# _POD_NAMES only maps an SGM's name -> their pod's chosen display name (rare
+# to change); Zuber's pod hasn't picked one yet, so this is a placeholder.
+_POD_NAMES = {
+    "Eshita Chauhan": "10K Achievers",
+    "Harsh Khatri":   "Apex Achievers",
+    "Zuber Ahmed":    "Zuber's Pod",
+}
 
 _MKT = _RAW_MKT.copy()
 if "day" in _MKT.columns:
@@ -4435,6 +4448,7 @@ def _aia_ops_refresh(state):
                  "Base Target","Adjusted Target","Achievement %","Incentive Tier","Incentive Payout"]
     if len(_INCENTIVE_TARGETS) == 0:
         state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
+        state.aia_pods_json = grid_payload_b64(pd.DataFrame())
     else:
         m_start  = pd.Timestamp(state.aia_start_date).replace(day=1)
         m_end    = (m_start + relativedelta(months=1)) - pd.Timedelta(days=1)
@@ -4444,6 +4458,7 @@ def _aia_ops_refresh(state):
         prev_t   = _INCENTIVE_TARGETS[_INCENTIVE_TARGETS["month"] == pm_start]
         if len(curr_t) == 0:
             state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
+            state.aia_pods_json = grid_payload_b64(pd.DataFrame())
         else:
             aia_c = _rng(_AIA, "payment_date", m_start, m_end)
             va_c  = _rng(_VA,  "payment_date", m_start, m_end)
@@ -4487,12 +4502,23 @@ def _aia_ops_refresh(state):
                     seen.add(dn); out.append(_row(dn, None, None, "", ot))
                 return out
             inc_rows = []
+            # gm_is_cust: GM -> whether THEIR target is a customer count rather than
+            # revenue. gm_led_by: GM -> their SGM for THIS month (from led_by,
+            # blank/NaN if unassigned). Both kept separate from inc_rows so they
+            # don't leak into the Incentive Tracker's own columns -- the SGM Pods
+            # block below needs them to group correctly and know which raw number
+            # (Customers vs AIA+VA Revenue) each GM's Adjusted Target is measured against.
+            gm_is_cust = {}
+            gm_led_by = {}
             for _, tr in curr_t.iterrows():
                 gm        = tr["gm_combined"]
                 base_tgt  = int(tr["monthly_mrr_target"])
                 carry_fwd = bool(tr["is_gap_carry_forwarded"])
                 itype     = str(tr.get("incentive_type", "Revenue") or "Revenue")
                 is_cust   = itype.strip().lower().startswith("cust")   # target is a customer count
+                gm_is_cust[gm] = is_cust
+                led = tr.get("led_by")
+                gm_led_by[gm] = str(led).strip() if (pd.notna(led) and str(led).strip()) else None
                 cust_n    = int(_cust_c.get(gm, 0))
                 prev_tr   = prev_t[prev_t["gm_combined"] == gm]
                 prev_tgt  = int(prev_tr["monthly_mrr_target"].iloc[0]) if len(prev_tr) else 0
@@ -4591,6 +4617,55 @@ def _aia_ops_refresh(state):
                               "Combined MRR": "Combined MRR tip"})
             else:
                 state.aia_incentive_json = grid_payload_b64(pd.DataFrame())
+
+            # ── SGM Pods Ranking ──────────────────────────────────────
+            # Team-level rollup of the same per-GM numbers above, grouped by
+            # gm_led_by (THIS month's roster -- a GM who moved pods mid-year
+            # rolls up under wherever they're led_by now, automatically).
+            # Standalone table (not a filtered view of the GM/Incentive tables)
+            # per Rohan Sinha -- "like an IPL points table", ranked by
+            # Achievement %, high to low. Achievement % sums each member's
+            # correct numerator (Customers if their target is a customer count,
+            # AIA+VA Revenue if it's a revenue target -- see gm_is_cust above)
+            # over the pod's combined Adjusted Target, same metric each GM is
+            # actually measured against individually. A GM with no target this
+            # month just contributes 0. "Combined Revenue" is shown for context
+            # either way. Team display name comes from _POD_NAMES (keyed by the
+            # SGM's name); an SGM not yet in that lookup falls back to their
+            # own name as the team label.
+            if inc_rows:
+                _by_gm = {r["GM"]: r for r in inc_rows}
+                _pod_members = {}
+                for gm, led in gm_led_by.items():
+                    if led:
+                        _pod_members.setdefault(led, []).append(gm)
+                pod_rows = []
+                for lead, members in _pod_members.items():
+                    present = [m for m in members if m in _by_gm]
+                    rev  = sum(_by_gm[m]["AIA+VA Revenue"] for m in present)
+                    tgt  = sum(_by_gm[m]["Adjusted Target"] for m in present)
+                    cust = sum(_by_gm[m]["Customers"] for m in present)
+                    ach_num = sum(
+                        (_by_gm[m]["Customers"] if gm_is_cust.get(m) else _by_gm[m]["AIA+VA Revenue"])
+                        for m in present)
+                    ach  = (ach_num / tgt * 100) if tgt > 0 else 0
+                    pod_rows.append({
+                        "Team": _POD_NAMES.get(lead, lead), "Pod Lead": lead, "GMs": len(members),
+                        "Combined Revenue": int(rev), "Adjusted Target": int(tgt),
+                        "Achievement %": f"{ach:.1f}%", "Customers": int(cust), "_ach": ach,
+                    })
+                if pod_rows:
+                    pod_df = (pd.DataFrame(pod_rows).sort_values("_ach", ascending=False)
+                              .reset_index(drop=True).drop(columns="_ach"))
+                    pod_df.insert(0, "Rank", range(1, len(pod_df) + 1))
+                    state.aia_pods_json = grid_payload_b64(
+                        pod_df, center_cols=["Rank", "GMs", "Achievement %"],
+                        heat_cols={"Achievement %": "green"}, autosize=True,
+                        no_sort=True, sortable=False)
+                else:
+                    state.aia_pods_json = grid_payload_b64(pd.DataFrame())
+            else:
+                state.aia_pods_json = grid_payload_b64(pd.DataFrame())
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGE 2 — CS & FINANCE
@@ -6679,7 +6754,7 @@ aia_ft_trend_fig = go.Figure()
 aia_channel_pie_json = ""
 aia_channel_filter = "All"; aia_channel_order = []; aia_filter_label = ""
 aia_channel_click = ""; aia_channel_click_last = ""
-aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""; aia_ft_json=""; aia_pocgap_json=""
+aia_gm_json=""; aia_utm_json=""; aia_incentive_json=""; aia_pods_json=""; aia_ft_json=""; aia_pocgap_json=""
 aia_discard_df=pd.DataFrame(); aia_lost_df=pd.DataFrame(); aia_parked_df=pd.DataFrame()
 
 # Page 2
@@ -6749,6 +6824,8 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "⚪ No event that day")
 aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no referencing deal.\n"
                   "Uses the FT filters.")
+aia_incentive_tip = ("Achievement % = Revenue (or Customers, per GM's target type) ÷ Adjusted Target\n"
+                      "Adjusted Target = Base Target + any gap carried forward from last month")
 aia_ft_trend_tip = ("• Leads = deals created that day\n"
                     "• FT Started = first-ever successful integration per account (internal excluded), counted on that day\n"
                     "• Activated = of those, accounts with 2+ real-usage days (green/amber) in the last 28")

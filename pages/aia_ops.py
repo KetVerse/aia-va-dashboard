@@ -107,12 +107,21 @@ Refunds
 |>
 
 <|part|class_name=chart-card|
-**AIA + VA Incentive Tracker**
+**AIA + VA Incentive Tracker** <|ⓘ|text|hover_text={aia_incentive_tip}|class_name=info-ico|>
 
 <|part|class_name=gridholder gridholder-aia_incentive|
 <|{aia_incentive_json}|text|mode=raw|>
 |>
 <iframe src="/grid/aia_incentive" class="grid-frame" style="width:100%;height:480px;border:none;"></iframe>
+|>
+
+<|part|class_name=chart-card|
+**SGM Pods Ranking**
+
+<|part|class_name=gridholder gridholder-aia_pods|
+<|{aia_pods_json}|text|mode=raw|>
+|>
+<iframe src="/grid/aia_pods" class="grid-frame" style="width:100%;height:260px;border:none;"></iframe>
 |>
 
 <|part|class_name=chart-card|
