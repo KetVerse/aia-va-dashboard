@@ -229,7 +229,13 @@ def ft_activity_scores():
     same population + numbers as the dashboard's Free Trial Usage & Health table),
     returns record_id, Activity Score (28-day weighted, anchored to today) and
     Activity Notes (the streak-dot activities per active day). An external job (n8n)
-    matches record_id -> the tracker's Deal ID and writes the two columns."""
+    matches record_id -> the tracker's Deal ID and writes the two columns.
+
+    Also returns the FT Activated inputs, using the SAME rule as the AIA Ops KPI card
+    (main._ft_activated: >=2 real-usage days = green/amber streak dots in the last 28):
+    `stage` (current deal stage), `real_usage_days` and `ft_activated`. The n8n job
+    that moves deals to "Free Trial Activated" reads these instead of re-implementing
+    the rule, so the stage and the dashboard can't drift apart."""
     from datetime import date as _date
     import main
     df = main._build_ft_health_df()           # cached; record_id + Activity Score + streak
@@ -240,11 +246,16 @@ def ft_activity_scores():
             rid = str(r.get("record_id") or "").strip()
             if not rid:
                 continue
+            streak = r.get("Usage Streak Last 28D (desc)", "")
+            real_days = int(main._real_usage_days_from_streak(streak))
             out.append({
                 "record_id": rid,
                 "deal_name": str(r.get("Deal Name", "")),
+                "stage": str(r.get("Stage", "") or ""),
                 "activity_score": int(r.get("Activity Score", 0) or 0),
-                "activity_notes": _streak_to_notes(r.get("Usage Streak Last 28D (desc)", ""), anchor),
+                "real_usage_days": real_days,
+                "ft_activated": real_days >= 2,
+                "activity_notes": _streak_to_notes(streak, anchor),
             })
     return Response(json.dumps(out), mimetype="application/json")
 
