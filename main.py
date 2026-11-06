@@ -3105,11 +3105,11 @@ else:
 # their target row) rather than a hardcoded roster here, so a GM moving pods
 # mid-year is picked up automatically instead of needing a code change.
 # _POD_NAMES only maps an SGM's name -> their pod's chosen display name (rare
-# to change); Zuber's pod hasn't picked one yet, so this is a placeholder.
+# to change).
 _POD_NAMES = {
     "Eshita Chauhan": "10K Achievers",
     "Harsh Khatri":   "Apex Achievers",
-    "Zuber Ahmed":    "Zuber's Pod",
+    "Zuber Ahmed":    "Spartans",
 }
 
 _MKT = _RAW_MKT.copy()
@@ -4649,10 +4649,12 @@ def _aia_ops_refresh(state):
                         (_by_gm[m]["Customers"] if gm_is_cust.get(m) else _by_gm[m]["AIA+VA Revenue"])
                         for m in present)
                     ach  = (ach_num / tgt * 100) if tgt > 0 else 0
+                    others = sorted(m for m in members if m != lead)
                     pod_rows.append({
                         "Team": _POD_NAMES.get(lead, lead), "Pod Lead": lead, "GMs": len(members),
                         "Combined Revenue": int(rev), "Adjusted Target": int(tgt),
                         "Achievement %": f"{ach:.1f}%", "Customers": int(cust), "_ach": ach,
+                        "Team tip": "\n".join([f"{lead} (Lead)"] + others),
                     })
                 if pod_rows:
                     pod_df = (pd.DataFrame(pod_rows).sort_values("_ach", ascending=False)
@@ -4661,7 +4663,7 @@ def _aia_ops_refresh(state):
                     state.aia_pods_json = grid_payload_b64(
                         pod_df, center_cols=["Rank", "GMs", "Achievement %"],
                         heat_cols={"Achievement %": "green"}, autosize=True,
-                        no_sort=True, sortable=False)
+                        no_sort=True, sortable=False, tip_cols={"Team": "Team tip"})
                 else:
                     state.aia_pods_json = grid_payload_b64(pd.DataFrame())
             else:
