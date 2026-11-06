@@ -3108,7 +3108,7 @@ else:
 # to change).
 _POD_NAMES = {
     "Eshita Chauhan": "10K Achievers",
-    "Harsh Khatri":   "Apex Achievers",
+    "Harsh Khatri":   "Apex Powerhouse",
     "Zuber Ahmed":    "Spartans",
 }
 
