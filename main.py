@@ -3707,6 +3707,25 @@ def _rng(df, col, s, e):
     except Exception:
         return df.iloc[0:0]
 
+
+def _va_paid_rev(vdf, s, e):
+    """VA paid-deal ids + revenue for [s, e], each component dated on its OWN column:
+    the recurring amount_paid on payment_date, the one-time ot_amount_paid on
+    ot_payment_date. Dating both off payment_date alone made a one-time-only deal
+    (payment_date set, amount_paid blank, money all in ot_amount_paid) count as Paid
+    with ZERO revenue, and hid an OT whose payment landed in a different month from
+    the recurring one. Returns (paid_ids, revenue, recurring_rows) -- recurring_rows
+    is the payment_date set, which MRR still uses, since MRR excludes one-time
+    amounts by definition."""
+    rec = _rng(vdf, "payment_date", s, e)
+    ot  = _rng(vdf, "ot_payment_date", s, e)
+    rev = int(rec.groupby("record_id")["amount_paid"].max().sum()) if len(rec) else 0
+    if len(ot) and "ot_amount_paid" in ot.columns:
+        rev += int(ot.groupby("record_id")["ot_amount_paid"].max().sum())
+    ids = set(rec["record_id"]) | (set(ot["record_id"]) if len(ot) else set())
+    return ids, rev, rec
+
+
 _WA_BIZ_START = pd.Timedelta(hours=10, minutes=0)    # WhatsApp Reply TAT business window:
 _WA_BIZ_END   = pd.Timedelta(hours=18, minutes=30)   # 10:00-18:30 IST, Mon-Fri
 
@@ -4324,14 +4343,16 @@ def _aia_ops_refresh(state):
         _o_ft = _rng(o, "ft_start_date", s, e)   # FT started in range; Activated = >=2 real-usage days in 28d
         _o_ft_act = (_o_ft[_o_ft["login_email_id"].map(_ft_activated_email)]
             ["record_id"].nunique() if len(_o_ft) else 0)
-        # VA revenue for this GM (same paid basis as AIA: max amount_paid per deal,
-        # paid within range), and Tot Revenue = AIA + VA.
+        # VA revenue for this GM (same paid basis as AIA: max amount per deal, paid
+        # within range) and Tot Revenue = AIA + VA. VA carries a one-time amount in
+        # its own ot_amount_paid/ot_payment_date pair, so _va_paid_rev dates each
+        # component on its own column -- an OT-only deal would otherwise show Paid
+        # with zero Revenue.
         vo  = _VA[_VA["deal_owner"] == owner] if len(_VA) else _VA
-        vpd = _rng(vo, "payment_date", s, e)
+        _va_ids, _va_rev, _ = _va_paid_rev(vo, s, e)
         _aia_rev  = int(pd2.groupby("record_id")["amount_paid"].max().sum()) if len(pd2) else 0
-        _va_rev   = int(vpd.groupby("record_id")["amount_paid"].max().sum()) if len(vpd) else 0
         _aia_paid = pd2[pd2["module_type"].isin(["AIA Paid","GST Paid"])]["record_id"].nunique()
-        _va_paid  = vpd["record_id"].nunique()
+        _va_paid  = len(_va_ids)
         _mrr_total += int(new_li["mrr"].sum()) if len(new_li) else 0
         # WhatsApp reply rate / TAT for this GM/CSM (already date-ranged + deduped above).
         wa_o = _wa_rng[_wa_rng["gm_full_name"] == owner] if len(_wa_rng) else _wa_rng
@@ -6083,20 +6104,26 @@ def _va_ops_refresh(state):
     state.va_kpi_dc          = _rng(df,"dc_date",s,e)["record_id"].nunique()
     hi = _rng(df,"eta_pay_date",s,e)
     state.va_kpi_hi          = hi[hi["deal_stage"]=="High Intent"]["record_id"].nunique()
-    pd_                      = _rng(df,"payment_date",s,e)
-    state.va_kpi_paid        = pd_["record_id"].nunique()
+    # Paid/Revenue date the recurring and one-time components on their own columns
+    # (payment_date / ot_payment_date) -- see _va_paid_rev. pd_ stays the recurring
+    # set, which the EOM projection below keys off.
+    _va_ids, rev, pd_        = _va_paid_rev(df, s, e)
+    state.va_kpi_paid        = len(_va_ids)
     state.va_kpi_discards    = _rng(df,"discard_date",s,e)["record_id"].nunique()
     state.va_kpi_parked      = _rng(df,"parked_date",s,e)["record_id"].nunique()
     state.va_kpi_closed_lost = _rng(df,"closed_lost_date",s,e)["record_id"].nunique()
-    rev = int(pd_["amount_paid"].sum()) + int(pd_["ot_amount_paid"].sum())
     state.va_kpi_revenue     = _fmt2(rev)
     state.va_kpi_revenue_exact = f"{_inr(rev)} · Acquired amount (includes Refunds)"
     # MRR (va_kpi_mrr) is set below from the GM Performance Total row (acquired MRR).
     today = pd.Timestamp(date.today())
+    # Still-expected this month = ETA in month, not yet paid. ~isin(_va_ids) keeps a
+    # deal already counted in va_kpi_paid out of the projection -- an OT-only deal
+    # can be paid on ot_payment_date while payment_date stays blank.
     eom = df[(df["eta_pay_date"].notna())
              &(df["eta_pay_date"]>=today.replace(day=1))
              &(df["eta_pay_date"]<=today+pd.offsets.MonthEnd(0))
-             &(df["payment_date"].isna())]
+             &(df["payment_date"].isna())
+             &(~df["record_id"].isin(_va_ids))]
     state.va_kpi_eom = str(state.va_kpi_paid + len(eom))
 
     coh   = _rng(df,"create_date",s,e)
@@ -6138,12 +6165,14 @@ def _va_ops_refresh(state):
         o = df[df["deal_owner"]==owner]
         l = _rng(o,"create_date",s,e)["record_id"].nunique()
         if l==0: continue
-        pd2 = _rng(o,"payment_date",s,e)
+        # Paid/Revenue off both payment columns; MRR stays on the recurring set only
+        # (pd2), since acquired MRR excludes one-time amounts.
+        _o_ids, _o_rev, pd2 = _va_paid_rev(o, s, e)
         rows.append({"GM":owner,"Leads":l,
             "DC":_rng(o,"dc_date",s,e)["record_id"].nunique(),
             "HI (ATP)":_rng(o,"eta_pay_date",s,e).query("deal_stage=='High Intent'")["record_id"].nunique(),
-            "Paid":pd2["record_id"].nunique(),
-            "Revenue":int(pd2["amount_paid"].sum()+pd2["ot_amount_paid"].sum()),
+            "Paid":len(_o_ids),
+            "Revenue":_o_rev,
             "MRR":_va_mrr(pd2["record_id"]),
             "ATP":_atp_amount_va(o, s, e)})
     va_gm = pd.DataFrame(rows)
