@@ -2931,6 +2931,8 @@ def _fmt_sync():
     return _LAST_SYNC.strftime("%d %b %Y – %H:%M") if _LAST_SYNC else "—"
 
 last_synced = _fmt_sync()
+built_pages = ""      # per-session: comma-list of page builds already computed (lazy page build)
+current_page = "aia"  # per-session: page the user is on
 
 # ═══════════════════════════════════════════════════════════════════
 # COMPUTED COLUMNS
@@ -7101,8 +7103,8 @@ def on_aia_filter_change(state):
     with _perf("filter: AIA Ops TOTAL"):
         with _perf("  aia_ops"):  _aia_ops_refresh(state)
         with _perf("  va_ops"):   _va_ops_refresh(state)
-        with _perf("  mkt"):      _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-        with _perf("  aiabot"):   _aiabot_refresh(state)   # AIA Bot shares the ops date range too
+        # Marketing (UTM cohort) and AIA Bot share this date range; rebuild them when opened, not now
+        _mark_stale(state, "mkt", "aiabot")
 def on_cs_filter_change(state):
     with _perf("filter: CS"):
         _cs_refresh(state); _sync_ms(state)
@@ -7119,8 +7121,7 @@ def on_va_filter_change(state):
     with _perf("filter: VA Ops TOTAL"):
         with _perf("  aia_ops"):  _aia_ops_refresh(state)
         with _perf("  va_ops"):   _va_ops_refresh(state)
-        with _perf("  mkt"):      _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-        with _perf("  aiabot"):   _aiabot_refresh(state)   # AIA Bot shares the ops date range too
+        _mark_stale(state, "mkt", "aiabot")
 def on_vaf_filter_change(state):
     with _perf("filter: VA Finance"):
         _vaf_refresh(state); _sync_ms(state)
@@ -7444,19 +7445,21 @@ def on_ms_change(state):
         state.aiabot_fail_intent = sel
     elif key == "aiabot_fail_intent":
         state.aiabot_cohort_intent = sel
-    if scope == "aia":     on_aia_filter_change(state)
-    elif scope == "aiaft": _apply_ft_filter(state)
-    elif scope == "aiaum": _apply_pocgap_filter(state)
-    elif scope == "aiabot": _aiabot_refresh(state)
-    elif scope == "va":    on_va_filter_change(state)
-    elif scope == "mkt":   _mkt_refresh(state)
-    elif scope == "cs":    _cs_refresh(state)
-    elif scope == "usage": _apply_usage_filter(state)
-    elif scope == "activity": _build_cohort_tables(state)
-    elif scope == "vaf":   _vaf_refresh(state)
-    elif scope == "ar":    _ar_refresh(state)
-    elif scope == "tat":   _tat_refresh(state)
-    _sync_ms(state)
+    with _perf(f"filter [{scope}] {key} TOTAL"):
+        if scope == "aia":     on_aia_filter_change(state)
+        elif scope == "aiaft": _apply_ft_filter(state)
+        elif scope == "aiaum": _apply_pocgap_filter(state)
+        elif scope == "aiabot": _aiabot_refresh(state)
+        elif scope == "va":    on_va_filter_change(state)
+        elif scope == "mkt":   _mkt_refresh(state)
+        elif scope == "cs":    _cs_refresh(state)
+        elif scope == "usage": _apply_usage_filter(state)
+        elif scope == "activity": _build_cohort_tables(state)
+        elif scope == "vaf":   _vaf_refresh(state)
+        elif scope == "ar":    _ar_refresh(state)
+        elif scope == "tat":   _tat_refresh(state)
+        with _perf("  _sync_ms"):
+            _sync_ms(state)
 
 
 def _bridge_channel(raw):
@@ -7571,29 +7574,55 @@ def on_manual_refresh(state, *_):
 def on_navigate(state, page_name, params):
     if page_name == "/":
         navigate(state, "aia")
+    elif page_name in _PAGE_BUILDS:
+        state.current_page = page_name
+        _ensure_pages(state, page_name)
     return page_name
 
-def _refresh_all(state):
-    # Each page's refresh runs isolated: a bug in ONE page (e.g. a bad fallback
-    # call) used to throw uncaught, which aborted this whole function -- silently
-    # skipping _sync_ms() below it and leaving EVERY page's filter dropdowns
-    # (not just the page that broke) stuck on stale/empty option lists for that
-    # session, with the broken page's own error never even surfacing. One
-    # try/except per page contains the blast radius to that page, and _sync_ms()
-    # (which every page's filter lists depend on) always still runs.
-    state.last_synced = _fmt_sync()
-    for _name, _fn in (("aia_ops", _aia_ops_refresh), ("cs", _cs_refresh),
-                        ("mkt", _mkt_refresh), ("va_ops", _va_ops_refresh),
-                        ("vaf", _vaf_refresh), ("ar", _ar_refresh),
-                        ("aiabot", _aiabot_refresh)):
+# Pages are built lazily per session: a page's tables are computed the first time it
+# is opened, and again only after new data / a shared filter made it stale -- not all
+# 7 pages up front on every load (that took ~30s alone, 90-200s with several users).
+_PAGE_BUILDS = {
+    "aia": ("aia_ops",), "cs": ("cs",), "marketing": ("mkt",),
+    "va-ops": ("va_ops",), "va-finance": ("vaf", "ar"), "aia-bot": ("aiabot",),
+}
+
+def _ensure_pages(state, page_name):
+    """Build (once per session) whatever `page_name` needs, then sync the filter
+    dropdowns. A failing build is isolated (logged, retried on the next visit) so it
+    can't block the page's other builds or _sync_ms."""
+    keys = _PAGE_BUILDS.get(page_name)
+    if not keys:
+        return
+    built = set(filter(None, state.built_pages.split(",")))
+    todo = [k for k in keys if k not in built]
+    if not todo:
+        return
+    fns = {"aia_ops": _aia_ops_refresh, "cs": _cs_refresh, "mkt": _mkt_refresh,
+           "va_ops": _va_ops_refresh, "vaf": _vaf_refresh, "ar": _ar_refresh,
+           "aiabot": _aiabot_refresh}
+    for k in todo:
         try:
-            with _perf(f"refresh page: {_name}"):
-                _fn(state)
+            with _perf(f"build page: {k}"):
+                fns[k](state)
+            built.add(k)
         except Exception as ex:
-            print(f"[WARN] _refresh_all: {_name} refresh failed, other pages/filters still "
-                  f"refresh normally -- {ex}")
-    with _perf("refresh: _sync_ms"):
+            print(f"[WARN] build page {k} failed, other pages/filters unaffected -- {ex}")
+    state.built_pages = ",".join(sorted(built))
+    with _perf("build: _sync_ms"):
         _sync_ms(state)
+
+def _mark_stale(state, *keys):
+    """Force these page builds to recompute the next time their page is opened."""
+    built = set(filter(None, state.built_pages.split(",")))
+    state.built_pages = ",".join(sorted(built - set(keys)))
+
+def _refresh_all(state):
+    """New data / reset filters: rebuild only the page the user is looking at now;
+    every other page is marked stale and rebuilds when they open it (never shows old data)."""
+    state.last_synced = _fmt_sync()
+    state.built_pages = ""
+    _ensure_pages(state, state.current_page if state.current_page in _PAGE_BUILDS else "aia")
 
 def _refresh_signal_date_bounds(state):
     """Keep the Daily-signals date picker's min/max window current.
@@ -7622,9 +7651,12 @@ def _refresh_signal_date_bounds(state):
 
 def on_init(state):
     with _perf("on_init TOTAL (new browser session)"):
+        state.current_page = "aia"
+        state.built_pages = ""
         navigate(state, "aia")
         _refresh_signal_date_bounds(state)
-        _refresh_all(state)
+        state.last_synced = _fmt_sync()
+        _ensure_pages(state, "aia")
 
 def _broadcast_refresh(state):
     """Re-run every page's compute for an already-connected client (no navigation)."""
