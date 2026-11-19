@@ -1630,6 +1630,16 @@ def _apply_cached(state, entry):
             v = _copy.deepcopy(v)
         setattr(state, k, v)
 
+def _single_flight(fn):
+    """One call at a time: a second caller waits, then hits the function's own
+    cache check, instead of repeating the same heavy build in parallel."""
+    lock = threading.RLock()
+    def wrapper(*a, **k):
+        with lock:
+            return fn(*a, **k)
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
 def _shared_build(page_key):
     def deco(fn):
         def wrapper(state):
@@ -2047,6 +2057,7 @@ def _prep_wa_logs(df):
 
 _WA_EV_CACHE = [None, None]   # [log_df it was computed from, result]
 
+@_single_flight
 def _wa_reply_events(log_df):
     """Cached: the result depends only on `log_df`, which is replaced only on a data
     reload, so recompute once per load instead of on every page build / filter change."""
@@ -4017,6 +4028,7 @@ def _customer_status(row, upl, syn):
 _FT_HEALTH_DF = None
 _POCGAP_DF = None
 
+@_single_flight
 def _build_ft_health_df():
     """Free-Trial Customers Usage & Health data (AIA Ops): every AIA deal with a
     known ft_start_date, with the SAME 28-day usage streak + Activity Score +
@@ -4070,6 +4082,7 @@ def _build_ft_health_df():
     return _FT_HEALTH_DF
 
 
+@_single_flight
 def _build_pocgap_df():
     """poc_email fallback gap table (AIA Ops): AIA deals whose login_email_id does
     NOT resolve to a product account, but whose poc_email DOES — i.e. accounts we
