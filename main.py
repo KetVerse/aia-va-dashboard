@@ -1563,6 +1563,113 @@ def _perf(label):
     finally:
         print(f"[PERF] {_time.perf_counter() - _t:7.2f}s  {label}", flush=True)
 
+# ── Shared page builds ─────────────────────────────────────────────────────
+# A page build (`_xxx_refresh(state)`) is a pure function of (a) the filter values it
+# reads from `state` and (b) the module-level data, which only changes on a data
+# reload. So the first session to build a page records what it read and wrote; any
+# other session whose filters match gets the saved result applied instead of
+# recomputing, and sessions arriving mid-build wait for it rather than duplicating
+# it. Entries expire on data reload (_DATA_VERSION bump) and at the IST date change.
+import copy as _copy
+
+_DATA_VERSION = 0
+_PAGE_CACHE = {}              # page key -> [entry, ...] (oldest first)
+_PAGE_LOCKS = {}              # page key -> lock (one build in flight per page)
+_PAGE_CACHE_LOCK = threading.Lock()
+_PAGE_CACHE_MAX = 12          # distinct filter combinations remembered per page
+_PAGE_UNCACHEABLE_WARNED = set()
+
+class _RecState:
+    """Wraps a session's state during a build: forwards reads/writes to it while
+    recording the first-read value of each var (inputs) and every write (outputs)."""
+    __slots__ = ("_real", "_reads", "_writes")
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_reads", {})
+        object.__setattr__(self, "_writes", {})
+    def __getattr__(self, k):
+        writes = object.__getattribute__(self, "_writes")
+        if k in writes:
+            return writes[k]
+        v = getattr(object.__getattribute__(self, "_real"), k)
+        reads = object.__getattribute__(self, "_reads")
+        if k not in reads:
+            reads[k] = _copy.copy(v) if isinstance(v, (list, dict, set)) else v
+        return v
+    def __setattr__(self, k, v):
+        object.__getattribute__(self, "_writes")[k] = v
+        setattr(object.__getattribute__(self, "_real"), k, v)
+
+def _same_value(a, b):
+    if a is b:
+        return True
+    try:
+        r = (a == b)
+        return bool(r) if isinstance(r, (bool, np.bool_)) else False
+    except Exception:
+        return False
+
+def _cache_lookup(page_key, state, ver, day):
+    with _PAGE_CACHE_LOCK:
+        entries = list(_PAGE_CACHE.get(page_key, ()))
+    for e in reversed(entries):
+        if e["ver"] != ver or e["day"] != day:
+            continue
+        try:
+            if all(_same_value(getattr(state, k), v) for k, v in e["reads"].items()):
+                return e
+        except Exception:
+            continue
+    return None
+
+def _apply_cached(state, entry):
+    for k, v in entry["writes"].items():
+        if isinstance(v, pd.DataFrame):
+            v = v.copy()
+        elif isinstance(v, (list, dict, set)):
+            v = _copy.deepcopy(v)
+        setattr(state, k, v)
+
+def _shared_build(page_key):
+    def deco(fn):
+        def wrapper(state):
+            if isinstance(state, _RecState):      # nested call inside another recorded build
+                return fn(state)
+            ver, day = _DATA_VERSION, _ist_today()
+            hit = _cache_lookup(page_key, state, ver, day)
+            if hit is not None:
+                with _perf(f"shared build HIT: {page_key}"):
+                    _apply_cached(state, hit)
+                return
+            with _PAGE_LOCKS.setdefault(page_key, threading.Lock()):
+                hit = _cache_lookup(page_key, state, ver, day)   # built while we waited?
+                if hit is not None:
+                    with _perf(f"shared build HIT (after wait): {page_key}"):
+                        _apply_cached(state, hit)
+                    return
+                rec = _RecState(state)
+                fn(rec)
+                reads = object.__getattribute__(rec, "_reads")
+                writes = object.__getattribute__(rec, "_writes")
+                bad = [k for k, v in reads.items() if isinstance(v, (pd.DataFrame, pd.Series, np.ndarray))]
+                if bad:
+                    if page_key not in _PAGE_UNCACHEABLE_WARNED:
+                        _PAGE_UNCACHEABLE_WARNED.add(page_key)
+                        print(f"[WARN] shared build: page '{page_key}' reads non-comparable state {bad}; not shared")
+                    return
+                entry = {"ver": ver, "day": day, "reads": dict(reads),
+                         "writes": {k: (v.copy() if isinstance(v, pd.DataFrame)
+                                        else _copy.deepcopy(v) if isinstance(v, (list, dict, set)) else v)
+                                    for k, v in writes.items()}}
+                with _PAGE_CACHE_LOCK:
+                    lst = _PAGE_CACHE.setdefault(page_key, [])
+                    lst.append(entry)
+                    del lst[:-_PAGE_CACHE_MAX]
+        wrapper.__name__ = fn.__name__
+        wrapper.__wrapped__ = fn
+        return wrapper
+    return deco
+
 # ═══════════════════════════════════════════════════════════════════
 # DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════
@@ -1938,7 +2045,18 @@ def _prep_wa_logs(df):
     _chat_p10 = df["chat_id"].astype(str).str.replace("@c.us", "", regex=False).str[-10:]
     return df[~_chat_p10.isin(_WA_LOG_EXCLUDE_PHONES)]
 
+_WA_EV_CACHE = [None, None]   # [log_df it was computed from, result]
+
 def _wa_reply_events(log_df):
+    """Cached: the result depends only on `log_df`, which is replaced only on a data
+    reload, so recompute once per load instead of on every page build / filter change."""
+    if log_df is not None and _WA_EV_CACHE[0] is log_df:
+        return _WA_EV_CACHE[1].copy()
+    out = _wa_reply_events_uncached(log_df)
+    _WA_EV_CACHE[0], _WA_EV_CACHE[1] = log_df, out
+    return out.copy()
+
+def _wa_reply_events_uncached(log_df):
     """Walk every (org_phone, chat_id) conversation in sent_ist order (stable,
     since edits don't shift sent_at -- confirmed 5 Oct) and emit one row per
     genuine lead message that needed a GM reply:
@@ -3496,7 +3614,7 @@ def _reload_data():
     global _AIA, _VA, _AIA_LI, _VA_LI, _INCENTIVE_TARGETS, _MKT, _UPL, _SYN, _ACT_EVENTS, _DVIEW_EVENTS
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _ACCT_PHONE, _CONTACT_ID, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
-    global _SELF_OB_SESSIONS, _TALLY_CONNECTED, _WA_AGENT_REPLY_LEADS, _INSTANT_DEMO_LEADS
+    global _SELF_OB_SESSIONS, _TALLY_CONNECTED, _WA_AGENT_REPLY_LEADS, _INSTANT_DEMO_LEADS, _DATA_VERSION
     _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
     _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
     _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
@@ -3551,6 +3669,20 @@ def _reload_data():
     _DB_EVENTS = _build_db_bookings()
     _BILLING_END = _build_billing_end()
     _LAST_SYNC = datetime.now(_IST)
+    _DATA_VERSION += 1      # invalidates every shared page build
+    _warm_caches()
+
+def _warm_caches():
+    """Pre-build the heavy AIA Ops tables once per data load (here, in the refresh
+    thread) so the first user after a refresh doesn't pay ~15-20s for them."""
+    for label, fn in (("ft health table", _build_ft_health_df),
+                      ("poc gap table", _build_pocgap_df),
+                      ("whatsapp reply events", lambda: _wa_reply_events(_WA_LOG))):
+        try:
+            with _perf(f"warm: {label}"):
+                fn()
+        except Exception as ex:
+            print(f"[WARN] warm-up of {label} failed, it will build on first use instead -- {ex}")
 
 def _due_on(record_id):
     d = _BILLING_END.get(record_id)
@@ -4117,6 +4249,7 @@ def _apply_pocgap_filter(state):
         link_cols={"Deal / Signup Email": ("__link_url", "")})
 
 
+@_shared_build("aia_ops")
 def _aia_ops_refresh(state):
     s = pd.Timestamp(state.aia_start_date)
     e = pd.Timestamp(state.aia_end_date)
@@ -4833,6 +4966,7 @@ def _build_cohort_tables(state):
     state.cs_activity_count_json = _merged_json(act_cnt_df, act_pct_df)
 
 
+@_shared_build("cs")
 def _cs_refresh(state):
     s = pd.Timestamp(state.cs_start_date)
     e = pd.Timestamp(state.cs_end_date)
@@ -5860,6 +5994,7 @@ def _make_cta_trend(x, wa_clicks, wa_messaged, calls, self_setup, daily_deals):
     return fig
 
 
+@_shared_build("mkt")
 def _mkt_refresh(state):
     _daily_signals_refresh(state)
     s = pd.Timestamp(state.mkt_start_date)
@@ -6098,6 +6233,7 @@ def _mkt_refresh(state):
 # PAGE 4 — VA OPS
 # ═══════════════════════════════════════════════════════════════════
 
+@_shared_build("va_ops")
 def _va_ops_refresh(state):
     s = pd.Timestamp(state.va_start_date)
     e = pd.Timestamp(state.va_end_date)
@@ -6350,6 +6486,7 @@ def _ar_build_base():
 
 _AR_STATUS_RANK = {"Overdue": 0, "Pending": 1, "Upcoming": 2, "Collected": 3, "Churned": 4}
 
+@_shared_build("ar")
 def _ar_refresh(state):
     base = _ar_build_base()
     state.vaf_ar_all = base
@@ -6487,6 +6624,7 @@ def _tat_refresh(state):
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
         if len(disp) else grid_payload_b64(pd.DataFrame()))
 
+@_shared_build("vaf")
 def _vaf_refresh(state):
     today = pd.Timestamp(date.today())
     df = _VA.copy()
@@ -7890,6 +8028,7 @@ def _aiabot_cohort_matrix(messages_df, intent_filter=None, company_filter=None, 
     merged = merged.rename(columns={"Integration Week": "Bot Start Week", "Integrated": "Users Started"})
     return merged, heat_from
 
+@_shared_build("aiabot")
 def _aiabot_refresh(state):
     m = _build_aiabot()
     state.aiabot_all = m
@@ -8204,6 +8343,7 @@ if __name__ == "__main__":
     gui = Gui(pages=pages, css_file="main.css", flask=flask_app)
     # background auto-refresh: every 30 min, 08:00–19:00 IST
     threading.Thread(target=_auto_refresh_loop, args=(gui,), daemon=True).start()
+    threading.Thread(target=_warm_caches, daemon=True).start()   # pre-build heavy tables at startup too
     gui.run(
         title="AiA + VA Dashboard",
         dark_mode=False,
