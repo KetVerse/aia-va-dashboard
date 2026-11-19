@@ -1552,6 +1552,17 @@ WA_BOT_DATABASE_URL = os.getenv("WA_BOT_DATABASE_URL", "")
 # duration + row count to stdout. No effect on behavior when unset.
 _PROFILE_QUERIES = os.getenv("PROFILE_QUERIES", "") == "1"
 
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+def _perf(label):
+    """Logs '[PERF] <seconds>s <label>' to stdout for page builds and filter callbacks."""
+    _t = _time.perf_counter()
+    try:
+        yield
+    finally:
+        print(f"[PERF] {_time.perf_counter() - _t:7.2f}s  {label}", flush=True)
+
 # ═══════════════════════════════════════════════════════════════════
 # DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════
@@ -7087,22 +7098,32 @@ def on_aia_filter_change(state):
     state.va_start_date     = state.aia_start_date
     state.va_end_date       = state.aia_end_date
     state.va_selected_owner = [o for o in _sel(state.aia_selected_owner) if o in state.va_owner_list]
-    _aia_ops_refresh(state)
-    _va_ops_refresh(state)
-    _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-    _aiabot_refresh(state)   # AIA Bot shares the ops date range too
-def on_cs_filter_change(state):  _cs_refresh(state); _sync_ms(state)
-def on_cs_usage_filter(state):   _apply_usage_filter(state); _sync_ms(state)
-def on_mkt_filter_change(state): _mkt_refresh(state)
+    with _perf("filter: AIA Ops TOTAL"):
+        with _perf("  aia_ops"):  _aia_ops_refresh(state)
+        with _perf("  va_ops"):   _va_ops_refresh(state)
+        with _perf("  mkt"):      _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
+        with _perf("  aiabot"):   _aiabot_refresh(state)   # AIA Bot shares the ops date range too
+def on_cs_filter_change(state):
+    with _perf("filter: CS"):
+        _cs_refresh(state); _sync_ms(state)
+def on_cs_usage_filter(state):
+    with _perf("filter: CS usage grid"):
+        _apply_usage_filter(state); _sync_ms(state)
+def on_mkt_filter_change(state):
+    with _perf("filter: Marketing"):
+        _mkt_refresh(state)
 def on_va_filter_change(state):
     state.aia_start_date     = state.va_start_date
     state.aia_end_date       = state.va_end_date
     state.aia_selected_owner = [o for o in _sel(state.va_selected_owner) if o in state.aia_owner_list]
-    _aia_ops_refresh(state)
-    _va_ops_refresh(state)
-    _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
-    _aiabot_refresh(state)   # AIA Bot shares the ops date range too
-def on_vaf_filter_change(state): _vaf_refresh(state); _sync_ms(state)
+    with _perf("filter: VA Ops TOTAL"):
+        with _perf("  aia_ops"):  _aia_ops_refresh(state)
+        with _perf("  va_ops"):   _va_ops_refresh(state)
+        with _perf("  mkt"):      _mkt_refresh(state)     # UTM Source Cohort (on Marketing) shares the ops date range
+        with _perf("  aiabot"):   _aiabot_refresh(state)   # AIA Bot shares the ops date range too
+def on_vaf_filter_change(state):
+    with _perf("filter: VA Finance"):
+        _vaf_refresh(state); _sync_ms(state)
 
 # Single-box date-range pickers (AIA/VA Ops): split the [start, end] list back into
 # the existing start/end vars, mirror to the linked page's picker, then reuse the
@@ -7566,11 +7587,13 @@ def _refresh_all(state):
                         ("vaf", _vaf_refresh), ("ar", _ar_refresh),
                         ("aiabot", _aiabot_refresh)):
         try:
-            _fn(state)
+            with _perf(f"refresh page: {_name}"):
+                _fn(state)
         except Exception as ex:
             print(f"[WARN] _refresh_all: {_name} refresh failed, other pages/filters still "
                   f"refresh normally -- {ex}")
-    _sync_ms(state)
+    with _perf("refresh: _sync_ms"):
+        _sync_ms(state)
 
 def _refresh_signal_date_bounds(state):
     """Keep the Daily-signals date picker's min/max window current.
@@ -7598,9 +7621,10 @@ def _refresh_signal_date_bounds(state):
         state.mkt_sig_date = new_max
 
 def on_init(state):
-    navigate(state, "aia")
-    _refresh_signal_date_bounds(state)
-    _refresh_all(state)
+    with _perf("on_init TOTAL (new browser session)"):
+        navigate(state, "aia")
+        _refresh_signal_date_bounds(state)
+        _refresh_all(state)
 
 def _broadcast_refresh(state):
     """Re-run every page's compute for an already-connected client (no navigation)."""
