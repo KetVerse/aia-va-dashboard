@@ -49,6 +49,9 @@ services:
       - "traefik.http.routers.ops.tls.certresolver=letsencrypt"
       - "traefik.http.services.ops.loadbalancer.server.port=4180"
       - "traefik.docker.network=taipy-dashboard_default"
+      # gzip/brotli the ~7 MB of JS/JSON the dashboard sends on a fresh load
+      - "traefik.http.middlewares.ops-compress.compress=true"
+      - "traefik.http.routers.ops.middlewares=ops-compress"
 
 # Pin the network name so the traefik.docker.network label above always matches.
 networks:
