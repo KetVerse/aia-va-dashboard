@@ -793,7 +793,32 @@ def _recent_event_lookup():
         lu.setdefault(ac, {}).setdefault(d, {})[b] = int(n)
     return lu
 
+_USAGE28_MEMO = {}   # (data version, date) -> {account_id: result}
+
 def _usage_28(email, ev_lu, acct=None):
+    """Memoized _usage_28_uncached, per (account, date, data version): the result depends
+    only on the loaded data and today's date, so every page build and filter change
+    reuses it instead of re-scanning the event tables per customer. The version is the
+    one this thread is building for (see _build_version), so the background pre-build of
+    the NEXT data version never mixes with the pages visitors are still being served."""
+    ac = acct if acct else _EMAIL_ACCT.get(_clean_email(email))
+    if ac is None:
+        return _usage_28_uncached(email, ev_lu, acct)
+    memo = _USAGE28_MEMO
+    stamp = (_build_version(), date.today())
+    d = memo.get(stamp)
+    if d is None:
+        live = globals().get("_DATA_VERSION", 0)
+        for k in [k for k in memo if k[0] < live or k[1] != stamp[1]]:
+            memo.pop(k, None)
+        d = memo.setdefault(stamp, {})
+    r = d.get(ac)
+    if r is None:
+        r = _usage_28_uncached(email, ev_lu, ac)
+        d[ac] = r
+    return r
+
+def _usage_28_uncached(email, ev_lu, acct=None):
     """Usage in the last 28 days for a customer's account. Returns
     (active_days_count, streak, bot_query_28d_total, bot_upload_28d_total). `streak`
     encodes 28 days as ';'-joined 20-field tokens (index 0 = today .. 27 = today-27d):
@@ -1573,6 +1598,15 @@ def _perf(label):
 import copy as _copy
 
 _DATA_VERSION = 0
+_BUILD_TL = threading.local()  # .ver: set only by the background pre-build, which builds for the NEXT version
+
+def _build_version():
+    """Data version this thread builds/looks up for: normally the live one; the
+    background pre-build sets it to the next version so it never touches (or serves
+    from) the pages visitors are still getting during a data reload."""
+    v = getattr(_BUILD_TL, "ver", None)
+    return v if v is not None else _DATA_VERSION
+
 _PAGE_CACHE = {}              # page key -> [entry, ...] (oldest first)
 _PAGE_LOCKS = {}              # page key -> lock (one build in flight per page)
 _PAGE_CACHE_LOCK = threading.Lock()
@@ -1645,7 +1679,7 @@ def _shared_build(page_key):
         def wrapper(state):
             if isinstance(state, _RecState):      # nested call inside another recorded build
                 return fn(state)
-            ver, day = _DATA_VERSION, _ist_today()
+            ver, day = _build_version(), _ist_today()
             hit = _cache_lookup(page_key, state, ver, day)
             if hit is not None:
                 with _perf(f"shared build HIT: {page_key}"):
@@ -1673,6 +1707,7 @@ def _shared_build(page_key):
                                     for k, v in writes.items()}}
                 with _PAGE_CACHE_LOCK:
                     lst = _PAGE_CACHE.setdefault(page_key, [])
+                    lst[:] = [e for e in lst if e["ver"] >= _DATA_VERSION]   # drop pages of superseded data
                     lst.append(entry)
                     del lst[:-_PAGE_CACHE_MAX]
         wrapper.__name__ = fn.__name__
@@ -2652,6 +2687,40 @@ def _wa_agent_reply_events(g):
         events.append((pending, pd.NaT))
     return events
 
+_WA_AGENT_PREP = [None, None, None]   # [leads_df, wa_log, prepared frame]
+
+def _wa_agent_reply_prepare(leads_df, wa_log):
+    """Per-lead `replied` / `delivered` flags for the WA Agent Reply Tracker. Depends only
+    on leads_df and wa_log (replaced only on a data reload), not on the Total/Cost/
+    Percentages view, so it is computed once per load and reused."""
+    if _WA_AGENT_PREP[2] is not None and _WA_AGENT_PREP[0] is leads_df and _WA_AGENT_PREP[1] is wa_log:
+        return _WA_AGENT_PREP[2].copy()
+    ldf = leads_df if (leads_df is not None and len(leads_df)) else pd.DataFrame(
+        columns=["id", "cohort_date", "chat", "org", "ft_at", "engaged"])
+    log = wa_log if (wa_log is not None and len(wa_log)) else pd.DataFrame(
+        columns=["chat_id", "org_phone", "is_outbound", "sent_ist", "body"])
+    log_by_pair = ({k: g.sort_values("sent_ist") for k, g in log.groupby(["chat_id", "org_phone"])}
+                   if len(log) else {})
+
+    def _agg_lead(row):
+        replied = False
+        g = log_by_pair.get((row["chat"], row["org"]))
+        if g is not None and pd.notna(row["ft_at"]):
+            gg = g[g["sent_ist"] > row["ft_at"]]
+            for _opened, _answered in _wa_agent_reply_events(gg):
+                replied = True
+        return pd.Series({"replied": replied})
+
+    if len(ldf):
+        extra = ldf.apply(_agg_lead, axis=1)
+        ldf = pd.concat([ldf.reset_index(drop=True), extra.reset_index(drop=True)], axis=1)
+    else:
+        ldf = ldf.copy()
+        ldf["replied"] = []
+    ldf["delivered"] = ldf["ft_at"].notna() if len(ldf) else []
+    _WA_AGENT_PREP[0], _WA_AGENT_PREP[1], _WA_AGENT_PREP[2] = leads_df, wa_log, ldf
+    return ldf.copy()
+
 def _wa_agent_reply_render(leads_df, wa_log, view="Total"):
     """WA Agent Reply Tracker (Marketing page): one row per signup day (IST)
     since the GM WhatsApp Agent's go-live (27 Oct 2026, 6:40pm IST), per
@@ -2676,29 +2745,7 @@ def _wa_agent_reply_render(leads_df, wa_log, view="Total"):
     a fixed point next-day morning. Blank grid (not an error) when there's no
     data yet."""
     pct_view = (view == "Percentages")
-    ldf = leads_df if (leads_df is not None and len(leads_df)) else pd.DataFrame(
-        columns=["id", "cohort_date", "chat", "org", "ft_at", "engaged"])
-    log = wa_log if (wa_log is not None and len(wa_log)) else pd.DataFrame(
-        columns=["chat_id", "org_phone", "is_outbound", "sent_ist", "body"])
-    log_by_pair = ({k: g.sort_values("sent_ist") for k, g in log.groupby(["chat_id", "org_phone"])}
-                   if len(log) else {})
-
-    def _agg_lead(row):
-        replied = False
-        g = log_by_pair.get((row["chat"], row["org"]))
-        if g is not None and pd.notna(row["ft_at"]):
-            gg = g[g["sent_ist"] > row["ft_at"]]
-            for _opened, _answered in _wa_agent_reply_events(gg):
-                replied = True
-        return pd.Series({"replied": replied})
-
-    if len(ldf):
-        extra = ldf.apply(_agg_lead, axis=1)
-        ldf = pd.concat([ldf.reset_index(drop=True), extra.reset_index(drop=True)], axis=1)
-    else:
-        ldf = ldf.copy()
-        ldf["replied"] = []
-    ldf["delivered"] = ldf["ft_at"].notna() if len(ldf) else []
+    ldf = _wa_agent_reply_prepare(leads_df, wa_log)
 
     def _cell(n, base):
         if pct_view:
@@ -3626,9 +3673,6 @@ def _reload_data():
     global _EMAIL_ACCT, _ACTIVE_WEEKS, _ACTIVE_WEEKS_UPL, _ACTIVE_WEEKS_SYN, _ACTIVE_WEEKS_EV, _ACCT_DATES, _REAL_DATES, _INTEG_FUNNEL, _ONBOARD_DATES, _ACCT_PHONE, _CONTACT_ID, _INTERNAL_ACCTS, _BILLING_END, _LAST_SYNC, _ACCT_BY_EMAIL, _CBILL, _DB_EVENTS
     global _RAW_GA, _RAW_CONV, _RAW_CONTACTS, _GA, _CONV, _CONTACTS, _FT_HEALTH_DF, _POCGAP_DF, _aiaBOT, _GM_SLOTS, _WA_LOG, _CLICKS
     global _SELF_OB_SESSIONS, _TALLY_CONNECTED, _WA_AGENT_REPLY_LEADS, _INSTANT_DEMO_LEADS, _DATA_VERSION
-    _FT_HEALTH_DF = None   # rebuilt lazily on next AIA Ops refresh
-    _POCGAP_DF = None      # poc_email gap table — rebuilt lazily on next AIA Ops refresh
-    _aiaBOT = None          # rebuilt lazily on next AIA Bot refresh
     _RAW_AIA, _RAW_VA, _RAW_LI, _RAW_INC, _RAW_MKT, _RAW_UPL, _RAW_SYN, _RAW_ACT = _load_all()
     _RAW_GA, _RAW_CONV, _RAW_CONTACTS = _load_signals()
     _GA, _CONV, _CONTACTS = _prep_signals(_RAW_GA, _RAW_CONV, _RAW_CONTACTS)
@@ -3680,10 +3724,19 @@ def _reload_data():
     _DB_EVENTS = _build_db_bookings()
     _BILLING_END = _build_billing_end()
     _LAST_SYNC = datetime.now(_IST)
-    _DATA_VERSION += 1      # invalidates every shared page build
-    _warm_caches()
+    # Tables derived from the data are rebuilt lazily from the NEW data (reset only now,
+    # after every source was swapped, so nothing is derived from half-reloaded data).
+    _FT_HEALTH_DF = None   # free-trial health table
+    _POCGAP_DF = None      # poc_email gap table
+    _aiaBOT = None         # AIA Bot data
+    try:
+        # Build every page for the NEXT data version in the background while visitors keep
+        # getting the previous, still-valid pages -- nobody waits for the rebuild...
+        _warm_caches(next_version=True)
+    finally:
+        _DATA_VERSION += 1  # ...then switch everyone to the freshly built pages at once
 
-def _warm_caches():
+def _warm_caches(next_version=False):
     """Pre-build the heavy AIA Ops tables once per data load (here, in the refresh
     thread) so the first user after a refresh doesn't pay ~15-20s for them."""
     for label, fn in (("ft health table", _build_ft_health_df),
@@ -3694,6 +3747,47 @@ def _warm_caches():
                 fn()
         except Exception as ex:
             print(f"[WARN] warm-up of {label} failed, it will build on first use instead -- {ex}")
+    _prebuild_pages(_DATA_VERSION + 1 if next_version else None)
+
+class _PrebuildState:
+    """Stand-in for a brand-new browser session: reads fall back to the module-level
+    defaults (a new session's initial state), writes stay local."""
+    def __init__(self):
+        object.__setattr__(self, "_d", {})
+    def __getattr__(self, k):
+        d = object.__getattribute__(self, "_d")
+        if k in d:
+            return d[k]
+        try:
+            return globals()[k]
+        except KeyError:
+            raise AttributeError(k)
+    def __setattr__(self, k, v):
+        object.__getattribute__(self, "_d")[k] = v
+
+def _prebuild_pages(version=None):
+    """Build every page for the default filters right after a data load, so the shared-build
+    cache is already filled when the first visitor arrives. Anyone on different filters
+    simply builds their own combination on demand, as before. `version`: build for that
+    (next) data version instead of the live one -- used during a reload so visitors keep
+    being served the previous pages until the new ones are complete."""
+    st = _PrebuildState()
+    _BUILD_TL.ver = version
+    try:
+        try:
+            _refresh_signal_date_bounds(st)      # same start-up step a real session does in on_init
+        except Exception as ex:
+            print(f"[WARN] prebuild: date bounds failed -- {ex}")
+        for key, fn in (("aia_ops", _aia_ops_refresh), ("cs", _cs_refresh), ("mkt", _mkt_refresh),
+                        ("va_ops", _va_ops_refresh), ("vaf", _vaf_refresh), ("ar", _ar_refresh),
+                        ("aiabot", _aiabot_refresh)):
+            try:
+                with _perf(f"prebuild page: {key}"):
+                    fn(st)
+            except Exception as ex:
+                print(f"[WARN] prebuild of {key} failed, it will build on first visit instead -- {ex}")
+    finally:
+        _BUILD_TL.ver = None
 
 def _due_on(record_id):
     d = _BILLING_END.get(record_id)
@@ -7346,7 +7440,29 @@ _MS_DISPATCH = {
     "vaf_tat_status": ("vaf_tat_status",         "tat"),
 }
 
+class _DiffState:
+    """Writes string values to the wrapped state only when they changed. Every write is
+    pushed to the browser, so re-sending ~30 unchanged dropdown JSONs made each page click
+    cost ~0.5s on the server for nothing."""
+    __slots__ = ("_real",)
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+    def __getattr__(self, k):
+        return getattr(object.__getattribute__(self, "_real"), k)
+    def __setattr__(self, k, v):
+        real = object.__getattribute__(self, "_real")
+        if isinstance(v, str):
+            try:
+                if getattr(real, k) == v:
+                    return
+            except Exception:
+                pass
+        setattr(real, k, v)
+
 def _sync_ms(state):
+    _sync_ms_all(_DiffState(state))
+
+def _sync_ms_all(state):
     """Push each filter's {lov, sel, label} JSON to its hidden holder so the JS
     checkbox dropdowns reflect the current selection. Some option lists are
     DEPENDENT (cascading): they narrow based on a related filter's selection —
