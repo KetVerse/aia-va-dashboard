@@ -34,7 +34,8 @@ PAGES = [
     ("aia-bot",    "AIA Bot"),
 ]
 VIEWPORT_W   = 1680     # design width; PDF widens further if a table needs it
-SETTLE_MS    = 9000     # wait for data load + grid expansion after each page loads
+SETTLE_MS    = 9000     # upper bound (x3) on waiting for grids to render after a page loads
+SETTLE_SHORT_MS = 1500  # extra pause once the grids are drawn (charts / KPI cards)
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -56,7 +57,10 @@ GRID_FILTERS = {
     "aia_ft":       ("Usage Active Days (28d)", "drop", ["0"]),   # Free Trial Usage & Health
     "vaf_tat":      ("TAT Status",              "drop", ["Parked", "Churned"]),
     "vaf_ar":       ("Due Status",              "drop", ["Churned"]),
-    "aiabot_fail":  ("Date",                    "date_eq", ["yesterday"]),  # Where the Bot Falls Short — yesterday only
+    # Unmapped Deals & Signups: keep a row only if its Sign Up Date OR Integration
+    # Date falls in the CURRENT month, OR its Activity Score is > 0.
+    "aia_pocgap":   ("Sign Up Date",            "month_or_score", ["Integration Date", "Activity Score"]),
+    "aiabot_fail":  ("Date",                  "date_eq", ["yesterday"]),  # Where the Bot Falls Short — yesterday only
     "aiabot_table": ("Last Seen",               "date_eq", ["yesterday"]),  # Per-Company Detail — last seen yesterday
 }
 
@@ -92,6 +96,24 @@ _FILTER_JS = """
         const num = (2000 + (+m[3]))*10000 + (mo+1)*100 + (+m[1]);
         return num === cutNum;
       });
+    } else if (mode === 'month_or_score') {
+      // col = 1st date column, values = [2nd date column, score column]. Keep a row
+      // if either date is in the current month or the score is > 0.
+      const MON = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+      const now = new Date(), cy = now.getFullYear(), cm = now.getMonth();
+      const j = d.columns.indexOf(values[0]), k = d.columns.indexOf(values[1]);
+      if (j < 0 || k < 0) { out.push(name + ': missing column'); continue; }
+      const cell = (r, idx) => {
+        let c = r[idx];
+        if (c && typeof c === 'object') c = ('v' in c) ? c.v : ('t' in c ? c.t : '');
+        return String(c == null ? '' : c).trim();
+      };
+      const inMonth = s => {
+        const m = s.match(/^(\\d{1,2})-([A-Za-z]{3})-(\\d{2})$/);
+        return !!m && MON[m[2].toLowerCase()] === cm && 2000 + (+m[3]) === cy;
+      };
+      d.rows = (d.rows || []).filter(r =>
+        inMonth(cell(r, i)) || inMonth(cell(r, j)) || (Number(cell(r, k)) || 0) > 0);
     } else {
       const want = values.map(v => String(v).trim().toLowerCase());
       d.rows = (d.rows || []).filter(r => {
@@ -164,6 +186,38 @@ _WIDEN_JS = """
 """
 
 
+# True once every grid on the page has data and has drawn it: each .gridholder has
+# a payload, and each grid iframe shows a header row (or its "No data" notice).
+# Replaces a flat SETTLE_MS sleep -- pages now build in ~1s, so waiting 9s per page
+# was pure dead time. SETTLE_MS stays as the upper bound if something never settles.
+_READY_JS = """
+() => {
+  const holders = document.querySelectorAll('.gridholder');
+  for (const h of holders) if (!(h.textContent || '').trim()) return false;
+  // only /grid/ frames have a table; /pie/ frames share the class but draw a chart
+  const frames = document.querySelectorAll('iframe.grid-frame[src^="/grid/"]');
+  for (const f of frames) {
+    let d; try { d = f.contentDocument; } catch (e) { return false; }
+    if (!d || d.readyState !== 'complete') return false;
+    const empty = d.getElementById('empty');
+    const drawn = d.querySelector('#h th') || (empty && empty.style.display !== 'none');
+    if (!drawn) return false;
+  }
+  return holders.length > 0 || frames.length === 0;
+}
+"""
+
+
+def wait_grids_ready(page, name: str) -> None:
+    t0 = datetime.now()
+    try:
+        page.wait_for_function(_READY_JS, timeout=SETTLE_MS * 3, polling=300)
+    except Exception:
+        print(f"[snapshot]   WARN {name}: grids not ready after {SETTLE_MS * 3 // 1000}s, continuing", flush=True)
+    page.wait_for_timeout(SETTLE_SHORT_MS)   # charts / KPI cards finishing their last paint
+    print(f"[snapshot]   ready in {(datetime.now() - t0).total_seconds():.1f}s", flush=True)
+
+
 def render(base_url: str, out_path: Path) -> Path:
     pdfs = []
     with sync_playwright() as p:
@@ -183,7 +237,7 @@ def render(base_url: str, out_path: Path) -> Path:
         try:
             page.goto(warm, wait_until="load", timeout=60000)
             page.wait_for_selector(".main-nav", timeout=45000)
-            page.wait_for_timeout(SETTLE_MS)
+            wait_grids_ready(page, "warm-up")
         except Exception as ex:
             print(f"[snapshot]   warm-up note: {ex}", flush=True)
 
@@ -197,7 +251,7 @@ def render(base_url: str, out_path: Path) -> Path:
                 page.wait_for_selector(".main-nav", timeout=45000)
             except Exception:
                 print(f"[snapshot]   WARN {name}: nav never rendered", flush=True)
-            page.wait_for_timeout(SETTLE_MS)
+            wait_grids_ready(page, name)
             # PDF-only row filters, then let the iframes re-render off the edited
             # payload (their poll runs on a 1s interval) and re-measure.
             for note in page.evaluate(_FILTER_JS, GRID_FILTERS):

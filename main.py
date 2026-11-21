@@ -18,8 +18,11 @@ except Exception:
     pass
 import threading
 import time as _time
+import warnings
 import pandas as pd
 import numpy as np
+# pandas nags on every read_sql with a raw psycopg2 connection; it works fine, so mute just that one
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable", category=UserWarning)
 from datetime import date, datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
@@ -111,6 +114,10 @@ _PAGE_NAV_SCRIPT = """
       e.preventDefault();
       var btn = document.querySelector("#reset-filters-btn button") || document.getElementById("reset-filters-btn");
       if (btn) btn.click();
+      // also clear the per-column (⋮) filters inside every table iframe
+      document.querySelectorAll("iframe.grid-frame").forEach(function (f) {
+        try { if (f.contentWindow && f.contentWindow.cfClearAll) f.contentWindow.cfClearAll(); } catch (_) {}
+      });
       return;
     }
     if (!e.altKey || e.ctrlKey || e.shiftKey || e.metaKey) return;
@@ -7392,12 +7399,6 @@ def on_va_date(state):
 _MS_DISPATCH = {
     "aia_owner":      ("aia_selected_owner",     "aia"),
     "aia_campaign":   ("aia_selected_campaign",  "aia"),
-    "aia_ft_deal":    ("aia_ft_deal",            "aiaft"),
-    "aia_ft_gm":      ("aia_ft_gm",              "aiaft"),
-    "aia_ft_stage":   ("aia_ft_stage",           "aiaft"),
-    "aia_um_deal":    ("aia_um_deal",            "aiaum"),
-    "aia_um_gm":      ("aia_um_gm",              "aiaum"),
-    "aia_um_stage":   ("aia_um_stage",           "aiaum"),
     "aiabot_segment":  ("aiabot_segment",          "aiabot"),
     "aiabot_stage":    ("aiabot_stage",            "aiabot"),
     "aiabot_deal":     ("aiabot_deal",             "aiabot"),
@@ -7414,12 +7415,6 @@ _MS_DISPATCH = {
     "cs_owner":       ("cs_selected_owner",      "cs"),
     "cs_deal":        ("cs_selected_deal",       "cs"),
     "cs_rectype":     ("cs_selected_rectype",    "cs"),
-    "cs_usage_deal":  ("cs_usage_deal",          "usage"),
-    "cs_usage_csm":   ("cs_usage_csm",           "usage"),
-    "cs_usage_stage": ("cs_usage_stage",         "usage"),
-    "cs_usage_owner": ("cs_usage_owner",         "usage"),
-    "cs_usage_cadence": ("cs_usage_cadence",     "usage"),
-    "cs_usage_status": ("cs_usage_status",       "usage"),
     "cs_activity_event": ("cs_activity_event",   "activity"),
     "cs_activity_deal":  ("cs_activity_deal",    "activity"),
     "cs_activity_stage": ("cs_activity_stage",   "activity"),
@@ -7428,16 +7423,6 @@ _MS_DISPATCH = {
     "vaf_deal":       ("vaf_selected_deal",      "vaf"),
     "vaf_line_item":  ("vaf_selected_line_item", "vaf"),
     "vaf_rectype":    ("vaf_selected_rectype",   "vaf"),
-    "vaf_ar_deal":    ("vaf_ar_deal",            "ar"),
-    "vaf_ar_stage":   ("vaf_ar_stage",           "ar"),
-    "vaf_ar_am":      ("vaf_ar_am",              "ar"),
-    "vaf_ar_owner":   ("vaf_ar_owner",           "ar"),
-    "vaf_ar_status":  ("vaf_ar_status",          "ar"),
-    "vaf_tat_deal":   ("vaf_tat_deal",           "tat"),
-    "vaf_tat_stage":  ("vaf_tat_stage",          "tat"),
-    "vaf_tat_am":     ("vaf_tat_am",             "tat"),
-    "vaf_tat_owner":  ("vaf_tat_owner",          "tat"),
-    "vaf_tat_status": ("vaf_tat_status",         "tat"),
 }
 
 class _DiffState:
@@ -7535,82 +7520,6 @@ def _sync_ms_all(state):
         cs_deal_lov = sorted(_AIA_LI["deal_name"].dropna().unique().tolist())
     state.cs_deal_ms        = _ms_json(cs_deal_lov, state.cs_selected_deal)
 
-    # Customer Usage & Health: Deal Name / CSM / Stage / Deal Owner / Status cross-filter
-    _ua = state.cs_usage_all
-    def _ulov(target):
-        d = _ua
-        if d is None or len(d) == 0:
-            return []
-        for col, sv in (("Deal Name", state.cs_usage_deal), ("CSM", state.cs_usage_csm),
-                        ("Stage", state.cs_usage_stage), ("Deal Owner", state.cs_usage_owner),
-                        ("Cadence", state.cs_usage_cadence),
-                        ("Status", state.cs_usage_status)):
-            if col == target:
-                continue
-            # Status keeps its raw list so the "" (empty-box) option isn't stripped
-            # by _sel; the other columns normalise through _sel as usual.
-            s = (sv if isinstance(sv, list) else []) if col == "Status" else _sel(sv)
-            if s:
-                d = d[d[col].isin(s)]
-        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.cs_usage_deal_ms   = _ms_json(_ulov("Deal Name"),  state.cs_usage_deal)
-    # Diagnostic: a GM reported the CSM dropdown on this table coming back empty
-    # for them specifically, even with every OTHER filter here reset to "All"
-    # (so the underlying data clearly has CSM values and no narrowing filter
-    # should be excluding them). Couldn't reproduce or find a server-side error,
-    # so log the exact filter state whenever this empty-despite-data case fires,
-    # to catch it with real evidence next time instead of guessing blind.
-    _csm_lov = _ulov("CSM")
-    if not _csm_lov and _ua is not None and len(_ua) and "CSM" in _ua.columns and _ua["CSM"].notna().any():
-        print(f"[WARN] cs_usage_csm_ms empty despite CSM data present -- rows={len(_ua)} "
-              f"deal={_sel(state.cs_usage_deal)!r} stage={_sel(state.cs_usage_stage)!r} "
-              f"owner={_sel(state.cs_usage_owner)!r} cadence={_sel(state.cs_usage_cadence)!r} "
-              f"status={state.cs_usage_status!r} csm_filter={_sel(state.cs_usage_csm)!r}")
-    state.cs_usage_csm_ms    = _ms_json(_csm_lov,             state.cs_usage_csm)
-    state.cs_usage_stage_ms  = _ms_json(_ulov("Stage"),      state.cs_usage_stage)
-    state.cs_usage_owner_ms  = _ms_json(_ulov("Deal Owner"), state.cs_usage_owner)
-    state.cs_usage_cadence_ms = _ms_json(_ulov("Cadence"),   state.cs_usage_cadence)
-    # empty Status "" is included as a real, selectable option (an empty box)
-    state.cs_usage_status_ms = _ms_json(_ulov("Status"), state.cs_usage_status)
-
-    # Free Trial Usage & Health — its own Deal Name / GM / Deal Stage filters,
-    # cascading over the FT frame only.
-    _sd = _sel(state.aia_ft_deal); _sg = _sel(state.aia_ft_gm); _ss = _sel(state.aia_ft_stage)
-    def _lov(target):
-        df = state.aia_ft_all
-        if df is None or len(df) == 0:
-            return []
-        d = df
-        if target != "Deal"  and _sd: d = d[d["Deal Name"].isin(_sd)]
-        if target != "GM"    and _sg: d = d[d["GM"].isin(_sg)]
-        if target != "Stage" and _ss: d = d[d["Stage"].isin(_ss)]
-        col = {"Deal": "Deal Name", "GM": "GM", "Stage": "Stage"}[target]
-        return sorted(set(d[col].dropna().astype(str))) if col in d.columns else []
-    state.aia_ft_deal_ms  = _ms_json(_lov("Deal"),  state.aia_ft_deal)
-    state.aia_ft_gm_ms    = _ms_json(_lov("GM"),    state.aia_ft_gm)
-    state.aia_ft_stage_ms = _ms_json(_lov("Stage"), state.aia_ft_stage)
-
-    # Unmapped Deals & Signups — its OWN filters, cascading over the gap frame only.
-    # The deal column holds a deal name OR a raw signup email (so an untracked signup
-    # is pickable by its email); the "—" GM placeholder is not a real GM.
-    _ud = _sel(state.aia_um_deal); _ug = _sel(state.aia_um_gm); _us = _sel(state.aia_um_stage)
-    def _umlov(target):
-        df = state.aia_pocgap_all
-        if df is None or len(df) == 0:
-            return []
-        d = df
-        if target != "Deal"  and _ud: d = d[d["Deal / Signup Email"].isin(_ud)]
-        if target != "GM"    and _ug and "GM" in d.columns:    d = d[d["GM"].isin(_ug)]
-        if target != "Stage" and _us and "Stage" in d.columns: d = d[d["Stage"].isin(_us)]
-        col = {"Deal": "Deal / Signup Email", "GM": "GM", "Stage": "Stage"}[target]
-        vals = set(d[col].dropna().astype(str)) if col in d.columns else set()
-        if target == "GM":
-            vals.discard("—")
-        return sorted(vals)
-    state.aia_um_deal_ms  = _ms_json(_umlov("Deal"),  state.aia_um_deal)
-    state.aia_um_gm_ms    = _ms_json(_umlov("GM"),    state.aia_um_gm)
-    state.aia_um_stage_ms = _ms_json(_umlov("Stage"), state.aia_um_stage)
-
     # AIA Bot: Segment (fixed lov) / Deal Stage / Deal Name cross-filter
     _wa = state.aiabot_all
     def _walov(target):
@@ -7644,48 +7553,6 @@ def _sync_ms_all(state):
     state.vaf_rectype_ms    = _ms_json(vaf_rectype_list,   state.vaf_selected_rectype)
     state.vaf_line_item_ms  = _ms_json(vaf_line_item_list, state.vaf_selected_line_item)
 
-    # Accounts Receivable Tracker: Deal Name / Deal Stage / AM / Deal Owner /
-    # Due Status cross-filter each other (options narrow to the current selection).
-    _ar = state.vaf_ar_all
-    def _arlov(target):
-        d = _ar
-        if d is None or len(d) == 0:
-            return []
-        for col, sv in (("Deal Name", state.vaf_ar_deal), ("Deal Stage", state.vaf_ar_stage),
-                        ("AM", state.vaf_ar_am), ("Deal Owner", state.vaf_ar_owner),
-                        ("Due Status", state.vaf_ar_status)):
-            if col == target:
-                continue
-            s = _sel(sv)
-            if s:
-                d = d[d[col].isin(s)]
-        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.vaf_ar_deal_ms   = _ms_json(_arlov("Deal Name"),  state.vaf_ar_deal)
-    state.vaf_ar_stage_ms  = _ms_json(_arlov("Deal Stage"), state.vaf_ar_stage)
-    state.vaf_ar_am_ms     = _ms_json(_arlov("AM"),         state.vaf_ar_am)
-    state.vaf_ar_owner_ms  = _ms_json(_arlov("Deal Owner"), state.vaf_ar_owner)
-    state.vaf_ar_status_ms = _ms_json(_arlov("Due Status"), state.vaf_ar_status)
-
-    # TAT Tracker: Deal Name / Deal Stage / AM / Deal Owner / TAT Status cross-filter.
-    _tat = state.vaf_tat_all
-    def _tatlov(target):
-        d = _tat
-        if d is None or len(d) == 0:
-            return []
-        for col, sv in (("Deal Name", state.vaf_tat_deal), ("Deal Stage", state.vaf_tat_stage),
-                        ("AM", state.vaf_tat_am), ("Deal Owner", state.vaf_tat_owner),
-                        ("TAT Status", state.vaf_tat_status)):
-            if col == target:
-                continue
-            s = _sel(sv)
-            if s:
-                d = d[d[col].isin(s)]
-        return sorted(d[target].dropna().unique().tolist()) if target in d.columns else []
-    state.vaf_tat_deal_ms   = _ms_json(_tatlov("Deal Name"),  state.vaf_tat_deal)
-    state.vaf_tat_stage_ms  = _ms_json(_tatlov("Deal Stage"), state.vaf_tat_stage)
-    state.vaf_tat_am_ms     = _ms_json(_tatlov("AM"),         state.vaf_tat_am)
-    state.vaf_tat_owner_ms  = _ms_json(_tatlov("Deal Owner"), state.vaf_tat_owner)
-    state.vaf_tat_status_ms = _ms_json(_tatlov("TAT Status"), state.vaf_tat_status)
 
 def on_ms_change(state):
     """One shared handler for every custom multi-select. The JS writes
@@ -7714,17 +7581,12 @@ def on_ms_change(state):
         state.aiabot_cohort_intent = sel
     with _perf(f"filter [{scope}] {key} TOTAL"):
         if scope == "aia":     on_aia_filter_change(state)
-        elif scope == "aiaft": _apply_ft_filter(state)
-        elif scope == "aiaum": _apply_pocgap_filter(state)
         elif scope == "aiabot": _aiabot_refresh(state)
         elif scope == "va":    on_va_filter_change(state)
         elif scope == "mkt":   _mkt_refresh(state)
         elif scope == "cs":    _cs_refresh(state)
-        elif scope == "usage": _apply_usage_filter(state)
         elif scope == "activity": _build_cohort_tables(state)
         elif scope == "vaf":   _vaf_refresh(state)
-        elif scope == "ar":    _ar_refresh(state)
-        elif scope == "tat":   _tat_refresh(state)
         with _perf("  _sync_ms"):
             _sync_ms(state)
 

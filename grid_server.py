@@ -500,9 +500,40 @@ _GRID_HTML = r"""<!DOCTYPE html>
   tr.totrow td{ background:var(--tot); color:var(--tottxt); font-weight:700;
     border-top:2px solid var(--totb); border-bottom:2px solid var(--totb); }
   .empty{ padding:24px; color:#94a3b8; font-size:13px; text-align:center; }
+  /* per-column filter: the vertical-ellipsis in each header + its popup */
+  thead th.hasf{ padding-right:24px; }
+  thead th .cf{ position:absolute; right:4px; top:50%; transform:translateY(-50%); padding:3px 4px;
+    font-size:14px; line-height:1; font-weight:700; opacity:.55; border-radius:3px; cursor:pointer; }
+  thead th:hover .cf{ opacity:1; }
+  thead th .cf:hover{ background:rgba(255,255,255,.22); }
+  thead th .cf.on{ opacity:1; color:#fbbf24; background:rgba(255,255,255,.16); }
+  #cfpop{ display:none; position:fixed; z-index:50; min-width:190px; padding:10px 12px; background:#fff;
+    color:#1e293b; border:1px solid #cbd5e1; border-radius:8px; box-shadow:0 8px 24px rgba(15,23,42,.22);
+    font-size:12px; font-weight:400; text-transform:none; letter-spacing:0; }
+  #cfpop .cft{ font-weight:700; margin-bottom:6px; color:#1a3a6c; }
+  #cfpop label{ display:block; margin:6px 0 2px; color:#64748b; font-size:11px; }
+  #cfpop input{ width:100%; box-sizing:border-box; padding:5px 7px; border:1px solid #cbd5e1;
+    border-radius:5px; font-size:12px; }
+  #cfpop input:focus{ outline:none; border-color:#1a7fc4; }
+  #cfbar{ display:none; text-align:right; padding:2px 4px 4px; }
+  #cfbar a{ display:inline-block; padding:3px 10px; border:1px solid #cbd5e1; border-radius:999px; background:#fff;
+    color:#1a3a6c; font-size:11px; font-weight:600; cursor:pointer; }
+  #cfbar a:hover{ background:#eef4fb; border-color:#1a7fc4; }
+  #cfpop.wide{ min-width:300px; max-width:360px; padding:8px; }
+  #cfpop.wide .cft{ display:none; }
+  #cfpop .cfs{ border:2px solid #1a7fc4; border-radius:6px; padding:7px 9px; font-size:13px; }
+  #cfpop .cfl{ max-height:260px; overflow-y:auto; margin-top:6px; border-top:1px solid #e2e8f0; }
+  #cfpop .cfi{ display:flex; align-items:center; gap:9px; margin:0; padding:7px 6px; font-size:13px;
+    color:#1e293b; cursor:pointer; white-space:nowrap; }
+  #cfpop .cfi:hover{ background:#f1f5f9; }
+  #cfpop .cfi input{ width:auto; margin:0; accent-color:#1a7fc4; }
+  #cfpop .cfb{ margin-top:8px; text-align:right; }
+  #cfpop .cfb a{ color:#1a7fc4; cursor:pointer; font-size:11px; text-decoration:underline; }
 </style></head>
 <body>
+  <div id="cfpop"></div>
   <div id="searchbar"><input id="search" placeholder="Search…" oninput="body()"></div>
+  <div id="cfbar"><a id="cfclrall"></a></div>
   <div class="wrap"><table id="g">
     <thead id="h"></thead><tbody id="b"></tbody><tfoot id="f"></tfoot>
   </table></div>
@@ -540,11 +571,160 @@ function header(){
     const tip = tips[i] ? ' title="'+String(tips[i]).replace(/"/g,"&quot;")+'"' : '';
     const cw=(DATA.colW||[])[i];
     const wsty = cw ? ' style="width:'+cw+'px"' : '';
-    tr+='<th class="'+c2.trim()+'" data-i="'+i+'"'+tip+wsty+'>'+c+arr+pri+'</th>';
+    const ck=cfKind(i);
+    const cf=(ck && !isSnap()) ? '<span class="cf'+(cfOn(CF[c])?' on':'')+'" data-i="'+i+'" title="Filter this column">&#8942;</span>' : '';
+    if(cf) c2+=" hasf";
+    tr+='<th class="'+c2.trim()+'" data-i="'+i+'"'+tip+wsty+'>'+c+arr+pri+cf+'</th>';
   });
   h.innerHTML=tr+"</tr>";
   if(sortable) h.querySelectorAll("th").forEach(th=>th.onclick=e=>onSort(+th.dataset.i, e.shiftKey));
+  h.querySelectorAll(".cf").forEach(el=>el.onclick=e=>{ e.stopPropagation(); cfToggle(+el.dataset.i, el); });
 }
+// ── Per-column filters (HubSpot-style ⋮ menu) ───────────────────────────────
+// text column -> search box; date column -> From/To; number column -> greater/less
+// than; bubble (streak) / hidden / serial columns -> none. Client-side only and
+// kept across the 1s data poll. Not shown in the PDF snapshot.
+const CF = {};                 // column name -> {txt, gt, lt, from, to}  ("" = unset)
+let CFOPEN = null;             // column index whose popup is open
+function isSnap(){ try{ return !!(window.parent && window.parent.__SNAPSHOT__); }catch(e){ return false; } }
+function cfOn(f){ return !!f && !!((f.sel && f.sel.length) || f.gt || f.lt || f.from || f.to); }
+function isTotRow(r){ return !!DATA.inlineTotal && (r[0]==null?'':String(r[0]).trim()).indexOf("Total")===0; }
+function cfKind(i){
+  if((DATA.hidden||[])[i] || (DATA.streak||[])[i] || i===DATA.rowNumCol) return "";
+  if(!DATA.rows || !DATA.rows.length) return "";
+  // matrix / cohort tables (heat-mapped grids): ONLY the first (Cohort / row-label) column
+  // is filterable, whatever the row count
+  const isMatrix = !!(DATA.heatByRow || DATA.heatMax);
+  if(isMatrix && i!==0) return "";
+  // other small tables (< 8 data rows, "Total" rows not counted) don't need column filters
+  if(!isMatrix && DATA.rows.filter(r=>(r[0]==null?'':String(r[0]).trim()).indexOf("Total")!==0).length<8) return "";
+  if((DATA.dateCols||[])[i]) return "date";
+  if(DATA.numeric[i]) return "num";
+  // auto-detect dd-MMM-yy date columns that weren't declared in date_cols
+  // (month-only labels like "Sep 25" are better as a chronological tick-list than a day picker)
+  let seen=0, allMonth=true;
+  for(const r of DATA.rows){
+    const v=r[i]; if(v===null||v===undefined||v==="") continue;
+    const p=parseDateEx(v);
+    if(!p) return "str";
+    if(!p.m) allMonth=false;
+    if(++seen>=50) break;
+  }
+  return (seen && !allMonth) ? "date" : "str";
+}
+function cfTs(s){ return s ? new Date(s+"T00:00:00").getTime() : null; }
+function cfApply(rows){
+  const act=[];
+  DATA.columns.forEach((c,i)=>{ const f=CF[c]; if(cfOn(f)){ const k=cfKind(i); if(k) act.push([i,k,f]); } });
+  if(!act.length) return rows;
+  act.forEach(a=>{ if(a[1]==="str") a.push(new Set(a[2].sel)); });
+  return rows.filter(r=>{
+    if(isTotRow(r)) return true;
+    for(const a of act){
+      const i=a[0], k=a[1], f=a[2], v=r[i];
+      if(k==="str"){
+        if(!a[3].has(String(v==null?"":v))) return false;
+      } else if(k==="num"){
+        const n=numOf(v);
+        if(f.gt!=="" && f.gt!=null && !(n!==null && n>parseFloat(f.gt))) return false;
+        if(f.lt!=="" && f.lt!=null && !(n!==null && n<parseFloat(f.lt))) return false;
+      } else {
+        const t=parseDMY(v), lo=cfTs(f.from), hi=cfTs(f.to);
+        if(lo!==null && !(t!==null && t>=lo)) return false;
+        if(hi!==null && !(t!==null && t<=hi)) return false;
+      }
+    }
+    return true;
+  });
+}
+function cfClose(){
+  const p=document.getElementById("cfpop"); if(p) p.style.display="none";
+  CFOPEN=null;
+  try{ if(window.frameElement) window.frameElement.style.minHeight=""; }catch(e){}
+}
+function cfToggle(i, anchor){ if(CFOPEN===i){ cfClose(); } else { cfOpen(i, anchor); } }
+function cfOpen(i, anchor){
+  const p=document.getElementById("cfpop"), c=DATA.columns[i], k=cfKind(i), f=CF[c]||{};
+  const esc=s=>String(s==null?"":s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+  let h='<div class="cft">'+esc(c)+'</div>';
+  let vals=null; const selSet=new Set(f.sel||[]);
+  if(k==="str"){
+    // distinct values, ticked ones pinned on top (A-Z within each group)
+    const seen=new Set(); let hasBlank=false;
+    for(const r of DATA.rows){ if(isTotRow(r)) continue; const v=r[i]; if(v===null||v===undefined||v===""){ hasBlank=true; continue; } seen.add(String(v)); }
+    const az=(x,y)=>x.toLowerCase().localeCompare(y.toLowerCase());
+    // order: matrix row-labels keep the table's own (chronological) order; date-like labels
+    // sort by date; everything else A-Z
+    let all=[...seen];
+    if(!(DATA.heatByRow || DATA.heatMax)){
+      all = all.every(v=>parseDateEx(v)) ? all.sort((x,y)=>parseDateEx(x).t-parseDateEx(y).t) : all.sort(az);
+    }
+    if(hasBlank) all.push("");                       // "(Blank)" option, listed last
+    vals=[...all.filter(v=>selSet.has(v)), ...all.filter(v=>!selSet.has(v))];
+    h+='<input id="cf1" class="cfs" type="text" placeholder="Search…" autocomplete="off">'
+      +'<div class="cfl"><label class="cfi"><input type="checkbox" id="cfall"'+(selSet.size?'':' checked')+'> All</label>'
+      +vals.map((v,n)=>{ const lb=(v==="")?"(Blank)":v;
+          return '<label class="cfi" data-t="'+esc(lb.toLowerCase())+'"><input type="checkbox" class="cfv" data-n="'+n+'"'+(selSet.has(v)?' checked':'')+'> '+esc(lb)+'</label>'; }).join("")
+      +'</div>';
+    p.className="wide";
+  }
+  else { p.className="";
+  if(k==="num") h+='<label>Greater than</label><input id="cf1" type="number" step="any" value="'+esc(f.gt)+'">'
+                       +'<label>Less than</label><input id="cf2" type="number" step="any" value="'+esc(f.lt)+'">';
+  else               h+='<label>From</label><input id="cf1" type="date" value="'+esc(f.from)+'">'
+                       +'<label>To</label><input id="cf2" type="date" value="'+esc(f.to)+'">';
+  }
+  h+='<div class="cfb"><a id="cfclr">Clear</a></div>';
+  p.innerHTML=h; p.style.display="block"; CFOPEN=i;
+  const apply=n=>{ if(cfOn(n)) CF[c]=n; else delete CF[c]; render(); };
+  if(k==="str"){
+    const allBox=document.getElementById("cfall"), boxes=[...p.querySelectorAll(".cfv")];
+    document.getElementById("cf1").oninput=e=>{
+      const q=e.target.value.toLowerCase().trim();
+      p.querySelectorAll("label[data-t]").forEach(l=>{ l.style.display=(!q||l.dataset.t.includes(q))?"":"none"; });
+    };
+    allBox.onchange=()=>{ selSet.clear(); boxes.forEach(b=>b.checked=false); allBox.checked=true; apply({sel:[]}); };
+    boxes.forEach(b=>b.onchange=()=>{
+      const v=vals[+b.dataset.n];
+      if(b.checked) selSet.add(v); else selSet.delete(v);
+      allBox.checked=selSet.size===0;
+      apply({sel:[...selSet]});
+    });
+  } else {
+    const set=()=>{
+      const a=document.getElementById("cf1"), b=document.getElementById("cf2");
+      const n={sel:[],gt:"",lt:"",from:"",to:""};
+      if(k==="num"){ n.gt=a.value; n.lt=b.value; } else { n.from=a.value; n.to=b.value; }
+      apply(n);
+    };
+    p.querySelectorAll("input").forEach(el=>el.oninput=set);
+  }
+  document.getElementById("cfclr").onclick=()=>{ delete CF[c]; render(); cfOpen(i, document.querySelector('.cf[data-i="'+i+'"]')||anchor); };
+  const r=anchor.getBoundingClientRect();
+  const left=Math.max(4, Math.min(r.left, window.innerWidth-p.offsetWidth-4));
+  p.style.left=left+"px"; p.style.top=(r.bottom+4)+"px";
+  // a short table shrinks its iframe to fit the rows; keep the frame tall enough to hold the popup
+  try{ if(window.frameElement) window.frameElement.style.minHeight=(r.bottom+4+p.offsetHeight+10)+"px"; }catch(e){}
+  const first=document.getElementById("cf1"); if(first) first.focus();
+}
+function cfClearAll(){ Object.keys(CF).forEach(k=>delete CF[k]); cfClose(); render(); }
+document.getElementById("cfclrall").onclick=cfClearAll;
+// Alt+Shift+R is the page-wide "reset filters" shortcut; when focus is inside this iframe
+// the page never sees the key, so hand it up (the page handler also clears every table's ⋮ filters)
+document.addEventListener("keydown", e=>{
+  if(e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key==="R"){
+    e.preventDefault();
+    try{ window.parent.document.dispatchEvent(new KeyboardEvent("keydown",{key:"R",altKey:true,shiftKey:true,bubbles:true,cancelable:true})); }catch(x){ cfClearAll(); }
+  }
+});
+document.addEventListener("mousedown", e=>{
+  if(CFOPEN!==null && !e.target.closest("#cfpop") && !e.target.closest(".cf")) cfClose();
+});
+document.addEventListener("keydown", e=>{ if(e.key==="Escape" && CFOPEN!==null) cfClose(); });
+// a click anywhere OUTSIDE this iframe (the page around it, or another table's iframe)
+// never reaches this document, so close on focus loss and on parent-page clicks too
+window.addEventListener("blur", ()=>{ if(CFOPEN!==null) cfClose(); });
+try{ window.parent.document.addEventListener("mousedown", ()=>{ if(CFOPEN!==null) cfClose(); }, true); }catch(e){}
 function onSort(col, shift){
   const isNum=DATA.numeric[col];
   if(shift){
@@ -556,13 +736,25 @@ function onSort(col, shift){
   }
   render();
 }
-function parseDMY(s){
-  // "dd-MMM-yy" (e.g. 20-Jun-26) -> timestamp; null if not a date
-  const m=String(s||"").match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/);
-  if(!m) return null;
-  const mon=_MON.indexOf(m[2]); if(mon<0) return null;
-  return new Date(2000+(+m[3]), mon, +m[1]).getTime();
+function parseDateEx(s){
+  // Recognised: "20-Jun-26" / "20 Jun 2026" (full), "21 Nov" (no year -> the latest such
+  // date not in the future), "Sep 25" / "Sep-2025" (month only -> 1st of that month, m:true).
+  // Returns {t: timestamp, m: monthOnly} or null.
+  s=String(s==null?"":s).trim(); if(!s) return null;
+  const cap=w=>w.charAt(0).toUpperCase()+w.slice(1).toLowerCase();
+  let m, mon, d, y=null, mo=false;
+  if((m=s.match(/^(\d{1,2})[- ]([A-Za-z]{3})[- ](\d{2}|\d{4})$/))){ d=+m[1]; mon=_MON.indexOf(cap(m[2])); y=+m[3]; if(y<100) y+=2000; }
+  else if((m=s.match(/^(\d{1,2})[- ]([A-Za-z]{3})$/))){ d=+m[1]; mon=_MON.indexOf(cap(m[2])); }
+  else if((m=s.match(/^([A-Za-z]{3})[- ](\d{2}|\d{4})$/))){ d=1; mon=_MON.indexOf(cap(m[1])); y=+m[2]; if(y<100) y+=2000; mo=true; }
+  else return null;
+  if(mon<0 || d<1 || d>31) return null;
+  if(y===null){
+    const now=new Date(); y=now.getFullYear();
+    if(new Date(y,mon,d).getTime() > now.getTime()+86400000) y--;
+  }
+  return {t:new Date(y,mon,d).getTime(), m:mo};
 }
+function parseDMY(s){ const p=parseDateEx(s); return p ? p.t : null; }   // timestamp or null
 function sortRows(rows){
   if(!SORT.length) return rows;
   const num=DATA.numeric, dcol=DATA.dateCols||[];
@@ -755,7 +947,7 @@ function body(){
   }
   const maxes={};
   bars.forEach((on,i)=>{ if(on) maxes[i]=colMax(i); });
-  let rows=sortRows(DATA.rows);
+  let rows=sortRows(cfApply(DATA.rows));
   const si=DATA.searchIdx||[];
   const sb=document.getElementById("search");
   const q=(si.length && sb)?(sb.value||"").toLowerCase().trim():"";
@@ -859,6 +1051,10 @@ function render(){
   document.getElementById("searchbar").style.display =
       (DATA.searchIdx && DATA.searchIdx.length) ? "block" : "none";
   header(); body(); foot();
+  // "Clear filters (n)" pill: only while at least one column filter is active
+  const nf=DATA.columns.filter(c=>cfOn(CF[c])).length, bar=document.getElementById("cfbar");
+  bar.style.display=(nf && !isSnap()) ? "block" : "none";
+  document.getElementById("cfclrall").textContent="✕ Clear filters ("+nf+")";
   var FORCE_FULL=false;
   try{ FORCE_FULL = !!(window.parent && window.parent.__SNAPSHOT__); }catch(e){}
   if(DATA.autosize || FORCE_FULL){
@@ -866,7 +1062,9 @@ function render(){
       if(window.frameElement){
         // measure the ACTUAL content (table + search bar), not the iframe viewport
         const sb=document.getElementById("searchbar");
-        const sbh=(sb && sb.style.display!=="none") ? sb.offsetHeight : 0;
+        const cb=document.getElementById("cfbar");
+        const sbh=((sb && sb.style.display!=="none") ? sb.offsetHeight : 0)
+                 +((cb && cb.style.display!=="none") ? cb.offsetHeight : 0);
         const contentH=tbl.offsetHeight + sbh + 8;
         // maxHeight caps the frame: shrink to content when short, but cap + scroll
         // internally when tall. Snapshot (FORCE_FULL) ignores the cap = full expand.
