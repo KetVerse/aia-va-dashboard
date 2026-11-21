@@ -3,6 +3,11 @@
 # Build once on the VPS:  docker build -f Dockerfile.snapshot -t dashboard-snapshot .
 FROM python:3.12-slim
 
+# libatomic1: newer Playwright's bundled Node needs it, and `playwright install
+# --with-deps` runs that Node BEFORE installing system libs (exit 127 without it).
+RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
         playwright pypdf google-api-python-client google-auth \
  && playwright install --with-deps chromium
