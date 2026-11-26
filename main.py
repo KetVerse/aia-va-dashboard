@@ -2047,14 +2047,14 @@ def _load_wa_logs():
     10 digits (same normalisation used elsewhere in this file). See
     _wa_reply_events() for how a genuine reply is identified from the raw log.
     Guarded so a failure just yields an empty frame."""
-    cols = ["message_id", "chat_id", "org_phone", "gm_full_name", "is_outbound", "is_auto", "sent_ist", "body"]
+    cols = ["message_id", "chat_id", "org_phone", "gm_full_name", "is_outbound", "is_auto", "sent_ist", "body", "deal_id"]
     df = pd.DataFrame(columns=cols)
     try:
         df = _q(SUPABASE_URL, r"""
             SELECT l.message_id, l.chat_id, l.org_phone, g.full_name AS gm_full_name,
                    l.is_outbound, l.is_auto,
                    (l.sent_at AT TIME ZONE 'Asia/Kolkata') AS sent_ist,
-                   l.body
+                   l.body, l.deal_id::text AS deal_id
             FROM public.lr_wa_logs l
             LEFT JOIN public.lr_gms g
               ON right(regexp_replace(g.phone,'\D','','g'),10) = right(regexp_replace(l.org_phone,'\D','','g'),10)
@@ -4129,6 +4129,100 @@ def _customer_status(row, upl, syn):
 _FT_HEALTH_DF = None
 _POCGAP_DF = None
 
+# ── Free-trial "Pain Point" = the lead's own answer to the automated WhatsApp question
+# ("where does your team spend the most time in Tally? 1 Bill entries / 2 Bank entries /
+# 3 Books not up to date / 4 Something else — just reply with the number"), read from
+# lr_wa_logs (which carries deal_id). Option 4 gets no follow-up detail from the bot, so
+# it shows as "Something else". The HubSpot deal `pain_point` field is NOT used here.
+_PAIN_LABELS = {1: "Bill entries", 2: "Bank entries", 3: "Books not up to date", 4: "Something else"}
+_PAIN_Q = re.compile(r"just reply with the number|just reply 1, 2 or 3|reply with one of these options", re.I)   # last one = the October wording
+_PAIN_DIGIT = re.compile(r"(?<![\w:.])([1-4])(?![\w:.]|\s*(?:am|pm)\b)", re.I)
+
+def _parse_wa_pain(txt):
+    """Lead's WhatsApp reply -> label ("Bill entries", "Bank entries, Books not up to date",
+    "All of the above", "Something else") or None when it isn't an answer (hi / ok / yes /
+    a time like "5pm")."""
+    t = (txt or "").strip().lower()
+    if not t or len(t) > 80:
+        return None
+    nums = set()
+    if re.fullmatch(r"[1-4]{2,4}", t):
+        nums |= {int(c) for c in t}
+    nums |= {int(x) for x in _PAIN_DIGIT.findall(t)}
+    if re.search(r"\ball\b|everything|all of (?:them|the above)", t):
+        nums |= {1, 2, 3}
+    if re.search(r"typing|\bbills?\b", t):
+        nums.add(1)
+    if re.search(r"\bbank", t):
+        nums.add(2)
+    if re.search(r"\bbooks\b|up to date", t):
+        nums.add(3)
+    if re.search(r"something else|\bother", t):
+        nums.add(4)
+    if not nums:
+        return None
+    if {1, 2, 3} <= nums:
+        return "All of the above"
+    return ", ".join(_PAIN_LABELS[n] for n in sorted(nums))
+
+def _build_ft_pain_map():
+    """(by_deal, by_phone): the lead's first usable reply (within 48h) to the automated 1-4
+    question, keyed by deal_id and by the chat's last-10-digit phone number. The phone map is
+    the fallback for chats logged against a different deal or none. Earliest answer wins."""
+    import bisect
+    w = _WA_LOG
+    out, ph = {}, {}
+    if w is None or len(w) == 0 or "deal_id" not in w.columns:
+        return out, ph
+    qs = w[w["is_outbound"] & w["is_auto"] & w["body"].astype(str).str.contains(_PAIN_Q)].sort_values("sent_ist")
+    if len(qs) == 0:
+        return out, ph
+    chats = set(qs["chat_id"])
+    inb = w[(~w["is_outbound"]) & w["chat_id"].isin(chats)].sort_values("sent_ist")
+    by_chat = {}
+    for ch, g in inb.groupby("chat_id"):
+        by_chat[ch] = (list(g["sent_ist"]), list(g["body"].astype(str)))
+    win = pd.Timedelta(hours=48)
+    for r in qs.itertuples(index=False):
+        if r.chat_id not in by_chat:
+            continue
+        did = "" if pd.isna(r.deal_id) else str(r.deal_id).strip()
+        p10 = re.sub(r"\D", "", str(r.chat_id).replace("@c.us", ""))[-10:]
+        if (not did or did in out) and (len(p10) < 10 or p10 in ph):
+            continue
+        times, bodies = by_chat[r.chat_id]
+        i = bisect.bisect_right(times, r.sent_ist)
+        if i < len(times) and times[i] - r.sent_ist <= win:
+            lab = _parse_wa_pain(bodies[i])
+            if lab:
+                if did and did not in out:
+                    out[did] = lab
+                if len(p10) == 10 and p10 not in ph:
+                    ph[p10] = lab
+    return out, ph
+
+def _since_ft(streak, ftd, dur, today):
+    """Cut the 28-day streak (token index = days before today) down to the trial window:
+    FT start date .. start + min(duration, 7) - 1, and never past today. A running trial shows
+    the days so far; a finished one stays frozen at its full window. Returns
+    (streak string, active-day count). The string starts with "@<offset>|" when the window
+    doesn't end today, so the grid can still label each dot with its real date.
+    If the trial started more than 28 days ago the usage data can't cover its window, so the
+    streak is blank and the count is None (shown as an empty cell)."""
+    if not streak or pd.isna(ftd):
+        return "", None
+    start = pd.Timestamp(ftd).normalize()
+    if start > today:
+        return "", None                                  # trial hasn't started yet
+    n = int(dur) if (pd.notna(dur) and dur > 0) else 7
+    end = min(today, start + pd.Timedelta(days=min(n, 7) - 1))
+    o_hi, o_lo = (today - start).days, (today - end).days
+    if o_hi > 27:
+        return "", None                                  # older than the 28-day usage data
+    toks = streak.split(";")[o_lo:o_hi + 1]
+    active = sum(1 for t in toks if t.split(",")[0] == "1")
+    return (f"@{o_lo}|" if o_lo else "") + ";".join(toks), active
+
 @_single_flight
 def _build_ft_health_df():
     """Free-Trial Customers Usage & Health data (AIA Ops): every AIA deal with a
@@ -4150,6 +4244,7 @@ def _build_ft_health_df():
     _scores = _activity_scores()
     today = pd.Timestamp(date.today()).normalize()
     _ddmy = lambda v: pd.Timestamp(v).strftime("%d-%b-%y") if pd.notna(v) else ""
+    _pain, _pain_ph = _build_ft_pain_map()
     rows = []
     for _, row in base.iterrows():
         email = _clean_email(row.get("login_email_id", ""))
@@ -4157,6 +4252,7 @@ def _build_ft_health_df():
         _acct = _EMAIL_ACCT.get(email)
         activity_score = int(_scores.get(_acct, 0)) if _acct else 0
         ftd = row.get("ft_start_date")
+        _streak_ft, _active_ft = _since_ft(streak, ftd, pd.to_numeric(row.get("ft_duration"), errors="coerce"), today)
         # FT End Date = start + ft_duration days (expiry: 19-Aug + 3 -> 22-Aug, the day
         # the trial lapses). Blank if either input is missing.
         dur = pd.to_numeric(row.get("ft_duration"), errors="coerce")
@@ -4173,10 +4269,16 @@ def _build_ft_health_df():
             # Amber once the trial has ended (end date reached/past). Hidden — drives
             # the FT End Date cell class.
             "__ftendcls": ("cell-orange" if expired else ""),
+            # The 28-day columns stay in this frame (the FT Activated tracker API in
+            # grid_server reads them); the FT grid shows the since-FT-start versions below.
             "Usage Active Days (28d)": active_days,
+            "Usage Active Days (since FT)": _active_ft,
             # Hover on the Active Days cell: 28-day WhatsApp-bot query / upload totals.
             "__botTip": (f"Bot Queries: {bot_q} · Bot Uploads: {bot_u}" if (bot_q or bot_u) else ""),
             "Activity Score": activity_score,
+            "Pain Point": (_pain.get(str(row.get("record_id", "")).strip())
+                           or _pain_ph.get(re.sub(r"\D", "", str(row.get("poc_number") or ""))[-10:], "")),
+            "Usage Streak Since FT Start": _streak_ft,
             "Usage Streak Last 28D (desc)": streak,
         })
     _FT_HEALTH_DF = pd.DataFrame(rows)
@@ -4314,14 +4416,17 @@ def _apply_ft_filter(state):
     d = (d.assign(__k=_k).sort_values("__k", ascending=False, na_position="last")
            .drop(columns="__k").reset_index(drop=True))
     d.insert(0, "Sl no", range(1, len(d) + 1))
+    # Show usage since the FT start date (a trial is 7 days at most), not the 28-day window;
+    # the 28-day columns are only kept in aia_ft_all for the tracker API.
+    d = d.drop(columns=["Usage Active Days (28d)", "Usage Streak Last 28D (desc)"], errors="ignore")
     state.aia_ft_json = grid_payload_b64(
         d, no_sort=True, rownum_col="Sl no",
-        col_w={"Deal Name": 300},
-        streak_cols=["Usage Streak Last 28D (desc)"],
+        col_w={"Deal Name": 300, "Pain Point": 270},
+        streak_cols=["Usage Streak Since FT Start"],
         center_cols=["FT Start Date", "FT End Date"], date_cols=["FT Start Date", "FT End Date"],
-        heat_cols={"Usage Active Days (28d)": "green", "Activity Score": "blue"},
+        heat_cols={"Usage Active Days (since FT)": "green", "Activity Score": "blue"},
         class_cols={"FT End Date": "__ftendcls"},
-        tip_cols={"Usage Active Days (28d)": "__botTip"},
+        tip_cols={"Usage Active Days (since FT)": "__botTip"},
         link_cols={"Deal Name": ("record_id", "https://app-na2.hubspot.com/contacts/39668252/record/0-3/")})
 
 
@@ -7113,7 +7218,8 @@ cs_usage_tip = ("• Hover a dot for that day's event counts.\n"
                 "Monthly: ≤20 / 21–27 / >27")
 aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "• FT End Date is orange if duration is completed\n"
-              "• Active Days / Activity Score / streak = same 28-day measures as CS Usage & Health\n"
+              "• Usage Active Days and the streak cover only the trial window: FT start date up to the FT end (7 days at most), and up to today while the trial is running. Blank when the trial started more than 28 days ago. Activity Score is still the 28-day measure\n"
+              "• Pain Point = the lead's own answer to the automated WhatsApp question (Bill entries / Bank entries / Books not up to date / Something else). Blank = no answer yet\n"
               "🟢 Accounting Sync / Recon processed\n"
               "🔵 Login / Dashboard-viewed\n"
               "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"

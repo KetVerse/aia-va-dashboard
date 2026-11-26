@@ -527,6 +527,8 @@ _GRID_HTML = r"""<!DOCTYPE html>
     color:#1e293b; cursor:pointer; white-space:nowrap; }
   #cfpop .cfi:hover{ background:#f1f5f9; }
   #cfpop .cfi input{ width:auto; margin:0; accent-color:#1a7fc4; }
+  #cfpop .cfq{ display:flex; gap:14px; margin-top:8px; }
+  #cfpop .cfq a{ color:#1a7fc4; cursor:pointer; font-size:12px; text-decoration:underline; }
   #cfpop .cfb{ margin-top:8px; text-align:right; }
   #cfpop .cfb a{ color:#1a7fc4; cursor:pointer; font-size:11px; text-decoration:underline; }
 </style></head>
@@ -587,7 +589,7 @@ function header(){
 const CF = {};                 // column name -> {txt, gt, lt, from, to}  ("" = unset)
 let CFOPEN = null;             // column index whose popup is open
 function isSnap(){ try{ return !!(window.parent && window.parent.__SNAPSHOT__); }catch(e){ return false; } }
-function cfOn(f){ return !!f && !!((f.sel && f.sel.length) || f.gt || f.lt || f.from || f.to); }
+function cfOn(f){ return !!f && !!((f.sel && f.sel.length) || f.gt || f.lt || f.from || f.to || f.blank); }
 function isTotRow(r){ return !!DATA.inlineTotal && (r[0]==null?'':String(r[0]).trim()).indexOf("Total")===0; }
 function cfKind(i){
   if((DATA.hidden||[])[i] || (DATA.streak||[])[i] || i===DATA.rowNumCol) return "";
@@ -625,13 +627,22 @@ function cfApply(rows){
       if(k==="str"){
         if(!a[3].has(String(v==null?"":v))) return false;
       } else if(k==="num"){
-        const n=numOf(v);
-        if(f.gt!=="" && f.gt!=null && !(n!==null && n>parseFloat(f.gt))) return false;
-        if(f.lt!=="" && f.lt!=null && !(n!==null && n<parseFloat(f.lt))) return false;
+        // "(Blank)" ticked = include blank cells too; with no range set it means blanks only
+        const n=numOf(v), hasR=(f.gt!==""&&f.gt!=null)||(f.lt!==""&&f.lt!=null);
+        if(n===null){ if(!f.blank) return false; }
+        else {
+          if(f.blank && !hasR) return false;
+          if(f.gt!=="" && f.gt!=null && !(n>parseFloat(f.gt))) return false;
+          if(f.lt!=="" && f.lt!=null && !(n<parseFloat(f.lt))) return false;
+        }
       } else {
-        const t=parseDMY(v), lo=cfTs(f.from), hi=cfTs(f.to);
-        if(lo!==null && !(t!==null && t>=lo)) return false;
-        if(hi!==null && !(t!==null && t<=hi)) return false;
+        const t=parseDMY(v), lo=cfTs(f.from), hi=cfTs(f.to), hasR=(lo!==null||hi!==null);
+        if(t===null){ if(!f.blank) return false; }
+        else {
+          if(f.blank && !hasR) return false;
+          if(lo!==null && !(t>=lo)) return false;
+          if(hi!==null && !(t<=hi)) return false;
+        }
       }
     }
     return true;
@@ -672,7 +683,9 @@ function cfOpen(i, anchor){
   if(k==="num") h+='<label>Greater than</label><input id="cf1" type="number" step="any" value="'+esc(f.gt)+'">'
                        +'<label>Less than</label><input id="cf2" type="number" step="any" value="'+esc(f.lt)+'">';
   else               h+='<label>From</label><input id="cf1" type="date" value="'+esc(f.from)+'">'
-                       +'<label>To</label><input id="cf2" type="date" value="'+esc(f.to)+'">';
+                       +'<label>To</label><input id="cf2" type="date" value="'+esc(f.to)+'">'
+                       +'<div class="cfq"><a data-q="0">Today</a><a data-q="6">Last 7 days</a></div>';
+  h+='<label class="cfi" style="margin-top:6px"><input type="checkbox" id="cfblank"'+(f.blank?' checked':'')+'> (Blank)</label>';
   }
   h+='<div class="cfb"><a id="cfclr">Clear</a></div>';
   p.innerHTML=h; p.style.display="block"; CFOPEN=i;
@@ -693,11 +706,18 @@ function cfOpen(i, anchor){
   } else {
     const set=()=>{
       const a=document.getElementById("cf1"), b=document.getElementById("cf2");
-      const n={sel:[],gt:"",lt:"",from:"",to:""};
+      const n={sel:[],gt:"",lt:"",from:"",to:"",blank:document.getElementById("cfblank").checked};
       if(k==="num"){ n.gt=a.value; n.lt=b.value; } else { n.from=a.value; n.to=b.value; }
       apply(n);
     };
-    p.querySelectorAll("input").forEach(el=>el.oninput=set);
+    p.querySelectorAll("input").forEach(el=>{ el.oninput=set; el.onchange=set; });
+    // date quick buttons: Today / Last 7 days (today and the 6 days before it)
+    p.querySelectorAll(".cfq a").forEach(a=>a.onclick=()=>{
+      const d=new Date(); d.setHours(0,0,0,0);
+      const iso=x=>x.getFullYear()+"-"+String(x.getMonth()+1).padStart(2,"0")+"-"+String(x.getDate()).padStart(2,"0");
+      const to=iso(d); d.setDate(d.getDate()-(+a.dataset.q));
+      document.getElementById("cf1").value=iso(d); document.getElementById("cf2").value=to; set();
+    });
   }
   document.getElementById("cfclr").onclick=()=>{ delete CF[c]; render(); cfOpen(i, document.querySelector('.cf[data-i="'+i+'"]')||anchor); };
   const r=anchor.getBoundingClientRect();
@@ -811,7 +831,12 @@ function streakHtml(s){
   // s = 28 ';'-joined tokens "on,bill,syncs,items,views", index 0 = today .. 27 = today-27d.
   // A custom DOM tooltip (see the streaktip IIFE) reads the data-* attributes —
   // we don't use the native title= so the tooltip survives PrintScreen / Win+Shift+S.
-  const days=(s||"").split(";");
+  // Optional "@<n>|" prefix = the first token is n days before today (a trimmed window that
+  // doesn't end today, e.g. a finished free trial); it keeps each dot's date label correct.
+  s=s||""; let off0=0;
+  if(s.charAt(0)==="@"){ const k=s.indexOf("|"); off0=parseInt(s.slice(1,k),10)||0; s=s.slice(k+1); }
+  if(!s) return "";                           // no usage data for this window -> empty cell, not a stray dot
+  const days=s.split(";");
   let h='<span class="streak">', copytxt='';
   for(let i=0;i<days.length;i++){
     const p=(days[i]||"").split(",");
@@ -822,7 +847,7 @@ function streakHtml(s){
     const b=(+(p[12]||0))>0||(+(p[4]||0))>0;    // login / dashboard only -> BLUE (not real usage)
     const cls = g?"sync":(a?"on":(b?"seen":"off"));
     copytxt += (g||a) ? "●" : (b ? "◐" : "○");   // ● real usage · ◐ login-only · ○ none
-    h+='<span class="dot '+cls+'" data-i="'+i+'" data-on="'+(on?1:0)
+    h+='<span class="dot '+cls+'" data-i="'+(i+off0)+'" data-on="'+(on?1:0)
       +'" data-up="'+(p[1]||0)+'" data-syncs="'+(p[2]||0)+'" data-items="'+(p[3]||0)
       +'" data-views="'+(p[4]||0)+'" data-txns="'+(p[5]||0)+'" data-entities="'+(p[6]||0)
       +'" data-recon="'+(p[7]||0)+'" data-vmr="'+(p[8]||0)+'" data-mapping="'+(p[9]||0)

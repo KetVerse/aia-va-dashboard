@@ -54,7 +54,8 @@ GRID_FILTERS = {
     # date_eq keeps only rows whose date equals YESTERDAY (the daily-snapshot day);
     # the date cell must be a "dd-MMM-yy" string. The values entry is ignored.
     "cs_usage":     ("Usage Active Days (28d)", "drop", ["0"]),
-    "aia_ft":       ("Usage Active Days (28d)", "drop", ["0"]),   # Free Trial Usage & Health
+    # "" too: trials that started >28 days ago have a blank count (no usage data for their window)
+    "aia_ft":       ("Usage Active Days (since FT)", "drop", ["0", ""]),   # Free Trial Usage & Health
     "vaf_tat":      ("TAT Status",              "drop", ["Parked", "Churned"]),
     "vaf_ar":       ("Due Status",              "drop", ["Churned"]),
     # Unmapped Deals & Signups: keep a row only if its Sign Up Date OR Integration
