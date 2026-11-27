@@ -843,8 +843,8 @@ function streakHtml(s){
     const on=p[0]==="1";                       // active: ANY event that day (incl. login)
     const g=(+(p[2]||0))>0||(+(p[7]||0))>0;    // accounting sync OR recon -> GREEN
     const a=(+(p[1]||0))>0||(+(p[5]||0))>0||(+(p[6]||0))>0||(+(p[8]||0))>0||(+(p[9]||0))>0
-          ||(+(p[10]||0))>0||(+(p[11]||0))>0||(+(p[13]||0))>0||(+(p[18]||0))>0||(+(p[19]||0))>0;   // work -> AMBER
-    const b=(+(p[12]||0))>0||(+(p[4]||0))>0;    // login / dashboard only -> BLUE (not real usage)
+          ||(+(p[10]||0))>0||(+(p[11]||0))>0||(+(p[13]||0))>0||(+(p[19]||0))>0;   // work -> AMBER (bot upload counts; bot query does not)
+    const b=(+(p[12]||0))>0||(+(p[4]||0))>0||(+(p[18]||0))>0;    // login / dashboard / bot query only -> BLUE (not real usage)
     const cls = g?"sync":(a?"on":(b?"seen":"off"));
     copytxt += (g||a) ? "●" : (b ? "◐" : "○");   // ● real usage · ◐ login-only · ○ none
     h+='<span class="dot '+cls+'" data-i="'+(i+off0)+'" data-on="'+(on?1:0)

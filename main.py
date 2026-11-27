@@ -910,7 +910,7 @@ def _real_usage_days_from_streak(streak):
         green = gi(2) > 0 or gi(7) > 0                                  # syncs, recon
         amber = (gi(1) > 0 or gi(5) > 0 or gi(6) > 0 or gi(8) > 0        # uploads, txns, entities, vmr
                  or gi(9) > 0 or gi(10) > 0 or gi(11) > 0 or gi(13) > 0  # mapping, invoices, deletes, txnstatus
-                 or gi(18) > 0 or gi(19) > 0)                           # bot query, bot upload
+                 or gi(19) > 0)                                         # bot upload (bot query does NOT count)
         if green or amber:
             n += 1
     return n
@@ -3454,7 +3454,7 @@ _ACCT_DATES = _build_acct_dates()
 # transactions, invoices, entities, mapping, vendor-mismatch, deletes, WhatsApp bot
 # query / upload). EXCLUDES BLUE (Login, Dashboard Viewed): a login-only day is NOT
 # real usage. Drives the V3 status only; the streak / active-days counters are unchanged.
-_NON_USAGE_EVENTS = {"Login", "Dashboard Viewed"}
+_NON_USAGE_EVENTS = {"Login", "Dashboard Viewed", "Bot Query"}
 def _build_real_dates():
     """account_id -> set of dates with any real-usage event (green+amber, blue excluded).
     Upload/sync from _ACCT_DATES; all other events (incl. Bot Query/Upload) from _ACT_EVENTS."""
@@ -4276,10 +4276,10 @@ def _build_ft_health_df():
             # Hover on the Active Days cell: 28-day WhatsApp-bot query / upload totals.
             "__botTip": (f"Bot Queries: {bot_q} · Bot Uploads: {bot_u}" if (bot_q or bot_u) else ""),
             "Activity Score": activity_score,
-            "Pain Point": (_pain.get(str(row.get("record_id", "")).strip())
-                           or _pain_ph.get(re.sub(r"\D", "", str(row.get("poc_number") or ""))[-10:], "")),
             "Usage Streak Since FT Start": _streak_ft,
             "Usage Streak Last 28D (desc)": streak,
+            "Pain Point": (_pain.get(str(row.get("record_id", "")).strip())
+                           or _pain_ph.get(re.sub(r"\D", "", str(row.get("poc_number") or ""))[-10:], "")),
         })
     _FT_HEALTH_DF = pd.DataFrame(rows)
     return _FT_HEALTH_DF
@@ -7208,8 +7208,8 @@ cs_ret_tip = ("Customer Retention Matrix\n"
 cs_usage_tip = ("• Hover a dot for that day's event counts.\n"
                 "• Usage Active Days (28d) = number of active days; grey days are not active.\n"
                 "🟢 Accounting Sync / Recon processed\n"
-                "🔵 Login / Dashboard-viewed → excluded from status\n"
-                "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
+                "🔵 Login / Dashboard-viewed / WA bot query → excluded from status\n"
+                "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot upload)\n"
                 "⚪ No event that day\n"
                 "Status = days since last real usage — Active / Risk / Inactive:\n"
                 "Daily: ≤4 / 5–10 / >10\n"
@@ -7221,8 +7221,8 @@ aia_ft_tip = ("• Every AIA Unpaid deals with a known FT start date\n"
               "• Usage Active Days and the streak cover only the trial window: FT start date up to the FT end (7 days at most), and up to today while the trial is running. Blank when the trial started more than 28 days ago. Activity Score is still the 28-day measure\n"
               "• Pain Point = the lead's own answer to the automated WhatsApp question (Bill entries / Bank entries / Books not up to date / Something else). Blank = no answer yet\n"
               "🟢 Accounting Sync / Recon processed\n"
-              "🔵 Login / Dashboard-viewed\n"
-              "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot query/upload)\n"
+              "🔵 Login / Dashboard-viewed / WA bot query\n"
+              "🟡 Any other real-work event (uploads, txns, invoices, entities, mapping, vendor-mismatch, deletes, WA bot upload)\n"
               "⚪ No event that day")
 aia_pocgap_tip = ("Deals with a wrong/blank Login Email, plus signups with no referencing deal.\n"
                   "Uses the FT filters.")

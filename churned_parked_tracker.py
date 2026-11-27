@@ -63,8 +63,8 @@ def streak_richtext(streak):
         gi = lambda idx: int(p[idx]) if idx < len(p) and p[idx] else 0
         green = gi(2) > 0 or gi(7) > 0
         amber = (gi(1) > 0 or gi(5) > 0 or gi(6) > 0 or gi(8) > 0 or gi(9) > 0 or
-                 gi(10) > 0 or gi(11) > 0 or gi(13) > 0 or gi(18) > 0 or gi(19) > 0)
-        blue = gi(12) > 0 or gi(4) > 0
+                 gi(10) > 0 or gi(11) > 0 or gi(13) > 0 or gi(19) > 0)
+        blue = gi(12) > 0 or gi(4) > 0 or gi(18) > 0
         color = GREEN if green else (AMBER if amber else (BLUE if blue else GREY))
         # Trailing space lives INSIDE the same colored run as the dot, not as
         # its own run -- a run whose <t> is pure whitespace needs an explicit
