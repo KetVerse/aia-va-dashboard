@@ -4215,7 +4215,7 @@ def _since_ft(streak, ftd, dur, today):
     if start > today:
         return "", None                                  # trial hasn't started yet
     n = int(dur) if (pd.notna(dur) and dur > 0) else 7
-    end = min(today, start + pd.Timedelta(days=min(n, 7) - 1))
+    end = min(today, start + pd.Timedelta(days=min(n, 7)))     # through the FT End Date (start + duration)
     o_hi, o_lo = (today - start).days, (today - end).days
     if o_hi > 27:
         return "", None                                  # older than the 28-day usage data
